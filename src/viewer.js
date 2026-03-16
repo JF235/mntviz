@@ -8,6 +8,8 @@
  *   v.svgLayer; // SVG element for renderers
  */
 
+import { MinutiaeInspector } from './minutiae-inspector.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 export class Viewer {
@@ -26,6 +28,7 @@ export class Viewer {
         this._options = { minimap: true, ...options };
         this._view = { scale: 1, translateX: 0, translateY: 0, isDragging: false, lastX: 0, lastY: 0 };
         this._abortController = new AbortController();
+        this._minutiaeInspector = null;
 
         this._buildDOM();
         this._bindEvents();
@@ -97,9 +100,34 @@ export class Viewer {
 
     /** Remove all event listeners and DOM created by this viewer. */
     destroy() {
+        this.disableMinutiaeInspector();
         this._abortController.abort();
         if (this._resizeObserver) this._resizeObserver.disconnect();
         this._el.innerHTML = '';
+    }
+
+    /**
+     * Enable native minutiae interaction (hover info + click patch) on this viewer.
+     * @param {object} [options] - MinutiaeInspector options.
+     * @returns {import('./minutiae-inspector.js').MinutiaeInspector}
+     */
+    enableMinutiaeInspector(options = {}) {
+        if (this._minutiaeInspector) {
+            this._minutiaeInspector.setOptions(options);
+            this._minutiaeInspector.enable();
+            return this._minutiaeInspector;
+        }
+
+        this._minutiaeInspector = new MinutiaeInspector(this, options);
+        this._minutiaeInspector.enable();
+        return this._minutiaeInspector;
+    }
+
+    /** Disable and detach the native minutiae inspector, if active. */
+    disableMinutiaeInspector() {
+        if (!this._minutiaeInspector) return;
+        this._minutiaeInspector.destroy();
+        this._minutiaeInspector = null;
     }
 
     /* ── DOM construction ───────────────────────────────────── */

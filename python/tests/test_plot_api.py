@@ -21,14 +21,33 @@ def test_plot_html_minimal():
     data = np.array([[10, 20, 45, 80]], dtype=float)
     html = plot_mnt(data, output_format="html")
     assert "<!doctype html>" in html.lower()
-    assert "viewport" in html
+    assert "mntviz-runtime-host" in html
+    assert "enableMinutiaeInspector" in html
 
 
 def test_plot_jupyter_returns_displayable():
     data = np.array([[10, 20, 45, 80]], dtype=float)
     fig = plot_mnt(data, output_format="jupyter")
     assert isinstance(fig, MntVizFigure)
-    assert fig._repr_html_().startswith("<!doctype html>")
+    html_inline = fig._repr_html_().lower()
+    assert "<!doctype html>" not in html_inline
+    assert "<html" not in html_inline
+    assert "data-mntviz-runtime-host" in html_inline
+    assert "enableminutiaeinspector" in html_inline
+
+
+def test_plot_jupyter_exposes_standalone_html():
+    data = np.array([[10, 20, 45, 80]], dtype=float)
+    fig = plot_mnt(data, output_format="jupyter")
+    assert "<!doctype html>" in fig.to_html(standalone=True).lower()
+
+
+def test_plot_jupyter_mimebundle_prefers_html_only():
+    data = np.array([[10, 20, 45, 80]], dtype=float)
+    fig = plot_mnt(data, output_format="jupyter")
+    bundle = fig._repr_mimebundle_()
+    assert "text/html" in bundle
+    assert "image/svg+xml" not in bundle
 
 
 def test_invalid_output_format_raises():

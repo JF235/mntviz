@@ -1,44 +1,38 @@
-# mntviz Python wrapper
+# mntviz Python Wrapper
 
-Python wrapper for minutiae visualization with a simple API:
+Thin Python wrapper for rendering/exporting minutiae visualizations.
 
-```python
-from mntviz import plot_mnt
+- Outputs: `svg`, `html`, `jupyter`
+- Preferred inputs: `.min` file path or `numpy.ndarray` (`x, y, angle, [quality]`)
+- Advanced interaction logic belongs to the JavaScript runtime (`src/`)
 
-fig = plot_mnt(minutiae, background_img=background_img, output_format="jupyter")
-fig  # inline in Jupyter
-```
-
-Preferred `minutiae` inputs:
-
-- `.min` file path
-- `numpy.ndarray` with columns `x, y, angle, [quality]`
-
-Dictionary rows are still accepted for compatibility but deprecated.
-
-Example conversion:
-
-```python
-from mntviz import minutiae_from_min, plot_mnt
-
-arr = minutiae_from_min("examples/sd258/000/minutiae/sd258_000_11-00_latent_bad.min")
-html = plot_mnt(arr, output_format="html")
-```
-
-## Output formats
-
-- `svg`: returns SVG text.
-- `html`: returns standalone HTML text (interactive pan/zoom).
-- `jupyter`: returns a displayable object with `_repr_html_`.
-
-## Install locally
+## Install
 
 ```bash
 cd python
 pip install -e .
 ```
 
-## Notebook example
+## Usage
 
-- `notebooks/mntviz_sd258_example.ipynb`
-- Generates preview assets in `docs/assets/` for README usage.
+```python
+from mntviz import minutiae_from_min, plot_mnt
+
+arr = minutiae_from_min("../examples/sd258/000/minutiae/sd258_000_11-00_latent_bad.min")
+
+# SVG string
+svg = plot_mnt(arr, output_format="svg")
+
+# Standalone HTML string
+html = plot_mnt(arr, output_format="html", title="Minutiae")
+
+# Jupyter inline object
+fig = plot_mnt(arr, output_format="jupyter")
+fig
+```
+
+### Notes
+
+- Dictionary-based rows are still accepted but deprecated.
+- For full JS-side interaction details, see [../USAGE.md](../USAGE.md).
+- Notebook example: `notebooks/mntviz_sd258_example.ipynb`.
