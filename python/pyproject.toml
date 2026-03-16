@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mntviz"
+version = "0.1.0"
+description = "Fingerprint minutiae plotting for Python (SVG/HTML/Jupyter)."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "mntviz contributors" }
+]
+dependencies = [
+  "Pillow>=10.0.0",
+  "numpy>=1.24.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

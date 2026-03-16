@@ -1,0 +1,27 @@
+figma_demo/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+Thumbs.db
