@@ -401,6 +401,24 @@ def _load_mntviz_runtime_assets() -> tuple[str, str, str, str] | None:
     return viewer_js, renderer_js, inspector_js, css
 
 
+def _load_match_runtime_assets() -> tuple[str, str, str, str, str] | None:
+    repo_root = _find_mntviz_repo_root()
+    if repo_root is None:
+        return None
+
+    src_dir = repo_root / "src"
+    match_viewer_path = src_dir / "match-viewer.js"
+    if not match_viewer_path.exists():
+        return None
+
+    viewer_js = (src_dir / "viewer.js").read_text(encoding="utf-8")
+    renderer_js = (src_dir / "minutiae-renderer.js").read_text(encoding="utf-8")
+    inspector_js = (src_dir / "minutiae-inspector.js").read_text(encoding="utf-8")
+    match_viewer_js = match_viewer_path.read_text(encoding="utf-8")
+    css = (src_dir / "mntviz.css").read_text(encoding="utf-8")
+    return viewer_js, renderer_js, inspector_js, match_viewer_js, css
+
+
 def _build_blank_background_data_uri(width: int, height: int) -> str:
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
@@ -777,3 +795,392 @@ def plot_mnt(
     if fmt == "html":
         return html
     return MntVizFigure(svg=svg, html_inline=html_inline, html_standalone=html)
+
+
+# ── Match viewer ──────────────────────────────────────────
+
+
+def _build_match_js_runtime_fragment(
+    *,
+    match_data_json: str,
+    left_image_src: str,
+    right_image_src: str,
+    renderer_options_json: str,
+    marker_color_json: str,
+    left_title_json: str,
+    right_title_json: str,
+    show_segments_json: str,
+    root_id: str,
+    css: str,
+    viewer_js: str,
+    renderer_js: str,
+    inspector_js: str,
+    match_viewer_js: str,
+) -> str:
+    template = Template(
+        """
+<style>
+$mntviz_css
+
+    #$root_id {
+        width: min(95vw, 1200px);
+        height: min(80vh, 760px);
+        max-height: 760px;
+        min-height: 380px;
+        background: linear-gradient(165deg, rgba(17,24,39,0.95), rgba(2,6,23,0.95));
+        border-radius: 14px;
+        overflow: hidden;
+        position: relative;
+        margin: 8px 0;
+    }
+
+    #$root_id .mntviz-match-runtime-host {
+        position: absolute;
+        inset: 0;
+    }
+</style>
+
+<section id="$root_id" class="mntviz-jupyter">
+    <div class="mntviz-match-runtime-host" data-mntviz-match-host></div>
+</section>
+
+<script type="module">
+    (() => {
+        const root = document.getElementById('$root_id');
+        if (!root) return;
+        const host = root.querySelector('[data-mntviz-match-host]');
+        if (!host) return;
+
+        const matchData = $match_data_json;
+        const leftImageSrc = $left_image_src_json;
+        const rightImageSrc = $right_image_src_json;
+        const markerColor = $marker_color_json;
+        const rendererOptions = $renderer_options_json;
+        const leftTitle = $left_title_json;
+        const rightTitle = $right_title_json;
+        const showSegments = $show_segments_json;
+
+        const rendererSource = $renderer_js_json;
+        const inspectorSourceTemplate = $inspector_js_json;
+        const viewerSourceTemplate = $viewer_js_json;
+        const matchViewerSourceTemplate = $match_viewer_js_json;
+
+        const makeModuleUrl = (source) => {
+            const blob = new Blob([source], { type: 'text/javascript' });
+            return URL.createObjectURL(blob);
+        };
+
+        const rendererUrl = makeModuleUrl(rendererSource);
+        const inspectorSource = inspectorSourceTemplate.replace(
+            "from './minutiae-renderer.js';", "from '" + rendererUrl + "';"
+        );
+        const inspectorUrl = makeModuleUrl(inspectorSource);
+        const viewerSource = viewerSourceTemplate.replace(
+            "from './minutiae-inspector.js';", "from '" + inspectorUrl + "';"
+        );
+        const viewerUrl = makeModuleUrl(viewerSource);
+
+        let matchViewerSource = matchViewerSourceTemplate.replace(
+            "from './viewer.js';", "from '" + viewerUrl + "';"
+        );
+        matchViewerSource = matchViewerSource.replace(
+            "from './minutiae-renderer.js';", "from '" + rendererUrl + "';"
+        );
+        const matchViewerUrl = makeModuleUrl(matchViewerSource);
+
+        import(matchViewerUrl)
+            .then(async (mod) => {
+                const { MatchViewer } = mod;
+
+                const mv = new MatchViewer(host, {
+                    leftMinutiae: matchData.leftMinutiae,
+                    rightMinutiae: matchData.rightMinutiae,
+                    pairs: matchData.pairs,
+                    leftTitle: leftTitle,
+                    rightTitle: rightTitle,
+                    markerColor: markerColor,
+                    rendererOptions: rendererOptions,
+                    showSegmentsOnLoad: showSegments,
+                });
+                await mv.loadImages(leftImageSrc, rightImageSrc);
+            })
+            .catch((err) => {
+                console.error('mntviz match-viewer bootstrap failed', err);
+            })
+            .finally(() => {
+                URL.revokeObjectURL(matchViewerUrl);
+                URL.revokeObjectURL(viewerUrl);
+                URL.revokeObjectURL(inspectorUrl);
+                URL.revokeObjectURL(rendererUrl);
+            });
+    })();
+</script>
+"""
+    )
+
+    return template.substitute(
+        root_id=root_id,
+        mntviz_css=css,
+        match_data_json=match_data_json,
+        left_image_src_json=json.dumps(left_image_src),
+        right_image_src_json=json.dumps(right_image_src),
+        marker_color_json=marker_color_json,
+        renderer_options_json=renderer_options_json,
+        left_title_json=left_title_json,
+        right_title_json=right_title_json,
+        show_segments_json=show_segments_json,
+        renderer_js_json=json.dumps(renderer_js),
+        inspector_js_json=json.dumps(inspector_js),
+        viewer_js_json=json.dumps(viewer_js),
+        match_viewer_js_json=json.dumps(match_viewer_js),
+    )
+
+
+def plot_mnt_match(
+    *,
+    left_minutiae: Any,
+    right_minutiae: Any,
+    pairs: np.ndarray | Sequence | None = None,
+    left_background_img: str | Path | None = None,
+    right_background_img: str | Path | None = None,
+    output_format: str = "html",
+    output_path: str | Path | None = None,
+    # Marker visuals
+    marker_size: float = 3.0,
+    segment_length: float = 8.0,
+    line_width: float = 1.2,
+    base_opacity: float = 1.0,
+    quality_alpha: bool = False,
+    marker_shape: str = "circle",
+    # Pair coloring
+    color: str = "#00ff00",
+    colormap: str | None = None,
+    colormap_values: Sequence[float] | np.ndarray | None = None,
+    unpaired_color: str = "#555555",
+    unpaired_opacity: float = 0.3,
+    # Match segment styling
+    match_line_colormap: str | None = None,
+    match_line_colormap_values: Sequence[float] | np.ndarray | None = None,
+    match_line_alpha: float | Sequence[float] = 0.6,
+    match_line_width: float | Sequence[float] = 1.0,
+    show_segments: bool = False,
+    # Titles
+    left_title: str | None = None,
+    right_title: str | None = None,
+    title: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> str | MntVizFigure:
+    """Render a side-by-side match viewer with connecting segments and dual-patch popups."""
+
+    fmt = output_format.lower().strip()
+    if fmt not in {"svg", "html", "jupyter"}:
+        raise ValueError("output_format must be one of: svg, html, jupyter")
+
+    if marker_shape not in VALID_MARKER_SHAPES:
+        raise ValueError(f"marker_shape must be one of {VALID_MARKER_SHAPES}, got {marker_shape!r}")
+
+    if (colormap is None) != (colormap_values is None):
+        raise ValueError("colormap and colormap_values must both be provided or both be None")
+
+    if (match_line_colormap is None) != (match_line_colormap_values is None):
+        raise ValueError("match_line_colormap and match_line_colormap_values must both be provided or both be None")
+
+    # Load minutiae
+    left_records = load_minutiae(left_minutiae)
+    right_records = load_minutiae(right_minutiae)
+
+    # Resolve pairs
+    if pairs is None:
+        # Simple 1-to-1 mode
+        if len(left_records) != len(right_records):
+            raise ValueError(
+                f"When pairs is None, left and right minutiae must have equal length "
+                f"(got {len(left_records)} and {len(right_records)}). "
+                f"Provide an explicit pairs array for unequal lengths."
+            )
+        pairs_array = np.column_stack([np.arange(len(left_records)), np.arange(len(right_records))])
+    else:
+        pairs_array = np.asarray(pairs, dtype=int)
+        if pairs_array.ndim != 2 or pairs_array.shape[1] != 2:
+            raise ValueError("pairs must be a (K, 2) array of integer indices")
+
+    n_pairs = len(pairs_array)
+
+    # Resolve pair colors
+    if colormap is not None:
+        pair_colors = _resolve_colormap(colormap, colormap_values, n_pairs)
+    else:
+        pair_colors = [color] * n_pairs
+
+    # Resolve segment colors
+    if match_line_colormap is not None:
+        segment_colors = _resolve_colormap(match_line_colormap, match_line_colormap_values, n_pairs)
+    else:
+        segment_colors = pair_colors
+
+    # Resolve per-pair alpha and width (scalar or array)
+    if isinstance(match_line_alpha, (int, float)):
+        segment_alphas = [float(match_line_alpha)] * n_pairs
+    else:
+        segment_alphas = [float(a) for a in match_line_alpha]
+        if len(segment_alphas) != n_pairs:
+            raise ValueError(f"match_line_alpha length ({len(segment_alphas)}) must match pairs count ({n_pairs})")
+
+    if isinstance(match_line_width, (int, float)):
+        segment_widths = [float(match_line_width)] * n_pairs
+    else:
+        segment_widths = [float(w) for w in match_line_width]
+        if len(segment_widths) != n_pairs:
+            raise ValueError(f"match_line_width length ({len(segment_widths)}) must match pairs count ({n_pairs})")
+
+    # Assign _color and _pairIndex to minutiae
+    left_paired_indices = set()
+    right_paired_indices = set()
+
+    for k, (li, ri) in enumerate(pairs_array):
+        left_records[li]["_color"] = pair_colors[k]
+        left_records[li]["_pairIndex"] = k
+        right_records[ri]["_color"] = pair_colors[k]
+        right_records[ri]["_pairIndex"] = k
+        left_paired_indices.add(int(li))
+        right_paired_indices.add(int(ri))
+
+    # Unpaired minutiae
+    for i, rec in enumerate(left_records):
+        if i not in left_paired_indices:
+            rec["_color"] = unpaired_color
+            rec["_pairIndex"] = -1
+            rec["_unpaired"] = True
+    for i, rec in enumerate(right_records):
+        if i not in right_paired_indices:
+            rec["_color"] = unpaired_color
+            rec["_pairIndex"] = -1
+            rec["_unpaired"] = True
+
+    # Build match data JSON
+    pairs_data = []
+    for k in range(n_pairs):
+        pairs_data.append({
+            "leftIdx": int(pairs_array[k, 0]),
+            "rightIdx": int(pairs_array[k, 1]),
+            "color": segment_colors[k],
+            "alpha": segment_alphas[k],
+            "width": segment_widths[k],
+        })
+
+    match_data = {
+        "leftMinutiae": left_records,
+        "rightMinutiae": right_records,
+        "pairs": pairs_data,
+    }
+
+    # Background images
+    left_uri, left_w, left_h = _image_to_data_uri(left_background_img)
+    right_uri, right_w, right_h = _image_to_data_uri(right_background_img)
+
+    lw = width or left_w or 500
+    lh = height or left_h or 500
+    rw = width or right_w or 500
+    rh = height or right_h or 500
+
+    left_src = left_uri or _build_blank_background_data_uri(int(lw), int(lh))
+    right_src = right_uri or _build_blank_background_data_uri(int(rw), int(rh))
+
+    renderer_options = {
+        "markerSize": marker_size,
+        "segmentLength": segment_length,
+        "lineWidth": line_width,
+        "baseOpacity": base_opacity,
+        "qualityAlpha": quality_alpha,
+        "markerShape": marker_shape,
+    }
+
+    fallback_color = pair_colors[0] if pair_colors else color
+
+    # Try JS runtime
+    assets = _load_match_runtime_assets()
+    if assets is not None:
+        viewer_js, renderer_js, inspector_js, match_viewer_js, css = assets
+        root_id = f"mntviz-match-{uuid4().hex}"
+
+        html_inline = _build_match_js_runtime_fragment(
+            match_data_json=json.dumps(match_data),
+            left_image_src=left_src,
+            right_image_src=right_src,
+            renderer_options_json=json.dumps(renderer_options),
+            marker_color_json=json.dumps(fallback_color),
+            left_title_json=json.dumps(left_title),
+            right_title_json=json.dumps(right_title),
+            show_segments_json=json.dumps(show_segments),
+            root_id=root_id,
+            css=css,
+            viewer_js=viewer_js,
+            renderer_js=renderer_js,
+            inspector_js=inspector_js,
+            match_viewer_js=match_viewer_js,
+        )
+
+        page_title = escape(title or "mntviz match")
+        html_standalone = f"""<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{page_title}</title>
+    <style>
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background:
+                radial-gradient(circle at 20% 10%, rgba(34,197,94,0.2), transparent 35%),
+                radial-gradient(circle at 80% 90%, rgba(56,189,248,0.15), transparent 35%),
+                #0f172a;
+            padding: 16px;
+        }}
+    </style>
+</head>
+<body>{html_inline}
+</body>
+</html>
+"""
+    else:
+        # Fallback: static side-by-side SVGs
+        left_layers = [(left_records, [r.get("_color", color) for r in left_records], marker_shape)]
+        right_layers = [(right_records, [r.get("_color", color) for r in right_records], marker_shape)]
+
+        left_svg = _build_svg(
+            left_layers, background_uri=left_uri,
+            width=int(lw), height=int(lh),
+            marker_size=marker_size, segment_length=segment_length,
+            line_width=line_width, base_opacity=base_opacity,
+            quality_alpha=quality_alpha, marker_shape=marker_shape,
+            show_quality=False, show_angles=False,
+        )
+        right_svg = _build_svg(
+            right_layers, background_uri=right_uri,
+            width=int(rw), height=int(rh),
+            marker_size=marker_size, segment_length=segment_length,
+            line_width=line_width, base_opacity=base_opacity,
+            quality_alpha=quality_alpha, marker_shape=marker_shape,
+            show_quality=False, show_angles=False,
+        )
+
+        html_inline = f'<div style="display:flex;gap:8px">{left_svg}{right_svg}</div>'
+        html_standalone = f"<!doctype html><html><body>{html_inline}</body></html>"
+
+    # SVG output is the left SVG only (limited for match mode)
+    svg_out = html_inline
+
+    if output_path is not None:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(html_standalone, encoding="utf-8")
+
+    if fmt == "svg":
+        return html_inline
+    if fmt == "html":
+        return html_standalone
+    return MntVizFigure(svg=svg_out, html_inline=html_inline, html_standalone=html_standalone)

@@ -13,3 +13,4 @@ export { MinutiaeRenderer, createMarkerShape, parseMinutiaeText, minutiaDataMap 
 export { UVFieldRenderer } from './uv-renderer.js';
 export { OverlayLayer } from './overlay.js';
 export { MinutiaeInspector } from './minutiae-inspector.js';
+export { MatchViewer } from './match-viewer.js';

@@ -18,6 +18,7 @@ export class Viewer {
      * @param {object} [options]
      * @param {boolean} [options.minimap=true]  - Show minimap.
      * @param {Function} [options.onResize]     - Called after internal resize.
+     * @param {Function} [options.onTransform]  - Called after every pan/zoom transform.
      */
     constructor(container, options = {}) {
         this._el = typeof container === 'string'
@@ -47,6 +48,11 @@ export class Viewer {
 
     /** The viewport element (for coordinate transforms and tooltip positioning). */
     get viewport() { return this._viewport; }
+
+    /** Current view state (read-only snapshot). */
+    get viewState() {
+        return { scale: this._view.scale, translateX: this._view.translateX, translateY: this._view.translateY };
+    }
 
     /** Natural dimensions of the loaded image. */
     get imageSize() {
@@ -245,6 +251,7 @@ export class Viewer {
         this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
         this._zoomLabel.textContent = `${Math.round(s * 100)}%`;
         this._updateMinimap();
+        if (this._options.onTransform) this._options.onTransform();
     }
 
     _syncLayers() {
