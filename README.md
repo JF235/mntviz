@@ -5,7 +5,7 @@ Visualization toolkit for fingerprint minutiae and related overlays.
 It has two parts:
 
 - JavaScript runtime in `src/` (Viewer, MinutiaeRenderer, MinutiaeInspector, UVFieldRenderer, OverlayLayer)
-- Thin Python wrapper in `python/` for SVG/HTML export and Jupyter rendering
+- Thin Python wrapper in `python/` for SVG/HTML export and Jupyter rendering, with support for custom marker shapes, colormaps, quality-based alpha, and multi-layer overlays
 
 ## Quick Start (JavaScript)
 

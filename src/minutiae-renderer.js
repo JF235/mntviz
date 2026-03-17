@@ -17,6 +17,8 @@ const DEFAULTS = {
     lineWidth: 1,
     segmentLength: 5,
     baseOpacity: 1.0,
+    qualityAlpha: true,
+    markerShape: 'circle',
     showQuality: false,
     showAngles: false,
     qualityFontSize: 5,
@@ -27,6 +29,54 @@ const DEFAULTS = {
     angleYShift: -10,
     label: null,
 };
+
+/**
+ * Create an SVG marker element for the given shape.
+ * @param {string} shape - 'circle' | 'triangle' | 'square' | 'diamond'
+ * @param {number} cx
+ * @param {number} cy
+ * @param {number} r
+ * @returns {SVGElement}
+ */
+export function createMarkerShape(shape, cx, cy, r) {
+    let el;
+    switch (shape) {
+        case 'square':
+            el = document.createElementNS(SVG_NS, 'rect');
+            el.setAttribute('x', cx - r);
+            el.setAttribute('y', cy - r);
+            el.setAttribute('width', 2 * r);
+            el.setAttribute('height', 2 * r);
+            el.setAttribute('fill', 'none');
+            break;
+        case 'diamond': {
+            el = document.createElementNS(SVG_NS, 'polygon');
+            el.setAttribute('points',
+                `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`);
+            el.setAttribute('fill', 'none');
+            break;
+        }
+        case 'triangle': {
+            el = document.createElementNS(SVG_NS, 'polygon');
+            const cos = (a) => Math.cos(a * Math.PI / 180);
+            const sin = (a) => Math.sin(a * Math.PI / 180);
+            const pts = [90, 210, 330].map(
+                a => `${cx + r * cos(a)},${cy - r * sin(a)}`
+            ).join(' ');
+            el.setAttribute('points', pts);
+            el.setAttribute('fill', 'none');
+            break;
+        }
+        default: // 'circle'
+            el = document.createElementNS(SVG_NS, 'circle');
+            el.setAttribute('cx', cx);
+            el.setAttribute('cy', cy);
+            el.setAttribute('r', r);
+            el.setAttribute('fill', 'none');
+            break;
+    }
+    return el;
+}
 
 export class MinutiaeRenderer {
     /**
@@ -45,7 +95,8 @@ export class MinutiaeRenderer {
      */
     draw(minutiae, color, options = {}) {
         const opts = { ...DEFAULTS, ...options };
-        const { markerSize, lineWidth, segmentLength, baseOpacity, showQuality, showAngles,
+        const { markerSize, lineWidth, segmentLength, baseOpacity, qualityAlpha, markerShape,
+                showQuality, showAngles,
                 qualityFontSize, qualityXShift, qualityYShift,
                 angleFontSize, angleXShift, angleYShift } = opts;
 
@@ -63,15 +114,19 @@ export class MinutiaeRenderer {
 
         for (const m of minutiae) {
             const { x, y, angle, quality } = m;
-            const qFactor = Math.min(1.0, Math.max(0.2, quality / 100));
-            const opacity = baseOpacity * qFactor;
+            const mntColor = m._color || color;
+            const mntShape = m._shape || markerShape;
+            const opacity = qualityAlpha
+                ? baseOpacity * Math.min(1.0, Math.max(0.2, quality / 100))
+                : baseOpacity;
 
             const mg = document.createElementNS(SVG_NS, 'g');
             mg.setAttribute('opacity', opacity);
+            mg.setAttribute('stroke', mntColor);
             mg.classList.add('mntviz-mnt-marker');
             mg.style.pointerEvents = 'auto';
             mg.style.cursor = 'crosshair';
-            minutiaDataMap.set(mg, { ...m, _color: color, _label: opts.label || null });
+            minutiaDataMap.set(mg, { ...m, _color: mntColor, _shape: mntShape, _label: opts.label || null });
 
             // Invisible hit-test circle (easier to hover/click small markers)
             const hitCircle = document.createElementNS(SVG_NS, 'circle');
@@ -82,13 +137,9 @@ export class MinutiaeRenderer {
             hitCircle.setAttribute('stroke', 'none');
             mg.appendChild(hitCircle);
 
-            // Circle
-            const circle = document.createElementNS(SVG_NS, 'circle');
-            circle.setAttribute('cx', x);
-            circle.setAttribute('cy', y);
-            circle.setAttribute('r', markerSize);
-            circle.setAttribute('fill', 'none');
-            mg.appendChild(circle);
+            // Marker shape (per-minutia _shape overrides global markerShape)
+            const marker = createMarkerShape(mntShape, x, y, markerSize);
+            mg.appendChild(marker);
 
             // Direction line
             const rad = angle * (Math.PI / 180);
@@ -110,6 +161,7 @@ export class MinutiaeRenderer {
                 qText.setAttribute('x', x + qualityXShift);
                 qText.setAttribute('y', y + qualityYShift);
                 qText.setAttribute('text-anchor', 'middle');
+                qText.setAttribute('fill', mntColor);
                 qText.setAttribute('font-size', `${qualityFontSize}px`);
                 qText.textContent = `Q:${Math.round(quality)}`;
                 textGroup.appendChild(qText);
@@ -121,6 +173,7 @@ export class MinutiaeRenderer {
                 aText.setAttribute('x', x + angleXShift);
                 aText.setAttribute('y', y + angleYShift);
                 aText.setAttribute('text-anchor', 'middle');
+                aText.setAttribute('fill', mntColor);
                 aText.setAttribute('font-size', `${angleFontSize}px`);
                 aText.textContent = `${Math.round(angle)}\u00B0`;
                 textGroup.appendChild(aText);

@@ -7,7 +7,7 @@ Detailed usage and API reference for the JavaScript runtime and Python wrapper.
 ### Public Modules
 
 - `Viewer` from `src/viewer.js`
-- `MinutiaeRenderer` and `parseMinutiaeText` from `src/minutiae-renderer.js`
+- `MinutiaeRenderer`, `createMarkerShape`, and `parseMinutiaeText` from `src/minutiae-renderer.js`
 - `MinutiaeInspector` from `src/minutiae-inspector.js`
 - `UVFieldRenderer` from `src/uv-renderer.js`
 - `OverlayLayer` from `src/overlay.js`
@@ -18,6 +18,7 @@ Import through `src/index.js`:
 import {
   Viewer,
   MinutiaeRenderer,
+  createMarkerShape,
   MinutiaeInspector,
   parseMinutiaeText,
   UVFieldRenderer,
@@ -100,9 +101,13 @@ draw options:
 - `segmentLength` (default `5`)
 - `lineWidth` (default `1`)
 - `baseOpacity` (default `1.0`)
+- `qualityAlpha` (default `true`) — modulate opacity by `quality/100`; set to `false` for uniform opacity
+- `markerShape` (default `'circle'`) — `'circle'`, `'triangle'`, `'square'`, or `'diamond'`
 - `showQuality` (default `false`)
 - `showAngles` (default `false`)
 - `label` (optional source tag)
+
+Per-minutia color: if a minutia object has a `_color` field, it overrides the `color` argument for that marker.
 
 #### `MinutiaeInspector(viewer, options?)`
 

@@ -9,7 +9,7 @@
  */
 
 export { Viewer } from './viewer.js';
-export { MinutiaeRenderer, parseMinutiaeText, minutiaDataMap } from './minutiae-renderer.js';
+export { MinutiaeRenderer, createMarkerShape, parseMinutiaeText, minutiaDataMap } from './minutiae-renderer.js';
 export { UVFieldRenderer } from './uv-renderer.js';
 export { OverlayLayer } from './overlay.js';
 export { MinutiaeInspector } from './minutiae-inspector.js';

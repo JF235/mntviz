@@ -11,7 +11,7 @@
  *   inspector.enable();
  */
 
-import { minutiaDataMap } from './minutiae-renderer.js';
+import { minutiaDataMap, createMarkerShape } from './minutiae-renderer.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -328,7 +328,8 @@ export class MinutiaeInspector {
 
         // Draw the clicked minutia marker (direction = 0° in patch, i.e. pointing right)
         const clickedColor = useColors ? (m._color || this._options.markerColor) : this._options.markerColor;
-        this._drawPatchMarker(ps / 2, ps / 2, 0, clickedColor, 1.0);
+        const clickedShape = m._shape || this._options.markerShape || 'circle';
+        this._drawPatchMarker(ps / 2, ps / 2, 0, clickedColor, 1.0, clickedShape);
 
         // Draw nearby minutiae
         if (mode !== PATCH_MODE_NONE && this._options.getAllMinutiae) {
@@ -354,9 +355,10 @@ export class MinutiaeInspector {
                 if (px < 0 || px > ps || py < 0 || py > ps) continue;
 
                 const color = useColors ? (o._color || '#fff') : '#fff';
+                const oShape = o._shape || this._options.markerShape || 'circle';
                 const qFactor = Math.min(1.0, Math.max(0.2, (o.quality ?? 100) / 100));
                 const alpha = qFactor * alphaMul;
-                this._drawPatchMarker(px, py, pa, color, alpha);
+                this._drawPatchMarker(px, py, pa, color, alpha, oShape);
             }
         }
     }
@@ -372,7 +374,7 @@ export class MinutiaeInspector {
         return keys;
     }
 
-    _drawPatchMarker(x, y, angleDeg, color, opacity) {
+    _drawPatchMarker(x, y, angleDeg, color, opacity, shape = 'circle') {
         const r = 3;
         const segLen = 7;
         const rad = angleDeg * (Math.PI / 180);
@@ -385,11 +387,8 @@ export class MinutiaeInspector {
         g.setAttribute('fill', 'none');
         g.setAttribute('stroke-width', '1');
 
-        const circle = document.createElementNS(SVG_NS, 'circle');
-        circle.setAttribute('cx', x);
-        circle.setAttribute('cy', y);
-        circle.setAttribute('r', r);
-        g.appendChild(circle);
+        const marker = createMarkerShape(shape, x, y, r);
+        g.appendChild(marker);
 
         const line = document.createElementNS(SVG_NS, 'line');
         line.setAttribute('x1', x);

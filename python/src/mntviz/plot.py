@@ -152,17 +152,61 @@ def _image_to_data_uri(background_img: str | Path | None) -> tuple[str | None, i
     return f"data:{mime};base64,{encoded}", width, height
 
 
+VALID_MARKER_SHAPES = {"circle", "triangle", "square", "diamond"}
+
+
+def _svg_marker_path(shape: str, cx: float, cy: float, r: float) -> str:
+    if shape == "circle":
+        return f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" />'
+    elif shape == "square":
+        return f'<rect x="{cx - r:.2f}" y="{cy - r:.2f}" width="{2 * r:.2f}" height="{2 * r:.2f}" />'
+    elif shape == "diamond":
+        pts = f"{cx:.2f},{cy - r:.2f} {cx + r:.2f},{cy:.2f} {cx:.2f},{cy + r:.2f} {cx - r:.2f},{cy:.2f}"
+        return f'<polygon points="{pts}" />'
+    elif shape == "triangle":
+        pts = " ".join(
+            f"{cx + r * math.cos(math.radians(a)):.2f},{cy - r * math.sin(math.radians(a)):.2f}"
+            for a in (90, 210, 330)
+        )
+        return f'<polygon points="{pts}" />'
+    else:
+        raise ValueError(f"unknown marker_shape: {shape}")
+
+
+def _resolve_colormap(
+    cmap_name: str,
+    values: Sequence[float] | np.ndarray,
+    expected_len: int,
+) -> list[str]:
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    vals = np.asarray(values, dtype=float)
+    if vals.shape != (expected_len,):
+        raise ValueError(
+            f"colormap_values length ({len(vals)}) must match minutiae count ({expected_len})"
+        )
+    cmap = cm.get_cmap(cmap_name)
+    vmin, vmax = float(vals.min()), float(vals.max())
+    if vmin == vmax:
+        norm_vals = np.full_like(vals, 0.5)
+    else:
+        norm_vals = (vals - vmin) / (vmax - vmin)
+    return [mcolors.to_hex(cmap(float(v))) for v in norm_vals]
+
+
 def _build_svg(
-    records: list[dict[str, float]],
+    layers: list[tuple[list[dict[str, float]], list[str], str]],
     *,
     background_uri: str | None,
     width: int,
     height: int,
-    color: str,
     marker_size: float,
     segment_length: float,
     line_width: float,
     base_opacity: float,
+    quality_alpha: bool,
+    marker_shape: str,
     show_quality: bool,
     show_angles: bool,
 ) -> str:
@@ -177,39 +221,43 @@ def _build_svg(
             )
         )
 
-    for rec in records:
-        x = rec["x"]
-        y = rec["y"]
-        angle = rec["angle"]
-        quality = rec["quality"]
+    for records, per_colors, layer_shape in layers:
+        for rec, mnt_color in zip(records, per_colors):
+            x = rec["x"]
+            y = rec["y"]
+            angle = rec["angle"]
+            quality = rec["quality"]
 
-        q_factor = min(1.0, max(0.2, quality / 100.0))
-        opacity = max(0.0, min(1.0, base_opacity * q_factor))
+            if quality_alpha:
+                q_factor = min(1.0, max(0.2, quality / 100.0))
+                opacity = max(0.0, min(1.0, base_opacity * q_factor))
+            else:
+                opacity = base_opacity
 
-        rad = angle * math.pi / 180.0
-        x_end = x + segment_length * math.cos(rad)
-        y_end = y - segment_length * math.sin(rad)
+            rad = angle * math.pi / 180.0
+            x_end = x + segment_length * math.cos(rad)
+            y_end = y - segment_length * math.sin(rad)
 
-        elements.append(
-            (
-                f'<g opacity="{opacity:.4f}" '
-                f'stroke="{escape(color)}" fill="none" stroke-width="{line_width}" '
-                f'stroke-linecap="round" stroke-linejoin="round">'
-                f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{marker_size}" />'
-                f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x_end:.2f}" y2="{y_end:.2f}" />'
-                "</g>"
+            elements.append(
+                (
+                    f'<g opacity="{opacity:.4f}" '
+                    f'stroke="{escape(mnt_color)}" fill="none" stroke-width="{line_width}" '
+                    f'stroke-linecap="round" stroke-linejoin="round">'
+                    f'{_svg_marker_path(layer_shape, x, y, marker_size)}'
+                    f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x_end:.2f}" y2="{y_end:.2f}" />'
+                    "</g>"
+                )
             )
-        )
 
-        if show_quality:
-            marker_text_elements.append(
-                f'<text x="{x:.2f}" y="{y + 10:.2f}" text-anchor="middle" fill="{escape(color)}" font-size="10">Q:{int(round(quality))}</text>'
-            )
+            if show_quality:
+                marker_text_elements.append(
+                    f'<text x="{x:.2f}" y="{y + 10:.2f}" text-anchor="middle" fill="{escape(mnt_color)}" font-size="10">Q:{int(round(quality))}</text>'
+                )
 
-        if show_angles:
-            marker_text_elements.append(
-                f'<text x="{x:.2f}" y="{y - 10:.2f}" text-anchor="middle" fill="{escape(color)}" font-size="10">{int(round(angle))} deg</text>'
-            )
+            if show_angles:
+                marker_text_elements.append(
+                    f'<text x="{x:.2f}" y="{y - 10:.2f}" text-anchor="middle" fill="{escape(mnt_color)}" font-size="10">{int(round(angle))} deg</text>'
+                )
 
     if marker_text_elements:
         elements.append('<g class="mntviz-mnt-labels" stroke="none">' + "".join(marker_text_elements) + "</g>")
@@ -236,7 +284,6 @@ def _build_interactive_fragment(svg: str, *, title: str | None = None, root_id: 
     height: min(80vh, 760px);
     max-height: 760px;
     min-height: 380px;
-    border: 1px solid rgba(148,163,184,0.25);
     background: linear-gradient(165deg, rgba(17,24,39,0.95), rgba(2,6,23,0.95));
     border-radius: 14px;
     overflow: hidden;
@@ -244,27 +291,9 @@ def _build_interactive_fragment(svg: str, *, title: str | None = None, root_id: 
     position: relative;
     margin: 8px 0;
   }
-  #$root_id .toolbar {
-    height: 42px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 0 14px;
-    background: rgba(15,23,42,0.9);
-    border-bottom: 1px solid rgba(148,163,184,0.18);
-    font-size: 13px;
-    letter-spacing: 0.02em;
-  }
-  #$root_id .dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 16px var(--accent);
-  }
   #$root_id .viewport {
     position: absolute;
-    inset: 42px 0 0 0;
+    inset: 0;
     overflow: hidden;
     cursor: grab;
     background-image:
@@ -283,7 +312,6 @@ def _build_interactive_fragment(svg: str, *, title: str | None = None, root_id: 
   }
 </style>
 <section id=\"$root_id\" class=\"mntviz-jupyter\">
-  <header class=\"toolbar\"><span class=\"dot\"></span>$page_title</header>
   <div class=\"viewport\" data-mntviz-role=\"viewport\">
     <div class=\"canvas\" data-mntviz-role=\"canvas\">$svg</div>
   </div>
@@ -382,16 +410,17 @@ def _build_blank_background_data_uri(width: int, height: int) -> str:
 
 
 def _build_js_runtime_fragment(
-    records: list[dict[str, float]],
+    layers: list[tuple[list[dict[str, float]], list[str], str]],
     *,
     background_uri: str | None,
     width: int,
     height: int,
-    color: str,
     marker_size: float,
     segment_length: float,
     line_width: float,
     base_opacity: float,
+    quality_alpha: bool,
+    marker_shape: str,
     show_quality: bool,
     show_angles: bool,
     title: str | None,
@@ -401,15 +430,16 @@ def _build_js_runtime_fragment(
     if assets is None:
         return _build_interactive_fragment(
             _build_svg(
-                records,
+                layers,
                 background_uri=background_uri,
                 width=width,
                 height=height,
-                color=color,
                 marker_size=marker_size,
                 segment_length=segment_length,
                 line_width=line_width,
                 base_opacity=base_opacity,
+                quality_alpha=quality_alpha,
+                marker_shape=marker_shape,
                 show_quality=show_quality,
                 show_angles=show_angles,
             ),
@@ -420,13 +450,25 @@ def _build_js_runtime_fragment(
     viewer_js, renderer_js, inspector_js, css = assets
     page_title = escape(title or "mntviz")
     image_src = background_uri or _build_blank_background_data_uri(width, height)
-    minutiae_json = json.dumps(records)
+
+    # Flatten layers into a single list with per-minutia _color and _shape
+    all_records: list[dict] = []
+    fallback_color = "#00ff00"
+    for records, per_colors, layer_shape in layers:
+        if not all_records and per_colors:
+            fallback_color = per_colors[0]
+        for rec, c in zip(records, per_colors):
+            all_records.append({**rec, "_color": c, "_shape": layer_shape})
+    minutiae_json = json.dumps(all_records)
+
     renderer_options_json = json.dumps(
         {
             "markerSize": marker_size,
             "segmentLength": segment_length,
             "lineWidth": line_width,
             "baseOpacity": base_opacity,
+            "qualityAlpha": quality_alpha,
+            "markerShape": marker_shape,
             "showQuality": show_quality,
             "showAngles": show_angles,
         }
@@ -442,7 +484,6 @@ $mntviz_css
         height: min(80vh, 760px);
         max-height: 760px;
         min-height: 380px;
-        border: 1px solid rgba(148,163,184,0.25);
         background: linear-gradient(165deg, rgba(17,24,39,0.95), rgba(2,6,23,0.95));
         border-radius: 14px;
         overflow: hidden;
@@ -450,31 +491,9 @@ $mntviz_css
         margin: 8px 0;
     }
 
-    #$root_id .mntviz-toolbar {
-        height: 42px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 0 14px;
-        color: #e5e7eb;
-        background: rgba(15,23,42,0.9);
-        border-bottom: 1px solid rgba(148,163,184,0.18);
-        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-        font-size: 13px;
-        letter-spacing: 0.02em;
-    }
-
-    #$root_id .mntviz-toolbar-dot {
-        width: 9px;
-        height: 9px;
-        border-radius: 50%;
-        background: #22c55e;
-        box-shadow: 0 0 16px #22c55e;
-    }
-
     #$root_id .mntviz-runtime-host {
         position: absolute;
-        inset: 42px 0 0 0;
+        inset: 0;
     }
 
     #$root_id .mntviz-runtime-host .mntviz-viewport {
@@ -483,7 +502,6 @@ $mntviz_css
 </style>
 
 <section id="$root_id" class="mntviz-jupyter">
-    <header class="mntviz-toolbar"><span class="mntviz-toolbar-dot"></span>$page_title</header>
     <div class="mntviz-runtime-host" data-mntviz-runtime-host></div>
 </section>
 
@@ -550,7 +568,7 @@ $mntviz_css
         mntviz_css=css,
         minutiae_json=minutiae_json,
         image_src_json=json.dumps(image_src),
-        color_json=json.dumps(color),
+        color_json=json.dumps(fallback_color),
         renderer_options_json=renderer_options_json,
         renderer_js_json=json.dumps(renderer_js),
         inspector_js_json=json.dumps(inspector_js),
@@ -559,31 +577,33 @@ $mntviz_css
 
 
 def _build_html_with_js_runtime(
-    records: list[dict[str, float]],
+    layers: list[tuple[list[dict[str, float]], list[str], str]],
     *,
     background_uri: str | None,
     width: int,
     height: int,
-    color: str,
     marker_size: float,
     segment_length: float,
     line_width: float,
     base_opacity: float,
+    quality_alpha: bool,
+    marker_shape: str,
     show_quality: bool,
     show_angles: bool,
     title: str | None,
 ) -> tuple[str, str]:
     root_id = f"mntviz-{uuid4().hex}"
     inline = _build_js_runtime_fragment(
-    records,
+    layers,
     background_uri=background_uri,
     width=width,
     height=height,
-    color=color,
     marker_size=marker_size,
     segment_length=segment_length,
     line_width=line_width,
     base_opacity=base_opacity,
+    quality_alpha=quality_alpha,
+    marker_shape=marker_shape,
     show_quality=show_quality,
     show_angles=show_angles,
     title=title,
@@ -643,7 +663,7 @@ class MntVizFigure:
 
 
 def plot_mnt(
-    minutiae: Any,
+    minutiae: Any = None,
     *,
     background_img: str | Path | None = None,
     output_format: str = "html",
@@ -653,11 +673,16 @@ def plot_mnt(
     segment_length: float = 5.0,
     line_width: float = 1.0,
     base_opacity: float = 1.0,
+    quality_alpha: bool = True,
+    marker_shape: str = "circle",
     show_quality: bool = False,
     show_angles: bool = False,
     width: int | None = None,
     height: int | None = None,
     title: str | None = None,
+    colormap: str | None = None,
+    colormap_values: Sequence[float] | np.ndarray | None = None,
+    overlays: list[tuple[Any, str]] | None = None,
 ) -> str | MntVizFigure:
     """Render minutiae plot as SVG, interactive HTML, or Jupyter display object."""
 
@@ -665,35 +690,75 @@ def plot_mnt(
     if fmt not in {"svg", "html", "jupyter"}:
         raise ValueError("output_format must be one of: svg, html, jupyter")
 
-    records = load_minutiae(minutiae)
+    if marker_shape not in VALID_MARKER_SHAPES:
+        raise ValueError(f"marker_shape must be one of {VALID_MARKER_SHAPES}, got {marker_shape!r}")
+
+    if (colormap is None) != (colormap_values is None):
+        raise ValueError("colormap and colormap_values must both be provided or both be None")
+
+    if overlays is not None and colormap is not None:
+        raise ValueError("overlays and colormap are mutually exclusive")
+
+    if overlays is not None and minutiae is not None:
+        raise ValueError("minutiae must be None when overlays is provided; include it in the overlays list instead")
+
+    if overlays is None and minutiae is None:
+        raise TypeError("minutiae is required when overlays is not provided")
+
+    # Build layers: list of (records, per_minutia_colors, shape)
+    layers: list[tuple[list[dict[str, float]], list[str], str]] = []
+
+    if overlays is not None:
+        if not overlays:
+            raise ValueError("overlays must not be empty")
+        for entry in overlays:
+            if len(entry) == 3:
+                mnt_data, layer_color, layer_shape = entry
+                if layer_shape not in VALID_MARKER_SHAPES:
+                    raise ValueError(f"marker_shape must be one of {VALID_MARKER_SHAPES}, got {layer_shape!r}")
+            else:
+                mnt_data, layer_color = entry
+                layer_shape = marker_shape
+            recs = load_minutiae(mnt_data)
+            layers.append((recs, [layer_color] * len(recs), layer_shape))
+    elif colormap is not None:
+        records = load_minutiae(minutiae)
+        colors = _resolve_colormap(colormap, colormap_values, len(records))
+        layers.append((records, colors, marker_shape))
+    else:
+        records = load_minutiae(minutiae)
+        layers.append((records, [color] * len(records), marker_shape))
+
     bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
 
     w = width or bg_w or 1000
     h = height or bg_h or 1000
 
     svg = _build_svg(
-        records,
+        layers,
         background_uri=bg_uri,
         width=int(w),
         height=int(h),
-        color=color,
         marker_size=marker_size,
         segment_length=segment_length,
         line_width=line_width,
         base_opacity=base_opacity,
+        quality_alpha=quality_alpha,
+        marker_shape=marker_shape,
         show_quality=show_quality,
         show_angles=show_angles,
     )
     html_inline, html = _build_html_with_js_runtime(
-        records,
+        layers,
         background_uri=bg_uri,
         width=int(w),
         height=int(h),
-        color=color,
         marker_size=marker_size,
         segment_length=segment_length,
         line_width=line_width,
         base_opacity=base_opacity,
+        quality_alpha=quality_alpha,
+        marker_shape=marker_shape,
         show_quality=show_quality,
         show_angles=show_angles,
         title=title,
