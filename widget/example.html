@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mntviz Widget — Example</title>
+    <script type="module" src="mntviz-widget.js"></script>
+    <style>
+        body {
+            font-family: Georgia, 'Times New Roman', serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background: #fafafa;
+            color: #333;
+            line-height: 1.8;
+        }
+        h1 { font-size: 1.8em; border-bottom: 2px solid #ddd; padding-bottom: 8px; }
+        h2 { font-size: 1.3em; margin-top: 2em; }
+        p  { text-align: justify; }
+        code { background: #eee; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+
+        /* Example float-like positioning */
+        .widget-float {
+            margin: 1.5em auto;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 12px rgba(0,0,0,.08);
+        }
+    </style>
+</head>
+<body>
+
+<h1>Minutiae Visualization Widget</h1>
+
+<p>
+    This page demonstrates the <code>&lt;mntviz-widget&gt;</code> Web Component.
+    It can be embedded in any HTML page or Markdown-rendered document. Simply drop
+    a fingerprint image and a <code>.min</code> file onto the widget below to
+    visualize minutiae interactively.
+</p>
+
+<h2>Interactive Widget</h2>
+
+<p>
+    Drag-and-drop an image file (<code>.png</code>, <code>.jpg</code>, <code>.bmp</code>)
+    and one or more minutiae files (<code>.min</code>) onto the widget. You can also
+    click to open a file browser. Multiple <code>.min</code> layers are supported with
+    automatic color assignment.
+</p>
+
+<div class="widget-float">
+    <mntviz-widget style="width: 100%; height: 500px;"></mntviz-widget>
+</div>
+
+<p>
+    After loading, use the mouse wheel to zoom and drag to pan. Hover over a minutia
+    to see its coordinates, angle, and quality. Click on a minutia to see an expanded
+    patch view. Use the toolbar buttons to add more files, reset the view, or clear
+    everything.
+</p>
+
+<h2>Usage</h2>
+
+<p>Include the widget in any HTML page:</p>
+
+<pre><code>&lt;script type="module" src="widget/mntviz-widget.js"&gt;&lt;/script&gt;
+
+&lt;mntviz-widget style="width: 100%; height: 500px;"&gt;&lt;/mntviz-widget&gt;</code></pre>
+
+<p>
+    You can also configure the default minutiae color with the <code>color</code> attribute:
+</p>
+
+<pre><code>&lt;mntviz-widget color="#ff4444" style="width: 600px; height: 400px;"&gt;&lt;/mntviz-widget&gt;</code></pre>
+
+<h2>Programmatic API</h2>
+
+<pre><code>const widget = document.querySelector('mntviz-widget');
+
+// Load image
+await widget.loadImage('path/to/image.png');
+
+// Add minutiae from text
+widget.addMinutiae(`
+418 371 337 52
+393 438 331 33
+`, { name: 'probe', color: '#00ff00' });
+
+// Clear
+widget.clear();</code></pre>
+
+</body>
+</html>

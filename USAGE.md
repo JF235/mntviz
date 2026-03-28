@@ -26,7 +26,7 @@ import {
 } from './mntviz/index.js';
 ```
 
-### Minimal Viewer + Minutiae
+### Minimal Viewer + Minutiae (with image)
 
 ```javascript
 const viewer = new Viewer('#viewer');
@@ -80,6 +80,7 @@ Main members:
 - `canvasContainer`
 - `imageSize`
 - `loadImage(src)`
+- `setViewportSize(width, height)` — set a virtual canvas size without loading an image (useful for minutiae-only views)
 - `clear()`
 - `resetView()`
 - `destroy()`
@@ -142,6 +143,72 @@ Parses text rows in format `x y angle [quality]` (`#` comments supported).
 - `setOpacity(value)`
 - `clear()`
 - `destroy()`
+
+### Minutiae-Only View (no image)
+
+```javascript
+const viewer = new Viewer('#viewer');
+viewer.setViewportSize(500, 500);
+
+const renderer = new MinutiaeRenderer(viewer.svgLayer);
+renderer.draw(
+  [{ x: 150, y: 200, angle: 45, quality: 90 }],
+  '#00ff00',
+  { markerSize: 3, segmentLength: 8 }
+);
+```
+
+When `loadImage()` is called later, the virtual viewport is replaced by the real image dimensions.
+
+---
+
+## Widget (`<mntviz-widget>`)
+
+Self-contained Web Component with drag-and-drop file loading. Include it in any HTML page:
+
+```html
+<script type="module" src="widget/mntviz-widget.js"></script>
+
+<mntviz-widget style="width: 100%; height: 500px;"></mntviz-widget>
+```
+
+### Attributes
+
+| Attribute | Default   | Description                       |
+|-----------|-----------|-----------------------------------|
+| `width`   | `100%`    | CSS width of the widget           |
+| `height`  | `400px`   | CSS height of the widget          |
+| `color`   | `#00ff00` | Default minutiae color            |
+
+### Drag-and-Drop
+
+Drop image files (`.png`, `.jpg`, `.bmp`, `.tiff`, `.webp`) and minutiae files (`.min`, `.txt`, `.csv`) onto the widget. Multiple `.min` layers are rendered with automatic color cycling.
+
+### Programmatic API
+
+```javascript
+const widget = document.querySelector('mntviz-widget');
+
+// Load an image
+await widget.loadImage('path/to/image.png');
+
+// Add minutiae from .min-format text
+widget.addMinutiae('418 371 337 52\n393 438 331 33', {
+  name: 'probe',
+  color: '#ff4444',
+});
+
+// Clear everything
+widget.clear();
+```
+
+### Toolbar
+
+- **+ Add** — open file picker to add more images or minutiae files
+- **↺ Reset** — fit the view to the viewport
+- **✕ Clear** — remove all layers and return to the drop zone
+
+---
 
 ## Python Wrapper
 

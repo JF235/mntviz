@@ -2,9 +2,10 @@
 
 Visualization toolkit for fingerprint minutiae and related overlays.
 
-It has two parts:
+It has three parts:
 
 - JavaScript runtime in `src/` (Viewer, MinutiaeRenderer, MinutiaeInspector, UVFieldRenderer, OverlayLayer)
+- Embeddable Web Component in `widget/` (`<mntviz-widget>`) for drop-in usage in any HTML page
 - Thin Python wrapper in `python/` for SVG/HTML export and Jupyter rendering, with support for custom marker shapes, colormaps, quality-based alpha, and multi-layer overlays
 
 ## Quick Start (JavaScript)
@@ -28,6 +29,20 @@ It has two parts:
   viewer.enableMinutiaeInspector({ patchMode: 'visible' });
 </script>
 ```
+
+## Widget (zero-config)
+
+The `<mntviz-widget>` Web Component provides a self-contained viewer with drag-and-drop support. Include it in any HTML or Markdown-rendered page:
+
+```html
+<script type="module" src="widget/mntviz-widget.js"></script>
+
+<mntviz-widget style="width: 100%; height: 500px;"></mntviz-widget>
+```
+
+Drop image files (`.png`, `.jpg`, `.bmp`, `.tiff`, `.webp`) and minutiae files (`.min`, `.txt`) onto the widget. Multiple `.min` layers are supported with automatic color assignment.
+
+See `widget/example.html` for a complete demo.
 
 ## Documentation
 

@@ -30,6 +30,7 @@ export class Viewer {
         this._view = { scale: 1, translateX: 0, translateY: 0, isDragging: false, lastX: 0, lastY: 0 };
         this._abortController = new AbortController();
         this._minutiaeInspector = null;
+        this._virtualSize = null;
 
         this._buildDOM();
         this._bindEvents();
@@ -54,11 +55,12 @@ export class Viewer {
         return { scale: this._view.scale, translateX: this._view.translateX, translateY: this._view.translateY };
     }
 
-    /** Natural dimensions of the loaded image. */
+    /** Natural dimensions of the loaded image (or virtual size). */
     get imageSize() {
+        const vs = this._virtualSize;
         return {
-            width: this._img.naturalWidth || 0,
-            height: this._img.naturalHeight || 0,
+            width: vs ? vs.width : (this._img.naturalWidth || 0),
+            height: vs ? vs.height : (this._img.naturalHeight || 0),
         };
     }
 
@@ -71,6 +73,9 @@ export class Viewer {
         return new Promise((resolve, reject) => {
             const probe = new Image();
             probe.onload = () => {
+                this._virtualSize = null;
+                this._img.style.width = '';
+                this._img.style.height = '';
                 this._img.src = src;
                 if (this._minimapImg) this._minimapImg.src = src;
                 if (this._minimapWrap) this._minimapWrap.style.display = 'block';
@@ -87,15 +92,33 @@ export class Viewer {
     clear() {
         this._img.removeAttribute('src');
         this._svg.innerHTML = '';
+        this._virtualSize = null;
         if (this._minimapWrap) this._minimapWrap.style.display = 'none';
+    }
+
+    /**
+     * Set a virtual viewport size without loading an image.
+     * Useful for rendering minutiae-only visualizations.
+     * @param {number} width  - Virtual canvas width in pixels.
+     * @param {number} height - Virtual canvas height in pixels.
+     */
+    setViewportSize(width, height) {
+        this._virtualSize = { width, height };
+        this._img.removeAttribute('src');
+        // Size the img element so layout and SVG sync work
+        this._img.style.width = width + 'px';
+        this._img.style.height = height + 'px';
+        this._syncLayers();
+        this.resetView();
     }
 
     /** Fit the image to 95% of the viewport. */
     resetView() {
         const vw = this._viewport.clientWidth;
         const vh = this._viewport.clientHeight;
-        const iw = this._img.naturalWidth || 500;
-        const ih = this._img.naturalHeight || 500;
+        const vs = this._virtualSize;
+        const iw = vs ? vs.width : (this._img.naturalWidth || 500);
+        const ih = vs ? vs.height : (this._img.naturalHeight || 500);
 
         const scale = Math.min(vw / iw, vh / ih) * 0.95;
         this._view.scale = scale;
@@ -200,7 +223,7 @@ export class Viewer {
     /* ── Interaction handlers ───────────────────────────────── */
 
     _onWheel(e) {
-        if (!this._img.src) return;
+        if (!this._img.src && !this._virtualSize) return;
         e.preventDefault();
 
         const intensity = 0.1;
@@ -255,21 +278,25 @@ export class Viewer {
     }
 
     _syncLayers() {
-        const nw = this._img.naturalWidth;
-        const nh = this._img.naturalHeight;
+        const vs = this._virtualSize;
+        const nw = vs ? vs.width : this._img.naturalWidth;
+        const nh = vs ? vs.height : this._img.naturalHeight;
         if (!nw || !nh) return;
 
         this._svg.setAttribute('width', nw);
         this._svg.setAttribute('height', nh);
-        this._svg.style.width = this._img.clientWidth + 'px';
-        this._svg.style.height = this._img.clientHeight + 'px';
+        const cw = vs ? vs.width : this._img.clientWidth;
+        const ch = vs ? vs.height : this._img.clientHeight;
+        this._svg.style.width = cw + 'px';
+        this._svg.style.height = ch + 'px';
         this._svg.setAttribute('viewBox', `0 0 ${nw} ${nh}`);
     }
 
     _updateMinimap() {
         if (!this._minimapRect || !this._minimapImg) return;
-        const nw = this._img.naturalWidth;
-        const nh = this._img.naturalHeight;
+        const vs = this._virtualSize;
+        const nw = vs ? vs.width : this._img.naturalWidth;
+        const nh = vs ? vs.height : this._img.naturalHeight;
         if (!nw || !nh) return;
 
         const vw = this._viewport.clientWidth;
