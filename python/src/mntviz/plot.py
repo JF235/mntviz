@@ -964,6 +964,11 @@ def plot_mnt_match(
     match_line_alpha: float | Sequence[float] = 0.6,
     match_line_width: float | Sequence[float] = 1.0,
     show_segments: bool = False,
+    # Labels
+    left_labels: Sequence[str | int] | None = None,
+    right_labels: Sequence[str | int] | None = None,
+    show_labels: bool = False,
+    label_fontsize: float | None = None,
     # Titles
     left_title: str | None = None,
     right_title: str | None = None,
@@ -989,6 +994,18 @@ def plot_mnt_match(
     # Load minutiae
     left_records = load_minutiae(left_minutiae)
     right_records = load_minutiae(right_minutiae)
+
+    # Apply per-minutia labels
+    if left_labels is not None:
+        if len(left_labels) != len(left_records):
+            raise ValueError(f"left_labels length ({len(left_labels)}) must match left_minutiae count ({len(left_records)})")
+        for rec, lbl in zip(left_records, left_labels):
+            rec["_label"] = str(lbl)
+    if right_labels is not None:
+        if len(right_labels) != len(right_records):
+            raise ValueError(f"right_labels length ({len(right_labels)}) must match right_minutiae count ({len(right_records)})")
+        for rec, lbl in zip(right_records, right_labels):
+            rec["_label"] = str(lbl)
 
     # Resolve pairs
     if pairs is None:
@@ -1094,6 +1111,8 @@ def plot_mnt_match(
         "baseOpacity": base_opacity,
         "qualityAlpha": quality_alpha,
         "markerShape": marker_shape,
+        "showLabels": show_labels,
+        **(({"labelFontSize": label_fontsize} if label_fontsize is not None else {})),
     }
 
     fallback_color = pair_colors[0] if pair_colors else color

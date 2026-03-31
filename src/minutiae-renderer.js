@@ -21,12 +21,16 @@ const DEFAULTS = {
     markerShape: 'circle',
     showQuality: false,
     showAngles: false,
+    showLabels: false,
     qualityFontSize: 5,
     qualityXShift: 0,
     qualityYShift: 10,
     angleFontSize: 5,
     angleXShift: 0,
     angleYShift: -10,
+    labelFontSize: 5,
+    labelXShift: 0,
+    labelYShift: -8,
     label: null,
 };
 
@@ -96,9 +100,10 @@ export class MinutiaeRenderer {
     draw(minutiae, color, options = {}) {
         const opts = { ...DEFAULTS, ...options };
         const { markerSize, lineWidth, segmentLength, baseOpacity, qualityAlpha, markerShape,
-                showQuality, showAngles,
+                showQuality, showAngles, showLabels,
                 qualityFontSize, qualityXShift, qualityYShift,
-                angleFontSize, angleXShift, angleYShift } = opts;
+                angleFontSize, angleXShift, angleYShift,
+                labelFontSize, labelXShift, labelYShift } = opts;
 
         const g = document.createElementNS(SVG_NS, 'g');
         g.setAttribute('stroke', color);
@@ -126,7 +131,7 @@ export class MinutiaeRenderer {
             mg.classList.add('mntviz-mnt-marker');
             mg.style.pointerEvents = 'auto';
             mg.style.cursor = 'crosshair';
-            minutiaDataMap.set(mg, { ...m, _color: mntColor, _shape: mntShape, _label: opts.label || null });
+            minutiaDataMap.set(mg, { ...m, _color: mntColor, _shape: mntShape, _label: m._label || opts.label || null });
 
             // Invisible hit-test circle (easier to hover/click small markers)
             const hitCircle = document.createElementNS(SVG_NS, 'circle');
@@ -178,10 +183,25 @@ export class MinutiaeRenderer {
                 aText.textContent = `${Math.round(angle)}\u00B0`;
                 textGroup.appendChild(aText);
             }
+
+            // Label text (per-minutia _label or global opts.label)
+            if (showLabels) {
+                const labelVal = m._label || opts.label;
+                if (labelVal != null) {
+                    const lText = document.createElementNS(SVG_NS, 'text');
+                    lText.setAttribute('x', x + labelXShift);
+                    lText.setAttribute('y', y + labelYShift);
+                    lText.setAttribute('text-anchor', 'middle');
+                    lText.setAttribute('fill', mntColor);
+                    lText.setAttribute('font-size', `${labelFontSize}px`);
+                    lText.textContent = String(labelVal);
+                    textGroup.appendChild(lText);
+                }
+            }
         }
 
         this._svg.appendChild(g);
-        if (showQuality || showAngles) {
+        if (showQuality || showAngles || showLabels) {
             this._svg.appendChild(textGroup);
         }
     }
