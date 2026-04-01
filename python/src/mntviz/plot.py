@@ -195,6 +195,54 @@ def _resolve_colormap(
     return [mcolors.to_hex(cmap(float(v))) for v in norm_vals]
 
 
+def _build_legend_svg(
+    legend_items: list[tuple[str, str, str]],
+    *,
+    x: float,
+    y: float,
+    marker_size: float = 3.0,
+    font_size: float = 12.0,
+    line_height: float = 20.0,
+    padding: float = 8.0,
+) -> str:
+    """Build an SVG legend group.
+
+    Parameters
+    ----------
+    legend_items : list of (label, color, shape) tuples.
+    x, y : top-left corner of the legend box.
+    """
+    if not legend_items:
+        return ""
+
+    text_x = x + padding + marker_size * 2 + 6
+    max_label_len = max(len(label) for label, _, _ in legend_items)
+    box_w = padding * 2 + marker_size * 2 + 6 + max_label_len * font_size * 0.6
+    box_h = padding * 2 + len(legend_items) * line_height
+
+    parts: list[str] = []
+    parts.append(
+        f'<rect x="{x}" y="{y}" width="{box_w:.0f}" height="{box_h:.0f}" '
+        f'rx="4" fill="rgba(0,0,0,0.65)" stroke="rgba(255,255,255,0.2)" stroke-width="1" />'
+    )
+
+    for i, (label, color, shape) in enumerate(legend_items):
+        cy = y + padding + i * line_height + line_height / 2
+        cx = x + padding + marker_size
+        marker = _svg_marker_path(shape, cx, cy, marker_size)
+        parts.append(
+            f'<g stroke="{escape(color)}" fill="none" stroke-width="1.5" '
+            f'stroke-linecap="round" stroke-linejoin="round">{marker}</g>'
+        )
+        parts.append(
+            f'<text x="{text_x:.0f}" y="{cy + font_size * 0.35:.1f}" '
+            f'fill="white" font-size="{font_size}" font-family="sans-serif">'
+            f'{escape(label)}</text>'
+        )
+
+    return '<g class="mntviz-legend">' + "".join(parts) + "</g>"
+
+
 def _build_svg(
     layers: list[tuple[list[dict[str, float]], list[str], str]],
     *,
@@ -209,6 +257,7 @@ def _build_svg(
     marker_shape: str,
     show_quality: bool,
     show_angles: bool,
+    legend_items: list[tuple[str, str, str]] | None = None,
 ) -> str:
     elements: list[str] = []
     marker_text_elements: list[str] = []
@@ -261,6 +310,11 @@ def _build_svg(
 
     if marker_text_elements:
         elements.append('<g class="mntviz-mnt-labels" stroke="none">' + "".join(marker_text_elements) + "</g>")
+
+    if legend_items:
+        elements.append(_build_legend_svg(
+            legend_items, x=8, y=8, marker_size=marker_size,
+        ))
 
     body = "".join(elements)
     return (
@@ -443,6 +497,7 @@ def _build_js_runtime_fragment(
     show_angles: bool,
     title: str | None,
     root_id: str,
+    legend_items: list[tuple[str, str, str]] | None = None,
 ) -> str:
     assets = _load_mntviz_runtime_assets()
     if assets is None:
@@ -460,6 +515,7 @@ def _build_js_runtime_fragment(
                 marker_shape=marker_shape,
                 show_quality=show_quality,
                 show_angles=show_angles,
+                legend_items=legend_items,
             ),
             title=title,
             root_id=root_id,
@@ -521,6 +577,7 @@ $mntviz_css
 
 <section id="$root_id" class="mntviz-jupyter">
     <div class="mntviz-runtime-host" data-mntviz-runtime-host></div>
+    $legend_html
 </section>
 
 <script type="module">
@@ -580,6 +637,34 @@ $mntviz_css
 """
     )
 
+    # Build HTML legend overlay
+    legend_html = ""
+    if legend_items:
+        _SHAPE_SVG = {
+            "circle": '<circle cx="7" cy="7" r="4" />',
+            "square": '<rect x="3" y="3" width="8" height="8" />',
+            "diamond": '<polygon points="7,2 12,7 7,12 2,7" />',
+            "triangle": '<polygon points="7,2 12,12 2,12" />',
+        }
+        rows_html = []
+        for label, lcolor, lshape in legend_items:
+            svg_icon = _SHAPE_SVG.get(lshape, _SHAPE_SVG["circle"])
+            rows_html.append(
+                f'<div style="display:flex;align-items:center;gap:5px;margin:2px 0">'
+                f'<svg width="14" height="14" viewBox="0 0 14 14" fill="none" '
+                f'stroke="{escape(lcolor)}" stroke-width="2" stroke-linecap="round">'
+                f'{svg_icon}</svg>'
+                f'<span style="color:white;font-size:11px;font-family:sans-serif">'
+                f'{escape(label)}</span></div>'
+            )
+        legend_html = (
+            '<div style="position:absolute;top:8px;left:8px;'
+            'background:rgba(0,0,0,0.65);padding:6px 10px;border-radius:6px;'
+            'pointer-events:none;z-index:10">'
+            + "".join(rows_html)
+            + "</div>"
+        )
+
     return template.substitute(
         root_id=root_id,
         page_title=page_title,
@@ -591,6 +676,7 @@ $mntviz_css
         renderer_js_json=json.dumps(renderer_js),
         inspector_js_json=json.dumps(inspector_js),
         viewer_js_json=json.dumps(viewer_js),
+        legend_html=legend_html,
     )
 
 
@@ -609,6 +695,7 @@ def _build_html_with_js_runtime(
     show_quality: bool,
     show_angles: bool,
     title: str | None,
+    legend_items: list[tuple[str, str, str]] | None = None,
 ) -> tuple[str, str]:
     root_id = f"mntviz-{uuid4().hex}"
     inline = _build_js_runtime_fragment(
@@ -626,6 +713,7 @@ def _build_html_with_js_runtime(
     show_angles=show_angles,
     title=title,
     root_id=root_id,
+    legend_items=legend_items,
     )
 
     page_title = escape(title or "mntviz")
@@ -701,6 +789,7 @@ def plot_mnt(
     colormap: str | None = None,
     colormap_values: Sequence[float] | np.ndarray | None = None,
     overlays: list[tuple[Any, str]] | None = None,
+    overlay_labels: list[str] | bool | None = None,
 ) -> str | MntVizFigure:
     """Render minutiae plot as SVG, interactive HTML, or Jupyter display object."""
 
@@ -747,6 +836,28 @@ def plot_mnt(
         records = load_minutiae(minutiae)
         layers.append((records, [color] * len(records), marker_shape))
 
+    # Build legend items from overlay_labels
+    # None → no legend, True → auto-generate, list[str] → custom labels
+    legend_items: list[tuple[str, str, str]] | None = None
+    if overlay_labels is not None and overlay_labels is not False and overlays is not None:
+        if overlay_labels is True:
+            resolved_labels = [f"Layer {i + 1}" for i in range(len(overlays))]
+        else:
+            resolved_labels = list(overlay_labels)
+            if len(resolved_labels) != len(overlays):
+                raise ValueError(
+                    f"overlay_labels length ({len(resolved_labels)}) must match "
+                    f"overlays length ({len(overlays)})"
+                )
+        legend_items = []
+        for label, entry in zip(resolved_labels, overlays):
+            if len(entry) == 3:
+                _, lc, ls = entry
+            else:
+                _, lc = entry
+                ls = marker_shape
+            legend_items.append((label, lc, ls))
+
     bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
 
     w = width or bg_w or 1000
@@ -765,6 +876,7 @@ def plot_mnt(
         marker_shape=marker_shape,
         show_quality=show_quality,
         show_angles=show_angles,
+        legend_items=legend_items,
     )
     html_inline, html = _build_html_with_js_runtime(
         layers,
@@ -780,6 +892,7 @@ def plot_mnt(
         show_quality=show_quality,
         show_angles=show_angles,
         title=title,
+        legend_items=legend_items,
     )
 
     if output_path is not None:
