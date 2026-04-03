@@ -153,6 +153,136 @@ export async function plotHuv(host, config) {
 }
 
 /**
+ * Load an image and return its natural dimensions.
+ * @param {string} src - Data URI or URL.
+ * @returns {Promise<{w: number, h: number}>}
+ */
+function _loadImageDimensions(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = reject;
+        img.src = src;
+    });
+}
+
+/**
+ * Create a static SVG element showing the HUV composite (background image,
+ * heatmap overlay, and UV arrows) without any interactive pan/zoom.
+ *
+ * @param {Object} config - Same config as plotHuv.
+ * @param {number} w - Image width in pixels.
+ * @param {number} h - Image height in pixels.
+ * @returns {SVGSVGElement}
+ */
+function _createStaticHuvSvg(config, w, h) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    if (config.pixelated) svg.style.imageRendering = 'pixelated';
+
+    // Background image
+    const bgImage = document.createElementNS(SVG_NS, 'image');
+    bgImage.setAttribute('href', config.imageSrc);
+    bgImage.setAttribute('width', w);
+    bgImage.setAttribute('height', h);
+    if (config.pixelated) bgImage.setAttribute('image-rendering', 'pixelated');
+    svg.appendChild(bgImage);
+
+    // Heatmap overlay
+    if (config.overlaySrc) {
+        const ovImage = document.createElementNS(SVG_NS, 'image');
+        ovImage.setAttribute('href', config.overlaySrc);
+        ovImage.setAttribute('width', w);
+        ovImage.setAttribute('height', h);
+        ovImage.setAttribute('opacity', config.overlayOpacity ?? 1.0);
+        if (config.pixelated) ovImage.setAttribute('image-rendering', 'pixelated');
+        svg.appendChild(ovImage);
+    }
+
+    // UV arrows
+    if (config.arrows && config.arrows.length > 0) {
+        const arrowGroup = document.createElementNS(SVG_NS, 'g');
+        svg.appendChild(arrowGroup);
+        const uvRenderer = new UVFieldRenderer(arrowGroup);
+        uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
+    }
+
+    return svg;
+}
+
+/**
+ * Open a modal dialog containing a full interactive plotHuv viewer.
+ * Only one modal can be open at a time.
+ *
+ * @param {Object} config - Same config as plotHuv.
+ */
+function _openHuvModal(config) {
+    // Prevent duplicate modals
+    const existing = document.querySelector('.mntviz-modal-backdrop');
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'mntviz-modal-backdrop';
+
+    const content = document.createElement('div');
+    content.className = 'mntviz-modal-content';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'mntviz-modal-close';
+    closeBtn.textContent = '\u00D7';
+
+    function close() {
+        backdrop.remove();
+        document.removeEventListener('keydown', onKey);
+    }
+
+    function onKey(e) {
+        if (e.key === 'Escape') close();
+    }
+
+    closeBtn.addEventListener('click', close);
+    backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop) close();
+    });
+    document.addEventListener('keydown', onKey);
+
+    content.appendChild(closeBtn);
+    backdrop.appendChild(content);
+    document.body.appendChild(backdrop);
+
+    // Wait two frames so the browser fully computes layout before
+    // the Viewer measures its container for resetView().
+    requestAnimationFrame(() => {
+        requestAnimationFrame(async () => {
+            const viewer = await plotHuv(content, config);
+            viewer.resetView();
+        });
+    });
+}
+
+/**
+ * Render a lightweight static thumbnail of an HUV plot.
+ * Clicking the thumbnail opens a full interactive viewer in a modal.
+ *
+ * @param {HTMLElement} host - Container element.
+ * @param {Object} config - Same config as plotHuv.
+ * @returns {Promise<HTMLElement>} The wrapper element.
+ */
+export async function plotHuvThumbnail(host, config) {
+    const { w, h } = await _loadImageDimensions(config.imageSrc);
+    const svg = _createStaticHuvSvg(config, w, h);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'mntviz-thumbnail-wrap';
+    wrap.appendChild(svg);
+    wrap.addEventListener('click', () => _openHuvModal(config));
+
+    host.appendChild(wrap);
+    return wrap;
+}
+
+/**
  * Render a side-by-side match comparison viewer.
  *
  * @param {HTMLElement} host

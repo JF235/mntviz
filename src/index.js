@@ -14,3 +14,4 @@ export { UVFieldRenderer } from './uv-renderer.js';
 export { OverlayLayer } from './overlay.js';
 export { MinutiaeInspector } from './minutiae-inspector.js';
 export { MatchViewer } from './match-viewer.js';
+export { plotHuvThumbnail } from './plots.js';
