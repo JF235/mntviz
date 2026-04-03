@@ -7,6 +7,7 @@ Detailed usage and API reference for the JavaScript runtime and Python wrapper.
 ### Public Modules
 
 - `Viewer` from `src/viewer.js`
+- `MatchViewer` from `src/match-viewer.js`
 - `MinutiaeRenderer`, `createMarkerShape`, and `parseMinutiaeText` from `src/minutiae-renderer.js`
 - `MinutiaeInspector` from `src/minutiae-inspector.js`
 - `UVFieldRenderer` from `src/uv-renderer.js`
@@ -17,6 +18,7 @@ Import through `src/index.js`:
 ```javascript
 import {
   Viewer,
+  MatchViewer,
   MinutiaeRenderer,
   createMarkerShape,
   MinutiaeInspector,
@@ -65,6 +67,21 @@ const inspector = new MinutiaeInspector(viewer, {
   patchMode: 'visible',
 });
 inspector.enable();
+```
+
+### Match Viewer
+
+```javascript
+const mv = new MatchViewer('#viewer', {
+  leftMinutiae,
+  rightMinutiae,
+  pairs: [{ leftIdx: 0, rightIdx: 3 }, { leftIdx: 1, rightIdx: 7 }],
+  leftTitle: 'latent',
+  rightTitle: 'reference',
+  showSegmentsOnLoad: true,
+});
+
+await mv.loadImages('/latent.png', '/reference.png');
 ```
 
 ### API Summary
@@ -216,8 +233,8 @@ Python docs are in `python/README.md`.
 
 Quick reminder:
 
-- Wrapper role: render/export (`svg`, `html`, `jupyter`)
-- JS runtime handles hover/click minutiae interaction
+- Wrapper role: data prep + config JSON → JS does all rendering
+- Output formats: `html` (standalone page) or `jupyter` (inline display object)
 
 ```python
 from mntviz import minutiae_from_min, plot_mnt

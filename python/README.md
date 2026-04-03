@@ -1,10 +1,9 @@
 # mntviz Python Wrapper
 
-Thin Python wrapper for rendering/exporting minutiae visualizations.
+Thin Python wrapper for rendering minutiae visualizations. All drawing is done by the JS runtime — Python handles data loading, colormap resolution, image encoding, and config assembly.
 
-- Outputs: `svg`, `html`, `jupyter`
+- Outputs: `html` (standalone page), `jupyter` (inline display object)
 - Preferred inputs: `.min` file path or `numpy.ndarray` (`x, y, angle, [quality]`)
-- Advanced interaction logic belongs to the JavaScript runtime (`src/`)
 
 ## Install
 
@@ -26,9 +25,6 @@ from mntviz import minutiae_from_min, plot_mnt
 
 arr = minutiae_from_min("../examples/sd258/000/minutiae/sd258_000_11-00_latent_bad.min")
 
-# SVG string
-svg = plot_mnt(arr, output_format="svg")
-
 # Standalone HTML string
 html = plot_mnt(arr, output_format="html", title="Minutiae")
 
@@ -37,13 +33,37 @@ fig = plot_mnt(arr, output_format="jupyter")
 fig
 ```
 
+### Matching view
+
+```python
+from mntviz import load_pairs, minutiae_from_min, plot_mnt_match
+
+latent = minutiae_from_min("../examples/sd258/000/minutiae/sd258_000_11-00_latent_bad.min")
+reference = minutiae_from_min("../examples/sd258/000/minutiae/sd258_000_11-01_template_bad.min")
+pairs = load_pairs("../examples/sd258/000/matching/sd258_000_11-00_latent_bad__sd258_000_11-01_template_bad.txt")
+
+match_fig = plot_mnt_match(
+    left_minutiae=latent,
+    right_minutiae=reference,
+    pairs=pairs,
+    left_background_img="../examples/sd258/000/images/sd258_000_11-00_latent_bad.png",
+    right_background_img="../examples/sd258/000/images/sd258_000_11-01_template_bad.png",
+    left_title="latent",
+    right_title="reference",
+    show_segments=True,
+    output_format="jupyter",
+)
+
+match_fig
+```
+
 ## `plot_mnt` Parameters
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `minutiae` | path, ndarray, etc. | `None` | Minutiae data (required unless `overlays` is used) |
 | `background_img` | path or None | `None` | Background fingerprint image |
-| `output_format` | str | `"html"` | `"svg"`, `"html"`, or `"jupyter"` |
+| `output_format` | str | `"html"` | `"html"` or `"jupyter"` |
 | `output_path` | path or None | `None` | Save output to file |
 | `color` | str | `"#00ff00"` | CSS color for markers |
 | `marker_size` | float | `2.0` | Marker radius in pixels |
@@ -69,12 +89,6 @@ plot_mnt(arr, marker_shape="diamond", output_format="jupyter")
 plot_mnt(arr, marker_shape="triangle", output_format="jupyter")
 ```
 
-### Disable quality-based alpha
-
-```python
-plot_mnt(arr, base_opacity=0.8, quality_alpha=False, output_format="svg")
-```
-
 ### Colormap by quality
 
 ```python
@@ -97,11 +111,22 @@ plot_mnt(
 )
 ```
 
-### Notes
+## Building the JS Bundle
+
+The bundle is pre-built and included in the package. To rebuild after editing JS sources:
+
+```bash
+cd ..          # repo root
+npm install    # first time only
+npm run build  # src/plots.js → python/src/mntviz/_bundle/plots.bundle.js
+```
+
+## Notes
 
 - `colormap` and `colormap_values` must both be provided or both be `None`.
 - `overlays` and `colormap` are mutually exclusive.
 - When `overlays` is used, `minutiae` must be `None`.
 - Dictionary-based rows are still accepted but deprecated.
+- Pair files accept one `left_idx right_idx` record per line; comments starting with `#` are ignored.
 - For full JS-side interaction details, see [../USAGE.md](../USAGE.md).
 - Notebook example: `notebooks/mntviz_sd258_example.ipynb`.

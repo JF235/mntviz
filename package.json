@@ -1,0 +1,10 @@
+{
+  "name": "mntviz",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/plots.js --bundle --format=esm --outfile=python/src/mntviz/_bundle/plots.bundle.js && cp src/mntviz.css python/src/mntviz/_bundle/mntviz.css"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

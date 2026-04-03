@@ -1,0 +1,16 @@
+# latent_file: sd258_000_11-00_latent_bad.min
+# reference_file: sd258_000_11-01_template_bad.min
+# theta_deg: -0.081285
+# translation_xy: 168.468327 -198.491428
+# format: latent_index reference_index
+0 4
+1 16
+2 25
+4 19
+5 20
+7 24
+8 22
+10 28
+11 27
+13 30
+14 35

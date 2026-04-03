@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from string import Template
 from typing import Any, Iterable, Mapping, Sequence
 import base64
 import json
@@ -12,9 +11,13 @@ import mimetypes
 from urllib.parse import quote
 import warnings
 from uuid import uuid4
+import io
 
 import numpy as np
 from PIL import Image
+
+
+# ── Data loading helpers ─────────────────────────────────────
 
 
 def _parse_min_file(minutiae_file: str | Path) -> list[dict[str, float]]:
@@ -132,6 +135,61 @@ def load_minutiae(minutiae: Any) -> list[dict[str, float]]:
     return records
 
 
+def _parse_pairs_file(pair_file: str | Path) -> np.ndarray:
+    path = Path(pair_file)
+    if not path.exists():
+        raise FileNotFoundError(f"pairs file not found: {path}")
+
+    rows: list[tuple[int, int]] = []
+    for idx, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            raise ValueError(f"invalid pairs row at line {idx}: expected left_idx right_idx")
+
+        try:
+            left_idx = int(parts[0])
+            right_idx = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(f"invalid integer values in pairs row at line {idx}") from exc
+
+        rows.append((left_idx, right_idx))
+
+    if not rows:
+        raise ValueError("pairs file does not contain pair rows")
+
+    return np.asarray(rows, dtype=int)
+
+
+def load_pairs(pairs: Any) -> np.ndarray:
+    """Load pairs from a text file or array-like input."""
+    if isinstance(pairs, (str, Path)):
+        return _parse_pairs_file(pairs)
+
+    if isinstance(pairs, np.ndarray):
+        arr = np.asarray(pairs)
+    else:
+        if not isinstance(pairs, Iterable) or isinstance(pairs, (str, bytes, bytearray)):
+            raise TypeError("pairs must be a path or an iterable of (left_idx, right_idx)")
+        arr = np.asarray(list(pairs))
+
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError("pairs must be a (K, 2) array of integer indices")
+    if arr.shape[0] == 0:
+        raise ValueError("pairs is empty")
+
+    return arr.astype(int, copy=False)
+
+
+# ── Image & color helpers ────────────────────────────────────
+
+
+VALID_MARKER_SHAPES = {"circle", "triangle", "square", "diamond"}
+
+
 def _image_to_data_uri(background_img: str | Path | None) -> tuple[str | None, int | None, int | None]:
     if background_img is None:
         return None, None, None
@@ -150,27 +208,6 @@ def _image_to_data_uri(background_img: str | Path | None) -> tuple[str | None, i
     raw = path.read_bytes()
     encoded = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{encoded}", width, height
-
-
-VALID_MARKER_SHAPES = {"circle", "triangle", "square", "diamond"}
-
-
-def _svg_marker_path(shape: str, cx: float, cy: float, r: float) -> str:
-    if shape == "circle":
-        return f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r}" />'
-    elif shape == "square":
-        return f'<rect x="{cx - r:.2f}" y="{cy - r:.2f}" width="{2 * r:.2f}" height="{2 * r:.2f}" />'
-    elif shape == "diamond":
-        pts = f"{cx:.2f},{cy - r:.2f} {cx + r:.2f},{cy:.2f} {cx:.2f},{cy + r:.2f} {cx - r:.2f},{cy:.2f}"
-        return f'<polygon points="{pts}" />'
-    elif shape == "triangle":
-        pts = " ".join(
-            f"{cx + r * math.cos(math.radians(a)):.2f},{cy - r * math.sin(math.radians(a)):.2f}"
-            for a in (90, 210, 330)
-        )
-        return f'<polygon points="{pts}" />'
-    else:
-        raise ValueError(f"unknown marker_shape: {shape}")
 
 
 def _resolve_colormap(
@@ -195,283 +232,6 @@ def _resolve_colormap(
     return [mcolors.to_hex(cmap(float(v))) for v in norm_vals]
 
 
-def _build_legend_svg(
-    legend_items: list[tuple[str, str, str]],
-    *,
-    x: float,
-    y: float,
-    marker_size: float = 3.0,
-    font_size: float = 12.0,
-    line_height: float = 20.0,
-    padding: float = 8.0,
-) -> str:
-    """Build an SVG legend group.
-
-    Parameters
-    ----------
-    legend_items : list of (label, color, shape) tuples.
-    x, y : top-left corner of the legend box.
-    """
-    if not legend_items:
-        return ""
-
-    text_x = x + padding + marker_size * 2 + 6
-    max_label_len = max(len(label) for label, _, _ in legend_items)
-    box_w = padding * 2 + marker_size * 2 + 6 + max_label_len * font_size * 0.6
-    box_h = padding * 2 + len(legend_items) * line_height
-
-    parts: list[str] = []
-    parts.append(
-        f'<rect x="{x}" y="{y}" width="{box_w:.0f}" height="{box_h:.0f}" '
-        f'rx="4" fill="rgba(0,0,0,0.65)" stroke="rgba(255,255,255,0.2)" stroke-width="1" />'
-    )
-
-    for i, (label, color, shape) in enumerate(legend_items):
-        cy = y + padding + i * line_height + line_height / 2
-        cx = x + padding + marker_size
-        marker = _svg_marker_path(shape, cx, cy, marker_size)
-        parts.append(
-            f'<g stroke="{escape(color)}" fill="none" stroke-width="1.5" '
-            f'stroke-linecap="round" stroke-linejoin="round">{marker}</g>'
-        )
-        parts.append(
-            f'<text x="{text_x:.0f}" y="{cy + font_size * 0.35:.1f}" '
-            f'fill="white" font-size="{font_size}" font-family="sans-serif">'
-            f'{escape(label)}</text>'
-        )
-
-    return '<g class="mntviz-legend">' + "".join(parts) + "</g>"
-
-
-def _build_svg(
-    layers: list[tuple[list[dict[str, float]], list[str], str]],
-    *,
-    background_uri: str | None,
-    width: int,
-    height: int,
-    marker_size: float,
-    segment_length: float,
-    line_width: float,
-    base_opacity: float,
-    quality_alpha: bool,
-    marker_shape: str,
-    show_quality: bool,
-    show_angles: bool,
-    legend_items: list[tuple[str, str, str]] | None = None,
-) -> str:
-    elements: list[str] = []
-    marker_text_elements: list[str] = []
-
-    if background_uri:
-        elements.append(
-            (
-                f'<image id="mntviz-bg-image" href="{escape(background_uri)}" '
-                f'x="0" y="0" width="{width}" height="{height}" preserveAspectRatio="none" />'
-            )
-        )
-
-    for records, per_colors, layer_shape in layers:
-        for rec, mnt_color in zip(records, per_colors):
-            x = rec["x"]
-            y = rec["y"]
-            angle = rec["angle"]
-            quality = rec["quality"]
-
-            if quality_alpha:
-                q_factor = min(1.0, max(0.2, quality / 100.0))
-                opacity = max(0.0, min(1.0, base_opacity * q_factor))
-            else:
-                opacity = base_opacity
-
-            rad = angle * math.pi / 180.0
-            x_end = x + segment_length * math.cos(rad)
-            y_end = y - segment_length * math.sin(rad)
-
-            elements.append(
-                (
-                    f'<g opacity="{opacity:.4f}" '
-                    f'stroke="{escape(mnt_color)}" fill="none" stroke-width="{line_width}" '
-                    f'stroke-linecap="round" stroke-linejoin="round">'
-                    f'{_svg_marker_path(layer_shape, x, y, marker_size)}'
-                    f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x_end:.2f}" y2="{y_end:.2f}" />'
-                    "</g>"
-                )
-            )
-
-            if show_quality:
-                marker_text_elements.append(
-                    f'<text x="{x:.2f}" y="{y + 10:.2f}" text-anchor="middle" fill="{escape(mnt_color)}" font-size="10">Q:{int(round(quality))}</text>'
-                )
-
-            if show_angles:
-                marker_text_elements.append(
-                    f'<text x="{x:.2f}" y="{y - 10:.2f}" text-anchor="middle" fill="{escape(mnt_color)}" font-size="10">{int(round(angle))} deg</text>'
-                )
-
-    if marker_text_elements:
-        elements.append('<g class="mntviz-mnt-labels" stroke="none">' + "".join(marker_text_elements) + "</g>")
-
-    if legend_items:
-        elements.append(_build_legend_svg(
-            legend_items, x=8, y=8, marker_size=marker_size,
-        ))
-
-    body = "".join(elements)
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">{body}</svg>'
-    )
-
-
-def _build_interactive_fragment(svg: str, *, title: str | None = None, root_id: str) -> str:
-    page_title = escape(title or "mntviz")
-    template = Template(
-        """
-<style>
-  #$root_id {
-    --text: #e5e7eb;
-    --grid: rgba(148,163,184,0.14);
-    --accent: #22c55e;
-    color: var(--text);
-    font-family: \"IBM Plex Sans\", \"Segoe UI\", sans-serif;
-    width: min(95vw, 1200px);
-    height: min(80vh, 760px);
-    max-height: 760px;
-    min-height: 380px;
-    background: linear-gradient(165deg, rgba(17,24,39,0.95), rgba(2,6,23,0.95));
-    border-radius: 14px;
-    overflow: hidden;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.35);
-    position: relative;
-    margin: 8px 0;
-  }
-  #$root_id .viewport {
-    position: absolute;
-    inset: 0;
-    overflow: hidden;
-    cursor: grab;
-    background-image:
-      linear-gradient(0deg, var(--grid) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-    background-size: 24px 24px;
-  }
-  #$root_id .canvas {
-    transform-origin: 0 0;
-    user-select: none;
-    -webkit-user-drag: none;
-  }
-  #$root_id svg {
-    display: block;
-    pointer-events: none;
-  }
-</style>
-<section id=\"$root_id\" class=\"mntviz-jupyter\">
-  <div class=\"viewport\" data-mntviz-role=\"viewport\">
-    <div class=\"canvas\" data-mntviz-role=\"canvas\">$svg</div>
-  </div>
-</section>
-<script>
-  (() => {
-    const root = document.getElementById('$root_id');
-    if (!root) return;
-    const viewport = root.querySelector('[data-mntviz-role="viewport"]');
-    const canvas = root.querySelector('[data-mntviz-role="canvas"]');
-    if (!viewport || !canvas) return;
-
-    let scale = 1;
-    let tx = 0;
-    let ty = 0;
-    let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
-
-    const apply = () => {
-      canvas.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
-    };
-
-    viewport.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const rect = viewport.getBoundingClientRect();
-      const ox = e.clientX - rect.left;
-      const oy = e.clientY - rect.top;
-      const next = Math.min(20, Math.max(0.1, scale * (e.deltaY > 0 ? 0.9 : 1.1)));
-      const wx = (ox - tx) / scale;
-      const wy = (oy - ty) / scale;
-      scale = next;
-      tx = ox - wx * scale;
-      ty = oy - wy * scale;
-      apply();
-    }, { passive: false });
-
-    viewport.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 && e.button !== 1) return;
-      dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      viewport.style.cursor = 'grabbing';
-    });
-
-    window.addEventListener('mousemove', (e) => {
-      if (!dragging) return;
-      tx += e.clientX - lastX;
-      ty += e.clientY - lastY;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      apply();
-    });
-
-    window.addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      viewport.style.cursor = 'grab';
-    });
-
-    apply();
-  })();
-</script>
-"""
-    )
-    return template.substitute(root_id=root_id, page_title=page_title, svg=svg)
-
-
-def _find_mntviz_repo_root() -> Path | None:
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        if (parent / "src" / "viewer.js").exists() and (parent / "src" / "minutiae-renderer.js").exists():
-            return parent
-    return None
-
-
-def _load_mntviz_runtime_assets() -> tuple[str, str, str, str] | None:
-    repo_root = _find_mntviz_repo_root()
-    if repo_root is None:
-        return None
-
-    src_dir = repo_root / "src"
-    viewer_js = (src_dir / "viewer.js").read_text(encoding="utf-8")
-    renderer_js = (src_dir / "minutiae-renderer.js").read_text(encoding="utf-8")
-    inspector_js = (src_dir / "minutiae-inspector.js").read_text(encoding="utf-8")
-    css = (src_dir / "mntviz.css").read_text(encoding="utf-8")
-    return viewer_js, renderer_js, inspector_js, css
-
-
-def _load_match_runtime_assets() -> tuple[str, str, str, str, str] | None:
-    repo_root = _find_mntviz_repo_root()
-    if repo_root is None:
-        return None
-
-    src_dir = repo_root / "src"
-    match_viewer_path = src_dir / "match-viewer.js"
-    if not match_viewer_path.exists():
-        return None
-
-    viewer_js = (src_dir / "viewer.js").read_text(encoding="utf-8")
-    renderer_js = (src_dir / "minutiae-renderer.js").read_text(encoding="utf-8")
-    inspector_js = (src_dir / "minutiae-inspector.js").read_text(encoding="utf-8")
-    match_viewer_js = match_viewer_path.read_text(encoding="utf-8")
-    css = (src_dir / "mntviz.css").read_text(encoding="utf-8")
-    return viewer_js, renderer_js, inspector_js, match_viewer_js, css
-
 
 def _build_blank_background_data_uri(width: int, height: int) -> str:
     svg = (
@@ -481,247 +241,108 @@ def _build_blank_background_data_uri(width: int, height: int) -> str:
     return "data:image/svg+xml;utf8," + quote(svg, safe="")
 
 
-def _build_js_runtime_fragment(
-    layers: list[tuple[list[dict[str, float]], list[str], str]],
-    *,
-    background_uri: str | None,
-    width: int,
-    height: int,
-    marker_size: float,
-    segment_length: float,
-    line_width: float,
-    base_opacity: float,
-    quality_alpha: bool,
-    marker_shape: str,
-    show_quality: bool,
-    show_angles: bool,
-    title: str | None,
-    root_id: str,
-    legend_items: list[tuple[str, str, str]] | None = None,
+def _array_to_rgba_uri(
+    data: np.ndarray,
+    cmap_name: str,
+    vmin: float | None,
+    vmax: float | None,
+    alpha: float,
+    alpha_modulated: bool,
 ) -> str:
-    assets = _load_mntviz_runtime_assets()
-    if assets is None:
-        return _build_interactive_fragment(
-            _build_svg(
-                layers,
-                background_uri=background_uri,
-                width=width,
-                height=height,
-                marker_size=marker_size,
-                segment_length=segment_length,
-                line_width=line_width,
-                base_opacity=base_opacity,
-                quality_alpha=quality_alpha,
-                marker_shape=marker_shape,
-                show_quality=show_quality,
-                show_angles=show_angles,
-                legend_items=legend_items,
-            ),
-            title=title,
-            root_id=root_id,
-        )
+    """Convert a 2D array to an RGBA PNG data URI using a matplotlib colormap."""
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
 
-    viewer_js, renderer_js, inspector_js, css = assets
-    page_title = escape(title or "mntviz")
-    image_src = background_uri or _build_blank_background_data_uri(width, height)
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"data must be a 2D array, got shape {arr.shape}")
 
-    # Flatten layers into a single list with per-minutia _color and _shape
-    all_records: list[dict] = []
-    fallback_color = "#00ff00"
-    for records, per_colors, layer_shape in layers:
-        if not all_records and per_colors:
-            fallback_color = per_colors[0]
-        for rec, c in zip(records, per_colors):
-            all_records.append({**rec, "_color": c, "_shape": layer_shape})
-    minutiae_json = json.dumps(all_records)
+    lo = float(arr.min()) if vmin is None else vmin
+    hi = float(arr.max()) if vmax is None else vmax
 
-    renderer_options_json = json.dumps(
-        {
-            "markerSize": marker_size,
-            "segmentLength": segment_length,
-            "lineWidth": line_width,
-            "baseOpacity": base_opacity,
-            "qualityAlpha": quality_alpha,
-            "markerShape": marker_shape,
-            "showQuality": show_quality,
-            "showAngles": show_angles,
-        }
-    )
+    norm = mcolors.Normalize(vmin=lo, vmax=hi)
+    cmap = cm.get_cmap(cmap_name)
+    rgba = cmap(norm(arr))  # (H, W, 4) float [0, 1]
 
-    template = Template(
-        """
-<style>
-$mntviz_css
+    if alpha_modulated:
+        norm_val = np.clip((arr - lo) / (hi - lo + 1e-8), 0, 1)
+        rgba[..., 3] = np.clip(norm_val * alpha * 3, 0, alpha)
+    else:
+        rgba[..., 3] = alpha
 
-    #$root_id {
-        width: min(95vw, 1200px);
-        height: min(80vh, 760px);
-        max-height: 760px;
-        min-height: 380px;
-        background: linear-gradient(165deg, rgba(17,24,39,0.95), rgba(2,6,23,0.95));
-        border-radius: 14px;
-        overflow: hidden;
-        position: relative;
-        margin: 8px 0;
-    }
-
-    #$root_id .mntviz-runtime-host {
-        position: absolute;
-        inset: 0;
-    }
-
-    #$root_id .mntviz-runtime-host .mntviz-viewport {
-        border-radius: 0;
-    }
-</style>
-
-<section id="$root_id" class="mntviz-jupyter">
-    <div class="mntviz-runtime-host" data-mntviz-runtime-host></div>
-    $legend_html
-</section>
-
-<script type="module">
-    (() => {
-        const root = document.getElementById('$root_id');
-        if (!root) return;
-
-        const host = root.querySelector('[data-mntviz-runtime-host]');
-        if (!host) return;
-
-        const minutiae = $minutiae_json;
-        const imageSrc = $image_src_json;
-        const markerColor = $color_json;
-        const rendererOptions = $renderer_options_json;
-
-        const rendererSource = $renderer_js_json;
-        const inspectorSourceTemplate = $inspector_js_json;
-        const viewerSourceTemplate = $viewer_js_json;
-
-        const makeModuleUrl = (source) => {
-            const blob = new Blob([source], { type: 'text/javascript' });
-            return URL.createObjectURL(blob);
-        };
-
-        const rendererUrl = makeModuleUrl(rendererSource);
-        const inspectorSource = inspectorSourceTemplate.replace("from './minutiae-renderer.js';", "from '" + rendererUrl + "';");
-        const inspectorUrl = makeModuleUrl(inspectorSource);
-        const viewerSource = viewerSourceTemplate.replace("from './minutiae-inspector.js';", "from '" + inspectorUrl + "';");
-        const viewerUrl = makeModuleUrl(viewerSource);
-
-        Promise.all([import(viewerUrl), import(rendererUrl)])
-            .then(async ([viewerMod, rendererMod]) => {
-                const { Viewer } = viewerMod;
-                const { MinutiaeRenderer } = rendererMod;
-
-                const viewer = new Viewer(host, { minimap: true });
-                await viewer.loadImage(imageSrc);
-
-                const renderer = new MinutiaeRenderer(viewer.svgLayer);
-                renderer.draw(minutiae, markerColor, rendererOptions);
-
-                viewer.enableMinutiaeInspector({
-                    getAllMinutiae: () => minutiae,
-                    patchMode: 'visible',
-                });
-            })
-            .catch((err) => {
-                console.error('mntviz runtime bootstrap failed', err);
-            })
-            .finally(() => {
-                URL.revokeObjectURL(viewerUrl);
-                URL.revokeObjectURL(inspectorUrl);
-                URL.revokeObjectURL(rendererUrl);
-            });
-    })();
-</script>
-"""
-    )
-
-    # Build HTML legend overlay
-    legend_html = ""
-    if legend_items:
-        _SHAPE_SVG = {
-            "circle": '<circle cx="7" cy="7" r="4" />',
-            "square": '<rect x="3" y="3" width="8" height="8" />',
-            "diamond": '<polygon points="7,2 12,7 7,12 2,7" />',
-            "triangle": '<polygon points="7,2 12,12 2,12" />',
-        }
-        rows_html = []
-        for label, lcolor, lshape in legend_items:
-            svg_icon = _SHAPE_SVG.get(lshape, _SHAPE_SVG["circle"])
-            rows_html.append(
-                f'<div style="display:flex;align-items:center;gap:5px;margin:2px 0">'
-                f'<svg width="14" height="14" viewBox="0 0 14 14" fill="none" '
-                f'stroke="{escape(lcolor)}" stroke-width="2" stroke-linecap="round">'
-                f'{svg_icon}</svg>'
-                f'<span style="color:white;font-size:11px;font-family:sans-serif">'
-                f'{escape(label)}</span></div>'
-            )
-        legend_html = (
-            '<div style="position:absolute;top:8px;left:8px;'
-            'background:rgba(0,0,0,0.65);padding:6px 10px;border-radius:6px;'
-            'pointer-events:none;z-index:10">'
-            + "".join(rows_html)
-            + "</div>"
-        )
-
-    return template.substitute(
-        root_id=root_id,
-        page_title=page_title,
-        mntviz_css=css,
-        minutiae_json=minutiae_json,
-        image_src_json=json.dumps(image_src),
-        color_json=json.dumps(fallback_color),
-        renderer_options_json=renderer_options_json,
-        renderer_js_json=json.dumps(renderer_js),
-        inspector_js_json=json.dumps(inspector_js),
-        viewer_js_json=json.dumps(viewer_js),
-        legend_html=legend_html,
-    )
+    rgba_u8 = (np.clip(rgba, 0, 1) * 255).astype(np.uint8)
+    img = Image.fromarray(rgba_u8, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
-def _build_html_with_js_runtime(
-    layers: list[tuple[list[dict[str, float]], list[str], str]],
+def _compute_uv_arrows(
+    u: np.ndarray,
+    v: np.ndarray,
+    h: np.ndarray,
     *,
-    background_uri: str | None,
-    width: int,
-    height: int,
-    marker_size: float,
-    segment_length: float,
-    line_width: float,
-    base_opacity: float,
-    quality_alpha: bool,
-    marker_shape: str,
-    show_quality: bool,
-    show_angles: bool,
-    title: str | None,
-    legend_items: list[tuple[str, str, str]] | None = None,
-) -> tuple[str, str]:
-    root_id = f"mntviz-{uuid4().hex}"
-    inline = _build_js_runtime_fragment(
-    layers,
-    background_uri=background_uri,
-    width=width,
-    height=height,
-    marker_size=marker_size,
-    segment_length=segment_length,
-    line_width=line_width,
-    base_opacity=base_opacity,
-    quality_alpha=quality_alpha,
-    marker_shape=marker_shape,
-    show_quality=show_quality,
-    show_angles=show_angles,
-    title=title,
-    root_id=root_id,
-    legend_items=legend_items,
-    )
+    stride: int,
+    h_threshold: float,
+    seg_base: float,
+    seg_gain: float,
+) -> list[list[float]]:
+    """Compute UV arrows as data: [[x, y, dx, dy, confidence], ...]."""
+    H_px, W_px = h.shape
+    h_max = float(h.max()) + 1e-8
+    h_norm = h / h_max
+    arrows: list[list[float]] = []
 
+    for yi in range(0, H_px, stride):
+        for xi in range(0, W_px, stride):
+            conf = float(h_norm[yi, xi])
+            if conf < h_threshold:
+                continue
+            uu = float(u[yi, xi])
+            vv = float(v[yi, xi])
+            mag = math.hypot(uu, vv)
+            if mag < 1e-4:
+                continue
+            nx = uu / mag
+            ny = -(vv / mag)
+            seg_len = seg_base + seg_gain * (conf ** 2)
+            arrows.append([xi, yi, nx * seg_len, ny * seg_len, conf])
+
+    return arrows
+
+
+# ── Bundle loading ───────────────────────────────────────────
+
+
+_BUNDLE_DIR = Path(__file__).parent / "_bundle"
+
+
+def _load_plots_bundle() -> str:
+    path = _BUNDLE_DIR / "plots.bundle.js"
+    if not path.exists():
+        raise RuntimeError(
+            "mntviz JS bundle not found. Run 'npm run build' in the mntviz repo root, "
+            "or reinstall the package."
+        )
+    return path.read_text("utf-8")
+
+
+def _load_bundle_css() -> str:
+    path = _BUNDLE_DIR / "mntviz.css"
+    return path.read_text("utf-8") if path.exists() else ""
+
+
+# ── Unified HTML template ────────────────────────────────────
+
+
+def _wrap_standalone(html_inline: str, title: str | None = None) -> str:
     page_title = escape(title or "mntviz")
-    standalone = f"""<!doctype html>
-<html lang=\"en\">
+    return f"""<!doctype html>
+<html lang="en">
 <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>{page_title}</title>
     <style>
         body {{
@@ -737,27 +358,91 @@ def _build_html_with_js_runtime(
         }}
     </style>
 </head>
-<body>{inline}
+<body>{html_inline}
 </body>
 </html>
 """
-    return inline, standalone
+
+
+def _build_runtime_html(
+    func_name: str,
+    config: dict,
+    *,
+    container_h: int,
+    title: str | None = None,
+    host_class: str = "mntviz-runtime-host",
+    host_attr: str = "data-mntviz-runtime-host",
+) -> tuple[str, str]:
+    """Generate HTML that calls plots.bundle.js[func_name](host, config).
+
+    Returns (html_inline, html_standalone).
+    """
+    bundle_js = _load_plots_bundle()
+    css = _load_bundle_css()
+    root_id = f"mntviz-{uuid4().hex[:12]}"
+    config_json = json.dumps(config)
+    bundle_json = json.dumps(bundle_js)
+
+    html_inline = f"""
+<style>
+{css}
+
+    #{root_id} {{
+        width: min(95vw, 1200px);
+        height: min(90vh, {container_h}px);
+        border-radius: 14px;
+        overflow: hidden;
+        position: relative;
+        margin: 8px 0;
+    }}
+
+    #{root_id} .{host_class} {{
+        position: absolute;
+        inset: 0;
+    }}
+
+    #{root_id} .{host_class} .mntviz-viewport {{
+        border-radius: 0;
+    }}
+</style>
+
+<section id="{root_id}" class="mntviz-jupyter">
+    <div class="{host_class}" {host_attr}></div>
+</section>
+
+<script type="module">
+    (() => {{
+        const root = document.getElementById('{root_id}');
+        if (!root) return;
+        const host = root.querySelector('[{host_attr}]');
+        if (!host) return;
+
+        const config = {config_json};
+        const bundleSource = {bundle_json};
+        const blob = new Blob([bundleSource], {{ type: 'text/javascript' }});
+        const url = URL.createObjectURL(blob);
+
+        import(url)
+            .then(mod => mod.{func_name}(host, config))
+            .catch(err => console.error('mntviz runtime bootstrap failed', err))
+            .finally(() => URL.revokeObjectURL(url));
+    }})();
+</script>
+"""
+    html_standalone = _wrap_standalone(html_inline, title)
+    return html_inline, html_standalone
+
+
+# ── Output helpers ───────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class MntVizFigure:
-    svg: str
     html_inline: str
     html_standalone: str
 
-    def to_svg(self) -> str:
-        return self.svg
-
     def to_html(self, *, standalone: bool = False) -> str:
         return self.html_standalone if standalone else self.html_inline
-
-    def to_html_standalone(self) -> str:
-        return self.html_standalone
 
     def _repr_html_(self) -> str:
         return self.html_inline
@@ -766,6 +451,27 @@ class MntVizFigure:
         return {
             "text/html": self.html_inline,
         }
+
+
+def _emit_output(
+    *,
+    html_inline: str,
+    html_standalone: str,
+    output_format: str,
+    output_path: str | Path | None,
+) -> str | MntVizFigure:
+    fmt = output_format.lower().strip()
+    if output_path is not None:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(html_standalone, encoding="utf-8")
+
+    if fmt == "html":
+        return html_standalone
+    return MntVizFigure(html_inline=html_inline, html_standalone=html_standalone)
+
+
+# ── Public API ───────────────────────────────────────────────
 
 
 def plot_mnt(
@@ -783,6 +489,7 @@ def plot_mnt(
     marker_shape: str = "circle",
     show_quality: bool = False,
     show_angles: bool = False,
+    labels: Sequence[str | int | float] | None = None,
     width: int | None = None,
     height: int | None = None,
     title: str | None = None,
@@ -791,11 +498,11 @@ def plot_mnt(
     overlays: list[tuple[Any, str]] | None = None,
     overlay_labels: list[str] | bool | None = None,
 ) -> str | MntVizFigure:
-    """Render minutiae plot as SVG, interactive HTML, or Jupyter display object."""
+    """Render minutiae plot as interactive HTML or Jupyter display object."""
 
     fmt = output_format.lower().strip()
-    if fmt not in {"svg", "html", "jupyter"}:
-        raise ValueError("output_format must be one of: svg, html, jupyter")
+    if fmt not in {"html", "jupyter"}:
+        raise ValueError("output_format must be one of: html, jupyter")
 
     if marker_shape not in VALID_MARKER_SHAPES:
         raise ValueError(f"marker_shape must be one of {VALID_MARKER_SHAPES}, got {marker_shape!r}")
@@ -811,6 +518,9 @@ def plot_mnt(
 
     if overlays is None and minutiae is None:
         raise TypeError("minutiae is required when overlays is not provided")
+
+    if overlay_labels is not None and overlays is None:
+        raise ValueError("overlay_labels requires overlays to be provided")
 
     # Build layers: list of (records, per_minutia_colors, shape)
     layers: list[tuple[list[dict[str, float]], list[str], str]] = []
@@ -836,224 +546,86 @@ def plot_mnt(
         records = load_minutiae(minutiae)
         layers.append((records, [color] * len(records), marker_shape))
 
-    # Build legend items from overlay_labels
-    # None → no legend, True → auto-generate, list[str] → custom labels
-    legend_items: list[tuple[str, str, str]] | None = None
-    if overlay_labels is not None and overlay_labels is not False and overlays is not None:
-        if overlay_labels is True:
-            resolved_labels = [f"Layer {i + 1}" for i in range(len(overlays))]
-        else:
-            resolved_labels = list(overlay_labels)
-            if len(resolved_labels) != len(overlays):
-                raise ValueError(
-                    f"overlay_labels length ({len(resolved_labels)}) must match "
-                    f"overlays length ({len(overlays)})"
-                )
-        legend_items = []
-        for label, entry in zip(resolved_labels, overlays):
-            if len(entry) == 3:
-                _, lc, ls = entry
-            else:
-                _, lc = entry
-                ls = marker_shape
-            legend_items.append((label, lc, ls))
-
     bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
-
     w = width or bg_w or 1000
     h = height or bg_h or 1000
 
-    svg = _build_svg(
-        layers,
-        background_uri=bg_uri,
-        width=int(w),
-        height=int(h),
-        marker_size=marker_size,
-        segment_length=segment_length,
-        line_width=line_width,
-        base_opacity=base_opacity,
-        quality_alpha=quality_alpha,
-        marker_shape=marker_shape,
-        show_quality=show_quality,
-        show_angles=show_angles,
-        legend_items=legend_items,
-    )
-    html_inline, html = _build_html_with_js_runtime(
-        layers,
-        background_uri=bg_uri,
-        width=int(w),
-        height=int(h),
-        marker_size=marker_size,
-        segment_length=segment_length,
-        line_width=line_width,
-        base_opacity=base_opacity,
-        quality_alpha=quality_alpha,
-        marker_shape=marker_shape,
-        show_quality=show_quality,
-        show_angles=show_angles,
-        title=title,
-        legend_items=legend_items,
-    )
+    # Flatten layers into records with per-minutia _color and _shape
+    all_records: list[dict] = []
+    fallback_color = "#00ff00"
+    for recs, per_colors, layer_shape in layers:
+        if not all_records and per_colors:
+            fallback_color = per_colors[0]
+        for rec, c in zip(recs, per_colors):
+            all_records.append({**rec, "_color": c, "_shape": layer_shape})
 
-    if output_path is not None:
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if fmt == "svg":
-            path.write_text(svg, encoding="utf-8")
+    # Inject per-minutia labels
+    if labels is not None:
+        if len(labels) != len(all_records):
+            raise ValueError(
+                f"labels length ({len(labels)}) must match minutiae count ({len(all_records)})"
+            )
+        for rec, lbl in zip(all_records, labels):
+            rec["_label"] = str(lbl)
+
+    # Build legend items for overlays
+    legend_items: list[dict[str, str]] | None = None
+    if overlays is not None and overlay_labels is not None:
+        if isinstance(overlay_labels, bool) and overlay_labels:
+            legend_labels = [f"Layer {i}" for i in range(len(layers))]
+        elif isinstance(overlay_labels, list):
+            if len(overlay_labels) != len(layers):
+                raise ValueError(
+                    f"overlay_labels length ({len(overlay_labels)}) must match overlays count ({len(layers)})"
+                )
+            legend_labels = overlay_labels
         else:
-            path.write_text(html, encoding="utf-8")
+            legend_labels = None
 
-    if fmt == "svg":
-        return svg
-    if fmt == "html":
-        return html
-    return MntVizFigure(svg=svg, html_inline=html_inline, html_standalone=html)
+        if legend_labels is not None:
+            legend_items = [
+                {"label": lbl, "color": colors[0], "shape": shape}
+                for lbl, (_, colors, shape) in zip(legend_labels, layers)
+            ]
 
-
-# ── Match viewer ──────────────────────────────────────────
-
-
-def _build_match_js_runtime_fragment(
-    *,
-    match_data_json: str,
-    left_image_src: str,
-    right_image_src: str,
-    renderer_options_json: str,
-    marker_color_json: str,
-    left_title_json: str,
-    right_title_json: str,
-    show_segments_json: str,
-    root_id: str,
-    css: str,
-    viewer_js: str,
-    renderer_js: str,
-    inspector_js: str,
-    match_viewer_js: str,
-) -> str:
-    template = Template(
-        """
-<style>
-$mntviz_css
-
-    #$root_id {
-        width: min(95vw, 1200px);
-        height: min(80vh, 760px);
-        max-height: 760px;
-        min-height: 380px;
-        background: linear-gradient(165deg, rgba(17,24,39,0.95), rgba(2,6,23,0.95));
-        border-radius: 14px;
-        overflow: hidden;
-        position: relative;
-        margin: 8px 0;
+    config = {
+        "imageSrc": bg_uri or _build_blank_background_data_uri(int(w), int(h)),
+        "minutiae": all_records,
+        "color": fallback_color,
+        "rendererOptions": {
+            "markerSize": marker_size,
+            "segmentLength": segment_length,
+            "lineWidth": line_width,
+            "baseOpacity": base_opacity,
+            "qualityAlpha": quality_alpha,
+            "markerShape": marker_shape,
+            "showQuality": show_quality,
+            "showAngles": show_angles,
+            "showLabels": labels is not None,
+        },
     }
 
-    #$root_id .mntviz-match-runtime-host {
-        position: absolute;
-        inset: 0;
-    }
-</style>
+    if legend_items is not None:
+        config["legend"] = legend_items
 
-<section id="$root_id" class="mntviz-jupyter">
-    <div class="mntviz-match-runtime-host" data-mntviz-match-host></div>
-</section>
-
-<script type="module">
-    (() => {
-        const root = document.getElementById('$root_id');
-        if (!root) return;
-        const host = root.querySelector('[data-mntviz-match-host]');
-        if (!host) return;
-
-        const matchData = $match_data_json;
-        const leftImageSrc = $left_image_src_json;
-        const rightImageSrc = $right_image_src_json;
-        const markerColor = $marker_color_json;
-        const rendererOptions = $renderer_options_json;
-        const leftTitle = $left_title_json;
-        const rightTitle = $right_title_json;
-        const showSegments = $show_segments_json;
-
-        const rendererSource = $renderer_js_json;
-        const inspectorSourceTemplate = $inspector_js_json;
-        const viewerSourceTemplate = $viewer_js_json;
-        const matchViewerSourceTemplate = $match_viewer_js_json;
-
-        const makeModuleUrl = (source) => {
-            const blob = new Blob([source], { type: 'text/javascript' });
-            return URL.createObjectURL(blob);
-        };
-
-        const rendererUrl = makeModuleUrl(rendererSource);
-        const inspectorSource = inspectorSourceTemplate.replace(
-            "from './minutiae-renderer.js';", "from '" + rendererUrl + "';"
-        );
-        const inspectorUrl = makeModuleUrl(inspectorSource);
-        const viewerSource = viewerSourceTemplate.replace(
-            "from './minutiae-inspector.js';", "from '" + inspectorUrl + "';"
-        );
-        const viewerUrl = makeModuleUrl(viewerSource);
-
-        let matchViewerSource = matchViewerSourceTemplate.replace(
-            "from './viewer.js';", "from '" + viewerUrl + "';"
-        );
-        matchViewerSource = matchViewerSource.replace(
-            "from './minutiae-renderer.js';", "from '" + rendererUrl + "';"
-        );
-        const matchViewerUrl = makeModuleUrl(matchViewerSource);
-
-        import(matchViewerUrl)
-            .then(async (mod) => {
-                const { MatchViewer } = mod;
-
-                const mv = new MatchViewer(host, {
-                    leftMinutiae: matchData.leftMinutiae,
-                    rightMinutiae: matchData.rightMinutiae,
-                    pairs: matchData.pairs,
-                    leftTitle: leftTitle,
-                    rightTitle: rightTitle,
-                    markerColor: markerColor,
-                    rendererOptions: rendererOptions,
-                    showSegmentsOnLoad: showSegments,
-                });
-                await mv.loadImages(leftImageSrc, rightImageSrc);
-            })
-            .catch((err) => {
-                console.error('mntviz match-viewer bootstrap failed', err);
-            })
-            .finally(() => {
-                URL.revokeObjectURL(matchViewerUrl);
-                URL.revokeObjectURL(viewerUrl);
-                URL.revokeObjectURL(inspectorUrl);
-                URL.revokeObjectURL(rendererUrl);
-            });
-    })();
-</script>
-"""
+    html_inline, html_standalone = _build_runtime_html(
+        "plotMinutiae", config, container_h=int(h), title=title,
     )
 
-    return template.substitute(
-        root_id=root_id,
-        mntviz_css=css,
-        match_data_json=match_data_json,
-        left_image_src_json=json.dumps(left_image_src),
-        right_image_src_json=json.dumps(right_image_src),
-        marker_color_json=marker_color_json,
-        renderer_options_json=renderer_options_json,
-        left_title_json=left_title_json,
-        right_title_json=right_title_json,
-        show_segments_json=show_segments_json,
-        renderer_js_json=json.dumps(renderer_js),
-        inspector_js_json=json.dumps(inspector_js),
-        viewer_js_json=json.dumps(viewer_js),
-        match_viewer_js_json=json.dumps(match_viewer_js),
+    return _emit_output(
+        html_inline=html_inline, html_standalone=html_standalone,
+        output_format=fmt, output_path=output_path,
     )
+
+
+# ── Match viewer ─────────────────────────────────────────────
 
 
 def plot_mnt_match(
     *,
     left_minutiae: Any,
     right_minutiae: Any,
-    pairs: np.ndarray | Sequence | None = None,
+    pairs: str | Path | np.ndarray | Sequence | None = None,
     left_background_img: str | Path | None = None,
     right_background_img: str | Path | None = None,
     output_format: str = "html",
@@ -1092,8 +664,8 @@ def plot_mnt_match(
     """Render a side-by-side match viewer with connecting segments and dual-patch popups."""
 
     fmt = output_format.lower().strip()
-    if fmt not in {"svg", "html", "jupyter"}:
-        raise ValueError("output_format must be one of: svg, html, jupyter")
+    if fmt not in {"html", "jupyter"}:
+        raise ValueError("output_format must be one of: html, jupyter")
 
     if marker_shape not in VALID_MARKER_SHAPES:
         raise ValueError(f"marker_shape must be one of {VALID_MARKER_SHAPES}, got {marker_shape!r}")
@@ -1122,7 +694,6 @@ def plot_mnt_match(
 
     # Resolve pairs
     if pairs is None:
-        # Simple 1-to-1 mode
         if len(left_records) != len(right_records):
             raise ValueError(
                 f"When pairs is None, left and right minutiae must have equal length "
@@ -1131,9 +702,7 @@ def plot_mnt_match(
             )
         pairs_array = np.column_stack([np.arange(len(left_records)), np.arange(len(right_records))])
     else:
-        pairs_array = np.asarray(pairs, dtype=int)
-        if pairs_array.ndim != 2 or pairs_array.shape[1] != 2:
-            raise ValueError("pairs must be a (K, 2) array of integer indices")
+        pairs_array = load_pairs(pairs)
 
     n_pairs = len(pairs_array)
 
@@ -1149,7 +718,7 @@ def plot_mnt_match(
     else:
         segment_colors = pair_colors
 
-    # Resolve per-pair alpha and width (scalar or array)
+    # Resolve per-pair alpha and width
     if isinstance(match_line_alpha, (int, float)):
         segment_alphas = [float(match_line_alpha)] * n_pairs
     else:
@@ -1176,7 +745,6 @@ def plot_mnt_match(
         left_paired_indices.add(int(li))
         right_paired_indices.add(int(ri))
 
-    # Unpaired minutiae
     for i, rec in enumerate(left_records):
         if i not in left_paired_indices:
             rec["_color"] = unpaired_color
@@ -1188,7 +756,7 @@ def plot_mnt_match(
             rec["_pairIndex"] = -1
             rec["_unpaired"] = True
 
-    # Build match data JSON
+    # Build match data
     pairs_data = []
     for k in range(n_pairs):
         pairs_data.append({
@@ -1230,89 +798,155 @@ def plot_mnt_match(
 
     fallback_color = pair_colors[0] if pair_colors else color
 
-    # Try JS runtime
-    assets = _load_match_runtime_assets()
-    if assets is not None:
-        viewer_js, renderer_js, inspector_js, match_viewer_js, css = assets
-        root_id = f"mntviz-match-{uuid4().hex}"
+    config = {
+        "matchData": match_data,
+        "leftImageSrc": left_src,
+        "rightImageSrc": right_src,
+        "markerColor": fallback_color,
+        "rendererOptions": renderer_options,
+        "showSegments": show_segments,
+        "leftTitle": left_title,
+        "rightTitle": right_title,
+    }
 
-        html_inline = _build_match_js_runtime_fragment(
-            match_data_json=json.dumps(match_data),
-            left_image_src=left_src,
-            right_image_src=right_src,
-            renderer_options_json=json.dumps(renderer_options),
-            marker_color_json=json.dumps(fallback_color),
-            left_title_json=json.dumps(left_title),
-            right_title_json=json.dumps(right_title),
-            show_segments_json=json.dumps(show_segments),
-            root_id=root_id,
-            css=css,
-            viewer_js=viewer_js,
-            renderer_js=renderer_js,
-            inspector_js=inspector_js,
-            match_viewer_js=match_viewer_js,
+    html_inline, html_standalone = _build_runtime_html(
+        "plotMatch", config,
+        container_h=max(int(lh), int(rh)),
+        title=title,
+        host_class="mntviz-match-runtime-host",
+        host_attr="data-mntviz-match-host",
+    )
+
+    return _emit_output(
+        html_inline=html_inline, html_standalone=html_standalone,
+        output_format=fmt, output_path=output_path,
+    )
+
+
+# ── Overlay & HUV ────────────────────────────────────────────
+
+
+def plot_overlay(
+    data: np.ndarray,
+    *,
+    background_img: str | Path | None = None,
+    cmap: str = "magma",
+    alpha: float = 0.6,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    alpha_modulated: bool = False,
+    title: str | None = None,
+    output_format: str = "html",
+    output_path: str | Path | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> str | MntVizFigure:
+    """Render a 2D array as a colormapped overlay on a background image."""
+
+    fmt = output_format.lower().strip()
+    if fmt not in {"html", "jupyter"}:
+        raise ValueError("output_format must be one of: html, jupyter")
+
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"data must be 2D, got shape {arr.shape}")
+
+    bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
+    w = width or bg_w or arr.shape[1]
+    h = height or bg_h or arr.shape[0]
+
+    overlay_uri = _array_to_rgba_uri(arr, cmap, vmin, vmax, alpha, alpha_modulated)
+    bg_src = bg_uri or _build_blank_background_data_uri(int(w), int(h))
+
+    config = {
+        "imageSrc": bg_src,
+        "overlaySrc": overlay_uri,
+        "overlayOpacity": 1.0,
+    }
+
+    html_inline, html_standalone = _build_runtime_html(
+        "plotOverlay", config, container_h=int(h), title=title,
+    )
+
+    return _emit_output(
+        html_inline=html_inline, html_standalone=html_standalone,
+        output_format=fmt, output_path=output_path,
+    )
+
+
+def plot_huv(
+    h: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    *,
+    background_img: str | Path | None = None,
+    h_cmap: str = "magma",
+    h_alpha: float = 0.7,
+    h_threshold: float = 0.05,
+    arrow_stride: int = 4,
+    seg_base: float = 2.0,
+    seg_gain: float = 10.0,
+    arrow_size: float = 4.0,
+    line_width: float = 0.8,
+    arrow_color: str = "#43C4E4",
+    title: str | None = None,
+    output_format: str = "html",
+    output_path: str | Path | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> str | MntVizFigure:
+    """Render an HUV combined plot: heatmap overlay + UV orientation arrows."""
+
+    fmt = output_format.lower().strip()
+    if fmt not in {"html", "jupyter"}:
+        raise ValueError("output_format must be one of: html, jupyter")
+
+    h_arr = np.asarray(h, dtype=float)
+    u_arr = np.asarray(u, dtype=float)
+    v_arr = np.asarray(v, dtype=float)
+
+    if h_arr.ndim != 2 or u_arr.ndim != 2 or v_arr.ndim != 2:
+        raise ValueError("h, u, v must all be 2D arrays")
+    if h_arr.shape != u_arr.shape or h_arr.shape != v_arr.shape:
+        raise ValueError(
+            f"h, u, v must have the same shape — got {h_arr.shape}, {u_arr.shape}, {v_arr.shape}"
         )
 
-        page_title = escape(title or "mntviz match")
-        html_standalone = f"""<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>{page_title}</title>
-    <style>
-        body {{
-            margin: 0;
-            min-height: 100vh;
-            display: grid;
-            place-items: center;
-            background:
-                radial-gradient(circle at 20% 10%, rgba(34,197,94,0.2), transparent 35%),
-                radial-gradient(circle at 80% 90%, rgba(56,189,248,0.15), transparent 35%),
-                #0f172a;
-            padding: 16px;
-        }}
-    </style>
-</head>
-<body>{html_inline}
-</body>
-</html>
-"""
-    else:
-        # Fallback: static side-by-side SVGs
-        left_layers = [(left_records, [r.get("_color", color) for r in left_records], marker_shape)]
-        right_layers = [(right_records, [r.get("_color", color) for r in right_records], marker_shape)]
+    bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
+    w = width or bg_w or h_arr.shape[1]
+    h_px = height or bg_h or h_arr.shape[0]
 
-        left_svg = _build_svg(
-            left_layers, background_uri=left_uri,
-            width=int(lw), height=int(lh),
-            marker_size=marker_size, segment_length=segment_length,
-            line_width=line_width, base_opacity=base_opacity,
-            quality_alpha=quality_alpha, marker_shape=marker_shape,
-            show_quality=False, show_angles=False,
-        )
-        right_svg = _build_svg(
-            right_layers, background_uri=right_uri,
-            width=int(rw), height=int(rh),
-            marker_size=marker_size, segment_length=segment_length,
-            line_width=line_width, base_opacity=base_opacity,
-            quality_alpha=quality_alpha, marker_shape=marker_shape,
-            show_quality=False, show_angles=False,
-        )
+    overlay_uri = _array_to_rgba_uri(
+        h_arr, h_cmap, vmin=0.0, vmax=None, alpha=h_alpha, alpha_modulated=True,
+    )
 
-        html_inline = f'<div style="display:flex;gap:8px">{left_svg}{right_svg}</div>'
-        html_standalone = f"<!doctype html><html><body>{html_inline}</body></html>"
+    arrows = _compute_uv_arrows(
+        u_arr, v_arr, h_arr,
+        stride=arrow_stride,
+        h_threshold=h_threshold,
+        seg_base=seg_base,
+        seg_gain=seg_gain,
+    )
 
-    # SVG output is the left SVG only (limited for match mode)
-    svg_out = html_inline
+    bg_src = bg_uri or _build_blank_background_data_uri(int(w), int(h_px))
 
-    if output_path is not None:
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(html_standalone, encoding="utf-8")
+    config = {
+        "imageSrc": bg_src,
+        "overlaySrc": overlay_uri,
+        "overlayOpacity": 1.0,
+        "arrows": arrows,
+        "arrowOptions": {
+            "arrowSize": arrow_size,
+            "lineWidth": line_width,
+            "color": arrow_color,
+        },
+    }
 
-    if fmt == "svg":
-        return html_inline
-    if fmt == "html":
-        return html_standalone
-    return MntVizFigure(svg=svg_out, html_inline=html_inline, html_standalone=html_standalone)
+    html_inline, html_standalone = _build_runtime_html(
+        "plotHuv", config, container_h=int(h_px), title=title,
+    )
+
+    return _emit_output(
+        html_inline=html_inline, html_standalone=html_standalone,
+        output_format=fmt, output_path=output_path,
+    )

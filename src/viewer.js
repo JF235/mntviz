@@ -120,11 +120,125 @@ export class Viewer {
         const iw = vs ? vs.width : (this._img.naturalWidth || 500);
         const ih = vs ? vs.height : (this._img.naturalHeight || 500);
 
-        const scale = Math.min(vw / iw, vh / ih) * 0.95;
+        const scale = Math.min(vw / iw, vh / ih);
         this._view.scale = scale;
         this._view.translateX = (vw - iw * scale) / 2;
         this._view.translateY = (vh - ih * scale) / 2;
         this._applyTransform();
+    }
+
+    /**
+     * Serialize the SVG layer (with background image embedded) as a standalone SVG string.
+     * @returns {string} SVG markup.
+     */
+    exportSVG() {
+        const clone = this._svg.cloneNode(true);
+        clone.setAttribute('xmlns', SVG_NS);
+        clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+        clone.classList.remove('mntviz-mnt-layer');
+        clone.removeAttribute('style');
+
+        // Embed background image as a base64 <image> element
+        if (this._img.src) {
+            const canvas = document.createElement('canvas');
+            const w = this._img.naturalWidth;
+            const h = this._img.naturalHeight;
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(this._img, 0, 0);
+            const dataUri = canvas.toDataURL('image/png');
+
+            const img = document.createElementNS(SVG_NS, 'image');
+            img.setAttribute('href', dataUri);
+            img.setAttribute('width', w);
+            img.setAttribute('height', h);
+            clone.insertBefore(img, clone.firstChild);
+        }
+
+        return new XMLSerializer().serializeToString(clone);
+    }
+
+    /**
+     * Download the full SVG as a file.
+     * @param {string} [filename='minutiae.svg'] - Download filename.
+     */
+    downloadSVG(filename = 'minutiae.svg') {
+        const svg = this.exportSVG();
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    /**
+     * Return the visible image region based on current zoom/pan.
+     * @returns {{ x: number, y: number, w: number, h: number }}
+     */
+    visibleRegion() {
+        const { scale: s, translateX: tx, translateY: ty } = this._view;
+        const vpW = this._viewport.clientWidth;
+        const vpH = this._viewport.clientHeight;
+        return { x: -tx / s, y: -ty / s, w: vpW / s, h: vpH / s };
+    }
+
+    /**
+     * Serialize only the currently visible viewport region as SVG.
+     * @returns {string} SVG markup.
+     */
+    exportSVGView() {
+        const { x, y, w, h } = this.visibleRegion();
+        const vpW = this._viewport.clientWidth;
+        const vpH = this._viewport.clientHeight;
+
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('xmlns', SVG_NS);
+        svg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+        svg.setAttribute('width', vpW);
+        svg.setAttribute('height', vpH);
+        svg.setAttribute('viewBox', `${x} ${y} ${w} ${h}`);
+
+        // Background image at full size — viewBox clips it
+        if (this._img.src) {
+            const canvas = document.createElement('canvas');
+            const nw = this._img.naturalWidth;
+            const nh = this._img.naturalHeight;
+            canvas.width = nw;
+            canvas.height = nh;
+            canvas.getContext('2d').drawImage(this._img, 0, 0);
+
+            const img = document.createElementNS(SVG_NS, 'image');
+            img.setAttribute('href', canvas.toDataURL('image/png'));
+            img.setAttribute('width', nw);
+            img.setAttribute('height', nh);
+            svg.appendChild(img);
+        }
+
+        // Minutiae layer contents
+        const mntClone = this._svg.cloneNode(true);
+        mntClone.removeAttribute('class');
+        mntClone.removeAttribute('style');
+        // Move children into the root svg (avoid nested svg viewBox issues)
+        while (mntClone.firstChild) svg.appendChild(mntClone.firstChild);
+
+        return new XMLSerializer().serializeToString(svg);
+    }
+
+    /**
+     * Download the visible viewport region as an SVG file.
+     * @param {string} [filename='minutiae_view.svg'] - Download filename.
+     */
+    downloadSVGView(filename = 'minutiae_view.svg') {
+        const svg = this.exportSVGView();
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
     }
 
     /** Remove all event listeners and DOM created by this viewer. */
@@ -198,6 +312,22 @@ export class Viewer {
         this._zoomLabel.textContent = '100%';
         this._zoomWrap.append(this._zoomLabel);
         this._viewport.append(this._zoomWrap);
+
+        // SVG export buttons
+        this._exportBtnWrap = _el('div', 'mntviz-export-btns');
+
+        this._exportBtn = _el('button', 'mntviz-export-svg-btn');
+        this._exportBtn.textContent = 'SVG';
+        this._exportBtn.title = 'Download full image as SVG';
+        this._exportBtn.addEventListener('click', () => this.downloadSVG());
+
+        this._exportViewBtn = _el('button', 'mntviz-export-svg-btn');
+        this._exportViewBtn.textContent = 'View';
+        this._exportViewBtn.title = 'Download current view as SVG';
+        this._exportViewBtn.addEventListener('click', () => this.downloadSVGView());
+
+        this._exportBtnWrap.append(this._exportBtn, this._exportViewBtn);
+        this._viewport.append(this._exportBtnWrap);
 
         this._el.append(this._viewport);
     }

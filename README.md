@@ -2,17 +2,18 @@
 
 Visualization toolkit for fingerprint minutiae and related overlays.
 
-It has three parts:
+## Architecture
 
-- JavaScript runtime in `src/` (Viewer, MinutiaeRenderer, MinutiaeInspector, UVFieldRenderer, OverlayLayer)
-- Embeddable Web Component in `widget/` (`<mntviz-widget>`) for drop-in usage in any HTML page
-- Thin Python wrapper in `python/` for SVG/HTML export and Jupyter rendering, with support for custom marker shapes, colormaps, quality-based alpha, and multi-layer overlays
+```
+src/           JS runtime (Viewer, MinutiaeRenderer, Inspector, Overlay, UV, MatchViewer)
+  plots.js     High-level facade (plotMinutiae, plotOverlay, plotHuv, plotMatch)
+widget/        Web Component (<mntviz-widget>) for drop-in HTML usage
+python/        Thin Python wrapper — data prep + config JSON, all rendering by JS
+```
+
+The Python wrapper prepares data (loads minutiae, encodes images, resolves colormaps) and passes a JSON config to the JS bundle. **All drawing logic lives in JavaScript.**
 
 ## Quick Start (JavaScript)
-
-1. Copy `src/` into your static assets.
-2. Include `mntviz.css`.
-3. Import from `index.js`.
 
 ```html
 <link rel="stylesheet" href="/static/mntviz/mntviz.css" />
@@ -30,23 +31,42 @@ It has three parts:
 </script>
 ```
 
-## Widget (zero-config)
+## Quick Start (Python)
 
-The `<mntviz-widget>` Web Component provides a self-contained viewer with drag-and-drop support. Include it in any HTML or Markdown-rendered page:
+```bash
+cd python && pip install -e .
+```
+
+```python
+from mntviz import minutiae_from_min, plot_mnt
+
+arr = minutiae_from_min('examples/sd258/000/minutiae/sd258_000_11-00_latent_bad.min')
+fig = plot_mnt(arr, output_format='jupyter')
+```
+
+The SD258 example also includes a match viewer driven by a pair file in `examples/sd258/000/matching/` and demonstrated in `python/notebooks/mntviz_sd258_example.ipynb`.
+
+## Widget (zero-config)
 
 ```html
 <script type="module" src="widget/mntviz-widget.js"></script>
-
 <mntviz-widget style="width: 100%; height: 500px;"></mntviz-widget>
 ```
 
-Drop image files (`.png`, `.jpg`, `.bmp`, `.tiff`, `.webp`) and minutiae files (`.min`, `.txt`) onto the widget. Multiple `.min` layers are supported with automatic color assignment.
+Drop images and `.min` files onto the widget. Multiple layers supported.
 
-See `widget/example.html` for a complete demo.
+## Building the JS Bundle
+
+The Python package includes a pre-built bundle. To rebuild after editing JS:
+
+```bash
+npm install    # first time only
+npm run build  # bundles src/plots.js → python/src/mntviz/_bundle/plots.bundle.js
+```
 
 ## Documentation
 
-- Detailed JS usage/API: [USAGE.md](USAGE.md)
+- JS API reference: [USAGE.md](USAGE.md)
 - Python wrapper docs: [python/README.md](python/README.md)
 - Example notebook: `python/notebooks/mntviz_sd258_example.ipynb`
 

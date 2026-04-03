@@ -1,4 +1,6 @@
+# Project
 figma_demo/
+assets/
 
 # Python
 __pycache__/
@@ -20,8 +22,10 @@ venv/
 
 # Node / frontend
 node_modules/
+package-lock.json
 *.tsbuildinfo
 
 # Editor / OS
+.vscode/
 .DS_Store
 Thumbs.db

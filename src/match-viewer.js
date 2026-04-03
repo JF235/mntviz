@@ -88,7 +88,22 @@ export class MatchViewer {
         this._popup.style.display = 'none';
         this._buildPopup();
 
-        this._container.append(this._leftPanel, this._rightPanel, this._overlaySvg, this._popup);
+        // SVG export buttons
+        this._exportBtnWrap = _el('div', 'mntviz-export-btns');
+
+        this._exportBtn = _el('button', 'mntviz-export-svg-btn');
+        this._exportBtn.textContent = 'SVG';
+        this._exportBtn.title = 'Download full match as SVG';
+        this._exportBtn.addEventListener('click', () => this.downloadSVG());
+
+        this._exportViewBtn = _el('button', 'mntviz-export-svg-btn');
+        this._exportViewBtn.textContent = 'View';
+        this._exportViewBtn.title = 'Download current view as SVG';
+        this._exportViewBtn.addEventListener('click', () => this.downloadSVGView());
+
+        this._exportBtnWrap.append(this._exportBtn, this._exportViewBtn);
+
+        this._container.append(this._leftPanel, this._rightPanel, this._overlaySvg, this._popup, this._exportBtnWrap);
         this._el.appendChild(this._container);
     }
 
@@ -122,6 +137,28 @@ export class MatchViewer {
 
         this._popupPatchesWrap.append(this._leftPatchWrap, this._rightPatchWrap);
         this._popup.append(this._popupClose, this._popupFields, this._popupPatchesWrap);
+
+        // Draggable popup via fields area
+        this._popupFields.classList.add('mntviz-drag-handle');
+        this._popupFields.addEventListener('mousedown', (e) => {
+            this._dragOffset = {
+                x: e.clientX - this._popup.offsetLeft,
+                y: e.clientY - this._popup.offsetTop,
+            };
+            this._popupFields.classList.add('mntviz-dragging');
+
+            const onMove = (ev) => {
+                this._popup.style.left = `${ev.clientX - this._dragOffset.x}px`;
+                this._popup.style.top = `${ev.clientY - this._dragOffset.y}px`;
+            };
+            const onUp = () => {
+                this._popupFields.classList.remove('mntviz-dragging');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
     }
 
     /* ── Public API ───────────────────────────────────────── */
@@ -189,6 +226,210 @@ export class MatchViewer {
         }
     }
 
+    /**
+     * Serialize the full match view as a standalone SVG string.
+     * Both images, minutiae, and visible segment lines are included.
+     * @param {number} [gap=4] - Pixel gap between left and right panels.
+     * @returns {string} SVG markup.
+     */
+    exportSVG(gap = 4) {
+        const lSize = this._leftViewer.imageSize;
+        const rSize = this._rightViewer.imageSize;
+        const totalW = lSize.width + gap + rSize.width;
+        const totalH = Math.max(lSize.height, rSize.height);
+
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('xmlns', SVG_NS);
+        svg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+        svg.setAttribute('width', totalW);
+        svg.setAttribute('height', totalH);
+        svg.setAttribute('viewBox', `0 0 ${totalW} ${totalH}`);
+
+        // Helper: embed a viewer's image + minutiae into a <g>
+        const embedPanel = (viewer, offsetX) => {
+            const g = document.createElementNS(SVG_NS, 'g');
+            if (offsetX) g.setAttribute('transform', `translate(${offsetX}, 0)`);
+
+            // Background image
+            const img = viewer.imageElement;
+            if (img.src) {
+                const canvas = document.createElement('canvas');
+                const w = img.naturalWidth;
+                const h = img.naturalHeight;
+                canvas.width = w;
+                canvas.height = h;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+                const dataUri = canvas.toDataURL('image/png');
+
+                const svgImg = document.createElementNS(SVG_NS, 'image');
+                svgImg.setAttribute('href', dataUri);
+                svgImg.setAttribute('width', w);
+                svgImg.setAttribute('height', h);
+                g.appendChild(svgImg);
+            }
+
+            // Minutiae layer
+            const mntClone = viewer.svgLayer.cloneNode(true);
+            mntClone.removeAttribute('class');
+            mntClone.removeAttribute('style');
+            g.appendChild(mntClone);
+
+            return g;
+        };
+
+        svg.appendChild(embedPanel(this._leftViewer, 0));
+        svg.appendChild(embedPanel(this._rightViewer, lSize.width + gap));
+
+        // Visible segment lines (in image coordinates)
+        const opts = this._options;
+        const segG = document.createElementNS(SVG_NS, 'g');
+        for (let i = 0; i < opts.pairs.length; i++) {
+            const domLine = this._segmentLines[i];
+            if (domLine.style.display === 'none') continue;
+
+            const p = opts.pairs[i];
+            const lm = opts.leftMinutiae[p.leftIdx];
+            const rm = opts.rightMinutiae[p.rightIdx];
+
+            const line = document.createElementNS(SVG_NS, 'line');
+            line.setAttribute('x1', lm.x);
+            line.setAttribute('y1', lm.y);
+            line.setAttribute('x2', rm.x + lSize.width + gap);
+            line.setAttribute('y2', rm.y);
+            line.setAttribute('stroke', domLine.getAttribute('stroke'));
+            line.setAttribute('stroke-opacity', domLine.getAttribute('stroke-opacity'));
+            line.setAttribute('stroke-width', domLine.getAttribute('stroke-width'));
+            line.setAttribute('stroke-linecap', 'round');
+            segG.appendChild(line);
+        }
+        svg.appendChild(segG);
+
+        return new XMLSerializer().serializeToString(svg);
+    }
+
+    /**
+     * Download the match view as an SVG file.
+     * @param {string} [filename='match.svg'] - Download filename.
+     */
+    downloadSVG(filename = 'match.svg') {
+        const svg = this.exportSVG();
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    /**
+     * Serialize the currently visible viewport of both panels as SVG.
+     * @param {number} [gap=4] - Pixel gap between panels.
+     * @returns {string} SVG markup.
+     */
+    exportSVGView(gap = 4) {
+        const lRegion = this._leftViewer.visibleRegion();
+        const rRegion = this._rightViewer.visibleRegion();
+        const lVpW = this._leftViewer.viewport.clientWidth;
+        const lVpH = this._leftViewer.viewport.clientHeight;
+        const rVpW = this._rightViewer.viewport.clientWidth;
+        const rVpH = this._rightViewer.viewport.clientHeight;
+        const totalW = lVpW + gap + rVpW;
+        const totalH = Math.max(lVpH, rVpH);
+
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('xmlns', SVG_NS);
+        svg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+        svg.setAttribute('width', totalW);
+        svg.setAttribute('height', totalH);
+        svg.setAttribute('viewBox', `0 0 ${totalW} ${totalH}`);
+
+        // Helper: embed a viewer's visible region as a nested <svg> with viewBox clipping
+        const embedView = (viewer, region, vpW, vpH, offsetX) => {
+            const nested = document.createElementNS(SVG_NS, 'svg');
+            nested.setAttribute('x', offsetX);
+            nested.setAttribute('y', 0);
+            nested.setAttribute('width', vpW);
+            nested.setAttribute('height', vpH);
+            nested.setAttribute('viewBox', `${region.x} ${region.y} ${region.w} ${region.h}`);
+
+            // Background image
+            const img = viewer.imageElement;
+            if (img.src) {
+                const canvas = document.createElement('canvas');
+                const nw = img.naturalWidth;
+                const nh = img.naturalHeight;
+                canvas.width = nw;
+                canvas.height = nh;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+
+                const svgImg = document.createElementNS(SVG_NS, 'image');
+                svgImg.setAttribute('href', canvas.toDataURL('image/png'));
+                svgImg.setAttribute('width', nw);
+                svgImg.setAttribute('height', nh);
+                nested.appendChild(svgImg);
+            }
+
+            // Minutiae
+            const mntClone = viewer.svgLayer.cloneNode(true);
+            mntClone.removeAttribute('class');
+            mntClone.removeAttribute('style');
+            while (mntClone.firstChild) nested.appendChild(mntClone.firstChild);
+
+            return nested;
+        };
+
+        svg.appendChild(embedView(this._leftViewer, lRegion, lVpW, lVpH, 0));
+        svg.appendChild(embedView(this._rightViewer, rRegion, rVpW, rVpH, lVpW + gap));
+
+        // Visible segment lines — convert image coords to combined SVG pixel coords
+        const opts = this._options;
+        const segG = document.createElementNS(SVG_NS, 'g');
+        for (let i = 0; i < opts.pairs.length; i++) {
+            const domLine = this._segmentLines[i];
+            if (domLine.style.display === 'none') continue;
+
+            const p = opts.pairs[i];
+            const lm = opts.leftMinutiae[p.leftIdx];
+            const rm = opts.rightMinutiae[p.rightIdx];
+
+            // Map image coords → pixel coords in the combined SVG
+            const x1 = (lm.x - lRegion.x) / lRegion.w * lVpW;
+            const y1 = (lm.y - lRegion.y) / lRegion.h * lVpH;
+            const x2 = lVpW + gap + (rm.x - rRegion.x) / rRegion.w * rVpW;
+            const y2 = (rm.y - rRegion.y) / rRegion.h * rVpH;
+
+            const line = document.createElementNS(SVG_NS, 'line');
+            line.setAttribute('x1', x1);
+            line.setAttribute('y1', y1);
+            line.setAttribute('x2', x2);
+            line.setAttribute('y2', y2);
+            line.setAttribute('stroke', domLine.getAttribute('stroke'));
+            line.setAttribute('stroke-opacity', domLine.getAttribute('stroke-opacity'));
+            line.setAttribute('stroke-width', domLine.getAttribute('stroke-width'));
+            line.setAttribute('stroke-linecap', 'round');
+            segG.appendChild(line);
+        }
+        svg.appendChild(segG);
+
+        return new XMLSerializer().serializeToString(svg);
+    }
+
+    /**
+     * Download the current view as an SVG file.
+     * @param {string} [filename='match_view.svg'] - Download filename.
+     */
+    downloadSVGView(filename = 'match_view.svg') {
+        const svg = this.exportSVGView();
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
     destroy() {
         this._ac.abort();
         if (this._leftViewer) this._leftViewer.destroy();
@@ -213,13 +454,6 @@ export class MatchViewer {
         this._leftViewer.viewport.addEventListener('dblclick', (e) => this._onDblClick(e), sig);
         this._rightViewer.viewport.addEventListener('dblclick', (e) => this._onDblClick(e), sig);
 
-        // Click outside popup/markers to dismiss
-        this._container.addEventListener('mousedown', (e) => {
-            if (this._activePopupPairIdx < 0) return;
-            if (this._popup.contains(e.target)) return;
-            if (e.target.closest('.mntviz-mnt-marker')) return;
-            this._hidePopup();
-        }, sig);
     }
 
     _onSvgMouseDown(e) {

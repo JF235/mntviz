@@ -112,6 +112,30 @@ export class MinutiaeInspector {
         tip.append(this._closeBtn, this._fields, this._patchWrap);
         this._tooltip = tip;
         this._viewer.viewport.appendChild(tip);
+
+        // Draggable tooltip via fields area (only when expanded)
+        this._fields.classList.add('mntviz-drag-handle');
+        this._fields.addEventListener('mousedown', (e) => {
+            if (!this._isExpanded) return;
+            e.stopPropagation();
+            this._dragOffset = {
+                x: e.clientX - this._tooltip.offsetLeft,
+                y: e.clientY - this._tooltip.offsetTop,
+            };
+            this._fields.classList.add('mntviz-dragging');
+
+            const onMove = (ev) => {
+                this._tooltip.style.left = `${ev.clientX - this._dragOffset.x}px`;
+                this._tooltip.style.top = `${ev.clientY - this._dragOffset.y}px`;
+            };
+            const onUp = () => {
+                this._fields.classList.remove('mntviz-dragging');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
     }
 
     /* ── Event handlers ───────────────────────────────────── */
@@ -172,10 +196,7 @@ export class MinutiaeInspector {
     }
 
     _onViewportMouseDown(e) {
-        if (!this._isExpanded) return;
-        if (this._tooltip.contains(e.target)) return;
-        if (e.target.closest('.mntviz-mnt-marker')) return;
-        this._collapse();
+        // no-op: popup is dismissed only via the close button
     }
 
     /* ── Highlight ────────────────────────────────────────── */
