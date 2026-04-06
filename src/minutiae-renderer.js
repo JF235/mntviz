@@ -227,8 +227,9 @@ export function parseMinutiaeText(text) {
         if (parts.length >= 3) {
             const [x, y, angle] = parts;
             const quality = parts.length > 3 ? parts[3] : 100;
-            const obj = { x, y, angle, quality };
-            if (parts.length > 4) obj.extra = parts.slice(4);
+            const type = parts.length > 4 ? parts[4] : 0;
+            const obj = { x, y, angle, quality, type };
+            if (parts.length > 5) obj.extra = parts.slice(5);
             result.push(obj);
         }
     }

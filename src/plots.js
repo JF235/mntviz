@@ -18,6 +18,96 @@ import { MatchViewer } from './match-viewer.js';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /**
+ * Create an SVG element from a shape descriptor.
+ *
+ * Supported types:
+ * - polygon: { type: 'polygon', points: [[x,y],...], stroke, strokeWidth, fill, opacity }
+ * - cross:   { type: 'cross', x, y, size, stroke, strokeWidth, opacity }
+ * - path:    { type: 'path', d, stroke, strokeWidth, fill, opacity }
+ *
+ * @param {Object} shape
+ * @returns {SVGElement|null}
+ */
+function _createShapeElement(shape) {
+    if (shape.type === 'polygon') {
+        const poly = document.createElementNS(SVG_NS, 'polygon');
+        poly.setAttribute('points', shape.points.map(p => p.join(',')).join(' '));
+        poly.setAttribute('stroke', shape.stroke || '#ff0000');
+        poly.setAttribute('stroke-width', shape.strokeWidth || 2);
+        poly.setAttribute('fill', shape.fill || 'none');
+        if (shape.opacity != null) poly.setAttribute('opacity', shape.opacity);
+        return poly;
+    }
+    if (shape.type === 'cross') {
+        const g = document.createElementNS(SVG_NS, 'g');
+        g.setAttribute('stroke', shape.stroke || '#00ff00');
+        g.setAttribute('stroke-width', shape.strokeWidth || 1);
+        const s = shape.size || 10;
+        const h = document.createElementNS(SVG_NS, 'line');
+        h.setAttribute('x1', shape.x - s / 2); h.setAttribute('y1', shape.y);
+        h.setAttribute('x2', shape.x + s / 2); h.setAttribute('y2', shape.y);
+        const v = document.createElementNS(SVG_NS, 'line');
+        v.setAttribute('x1', shape.x); v.setAttribute('y1', shape.y - s / 2);
+        v.setAttribute('x2', shape.x); v.setAttribute('y2', shape.y + s / 2);
+        g.append(h, v);
+        if (shape.opacity != null) g.setAttribute('opacity', shape.opacity);
+        return g;
+    }
+    if (shape.type === 'minutia') {
+        // Circle + direction segment, like a minutia marker.
+        // angle is in degrees, image convention (CW from right).
+        const g = document.createElementNS(SVG_NS, 'g');
+        const color = shape.stroke || '#00ff00';
+        g.setAttribute('stroke', color);
+        g.setAttribute('fill', 'none');
+        g.setAttribute('stroke-width', shape.strokeWidth || 1.5);
+        const r = shape.radius || 6;
+        const circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('cx', shape.x);
+        circle.setAttribute('cy', shape.y);
+        circle.setAttribute('r', r);
+        g.appendChild(circle);
+        const segLen = shape.segmentLength || r * 2;
+        const rad = (shape.angle || 0) * Math.PI / 180;
+        const dx = Math.cos(rad) * segLen;
+        const dy = Math.sin(rad) * segLen;
+        const line = document.createElementNS(SVG_NS, 'line');
+        line.setAttribute('x1', shape.x);
+        line.setAttribute('y1', shape.y);
+        line.setAttribute('x2', shape.x + dx);
+        line.setAttribute('y2', shape.y + dy);
+        g.appendChild(line);
+        if (shape.opacity != null) g.setAttribute('opacity', shape.opacity);
+        return g;
+    }
+    if (shape.type === 'path') {
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', shape.d);
+        path.setAttribute('stroke', shape.stroke || '#ff0000');
+        path.setAttribute('stroke-width', shape.strokeWidth || 2);
+        path.setAttribute('fill', shape.fill || 'none');
+        if (shape.opacity != null) path.setAttribute('opacity', shape.opacity);
+        return path;
+    }
+    return null;
+}
+
+/**
+ * Append shape overlays to an SVG element.
+ * @param {SVGElement} svgTarget
+ * @param {Array<Object>} shapes
+ */
+function _renderShapes(svgTarget, shapes) {
+    if (!shapes || shapes.length === 0) return;
+    const g = document.createElementNS(SVG_NS, 'g');
+    for (const shape of shapes) {
+        const el = _createShapeElement(shape);
+        if (el) g.appendChild(el);
+    }
+    svgTarget.appendChild(g);
+}
+
+/**
  * Render a legend overlay inside the viewer viewport.
  *
  * @param {Viewer} viewer
@@ -149,6 +239,9 @@ export async function plotHuv(host, config) {
         uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
     }
 
+    // Shape overlays
+    _renderShapes(viewer.svgLayer, config.shapes);
+
     return viewer;
 }
 
@@ -207,6 +300,9 @@ function _createStaticHuvSvg(config, w, h) {
         const uvRenderer = new UVFieldRenderer(arrowGroup);
         uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
     }
+
+    // Shape overlays
+    _renderShapes(svg, config.shapes);
 
     return svg;
 }

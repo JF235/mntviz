@@ -1704,6 +1704,84 @@ async function plotHuv(host, config) {
   }
   return viewer;
 }
+function _loadImageDimensions(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+function _createStaticHuvSvg(config, w, h) {
+  const svg = document.createElementNS(SVG_NS6, "svg");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  if (config.pixelated) svg.style.imageRendering = "pixelated";
+  const bgImage = document.createElementNS(SVG_NS6, "image");
+  bgImage.setAttribute("href", config.imageSrc);
+  bgImage.setAttribute("width", w);
+  bgImage.setAttribute("height", h);
+  if (config.pixelated) bgImage.setAttribute("image-rendering", "pixelated");
+  svg.appendChild(bgImage);
+  if (config.overlaySrc) {
+    const ovImage = document.createElementNS(SVG_NS6, "image");
+    ovImage.setAttribute("href", config.overlaySrc);
+    ovImage.setAttribute("width", w);
+    ovImage.setAttribute("height", h);
+    ovImage.setAttribute("opacity", config.overlayOpacity ?? 1);
+    if (config.pixelated) ovImage.setAttribute("image-rendering", "pixelated");
+    svg.appendChild(ovImage);
+  }
+  if (config.arrows && config.arrows.length > 0) {
+    const arrowGroup = document.createElementNS(SVG_NS6, "g");
+    svg.appendChild(arrowGroup);
+    const uvRenderer = new UVFieldRenderer(arrowGroup);
+    uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
+  }
+  return svg;
+}
+function _openHuvModal(config) {
+  const existing = document.querySelector(".mntviz-modal-backdrop");
+  if (existing) existing.remove();
+  const backdrop = document.createElement("div");
+  backdrop.className = "mntviz-modal-backdrop";
+  const content = document.createElement("div");
+  content.className = "mntviz-modal-content";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "mntviz-modal-close";
+  closeBtn.textContent = "\xD7";
+  function close() {
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey);
+  }
+  function onKey(e) {
+    if (e.key === "Escape") close();
+  }
+  closeBtn.addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+  document.addEventListener("keydown", onKey);
+  content.appendChild(closeBtn);
+  backdrop.appendChild(content);
+  document.body.appendChild(backdrop);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(async () => {
+      const viewer = await plotHuv(content, config);
+      viewer.resetView();
+    });
+  });
+}
+async function plotHuvThumbnail(host, config) {
+  const { w, h } = await _loadImageDimensions(config.imageSrc);
+  const svg = _createStaticHuvSvg(config, w, h);
+  const wrap = document.createElement("div");
+  wrap.className = "mntviz-thumbnail-wrap";
+  wrap.appendChild(svg);
+  wrap.addEventListener("click", () => _openHuvModal(config));
+  host.appendChild(wrap);
+  return wrap;
+}
 async function plotMatch(host, config) {
   const mv = new MatchViewer(host, {
     leftMinutiae: config.matchData.leftMinutiae,
@@ -1720,6 +1798,7 @@ async function plotMatch(host, config) {
 }
 export {
   plotHuv,
+  plotHuvThumbnail,
   plotMatch,
   plotMinutiae,
   plotOverlay

@@ -20,6 +20,13 @@ const DEFAULTS = {
     color: '#43C4E4',
     /** Minimum alpha to render (skip near-invisible arrows). */
     alphaThreshold: 0.05,
+    /** How the optional 6th arrow element (modulation) affects rendering.
+     *  'none' = ignored, 'alpha' = modulates opacity, 'width' = modulates line width, 'both' = both. */
+    modulationTarget: 'none',
+    /** Minimum line width as a fraction of lineWidth when modulation is active. */
+    modulationWidthMin: 0.3,
+    /** Minimum alpha as a fraction when modulation is active. */
+    modulationAlphaMin: 0.1,
 };
 
 export class UVFieldRenderer {
@@ -42,12 +49,25 @@ export class UVFieldRenderer {
      */
     draw(arrows, options = {}) {
         const opts = { ...DEFAULTS, ...options };
-        const { style, arrowSize, lineWidth, segmentLength, opacity, color, alphaThreshold } = opts;
+        const { style, arrowSize, lineWidth, segmentLength, opacity, color, alphaThreshold,
+                modulationTarget, modulationWidthMin, modulationAlphaMin } = opts;
 
         this._svg.innerHTML = '';
 
-        for (const [x, y, dx, dy, conf] of arrows) {
-            const alpha = conf * opacity;
+        for (const arrow of arrows) {
+            const [x, y, dx, dy, conf] = arrow;
+            const mod = arrow.length > 5 ? arrow[5] : 1.0;
+
+            let alpha = conf * opacity;
+            let lw = lineWidth;
+
+            if (modulationTarget === 'alpha' || modulationTarget === 'both') {
+                alpha *= modulationAlphaMin + (1 - modulationAlphaMin) * mod;
+            }
+            if (modulationTarget === 'width' || modulationTarget === 'both') {
+                lw *= modulationWidthMin + (1 - modulationWidthMin) * mod;
+            }
+
             if (alpha < alphaThreshold) continue;
 
             const g = document.createElementNS(SVG_NS, 'g');
@@ -57,7 +77,7 @@ export class UVFieldRenderer {
             g.setAttribute('stroke-linecap', 'round');
 
             const line = document.createElementNS(SVG_NS, 'line');
-            line.setAttribute('stroke-width', lineWidth);
+            line.setAttribute('stroke-width', lw);
 
             if (style === 'segment') {
                 // Centered segment: rescale direction to segmentLength
