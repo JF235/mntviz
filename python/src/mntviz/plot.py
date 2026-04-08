@@ -889,13 +889,31 @@ def plot_huv(
     arrow_size: float = 4.0,
     line_width: float = 0.8,
     arrow_color: str = "#43C4E4",
+    arrow_style: str = "arrow",
+    segment_length: float = 6.0,
+    modulation: np.ndarray | None = None,
+    modulation_target: str = "none",
+    modulation_alpha_min: float = 0.1,
+    modulation_width_min: float = 0.3,
     title: str | None = None,
     output_format: str = "html",
     output_path: str | Path | None = None,
     width: int | None = None,
     height: int | None = None,
 ) -> str | MntVizFigure:
-    """Render an HUV combined plot: heatmap overlay + UV orientation arrows."""
+    """Render an HUV combined plot: heatmap overlay + UV orientation arrows.
+
+    Args:
+        arrow_style: ``'arrow'`` (directed, with arrowhead) or ``'segment'``
+            (centered line, no arrowhead — useful for orientation fields).
+        segment_length: Length of centered segments when ``arrow_style='segment'``.
+        modulation: Optional 2D array (same shape as h) whose values are
+            appended as a 6th element to each arrow for per-arrow modulation.
+        modulation_target: How the modulation value affects rendering:
+            ``'none'``, ``'alpha'``, ``'width'``, or ``'both'``.
+        modulation_alpha_min: Minimum alpha fraction when modulation is active.
+        modulation_width_min: Minimum line-width fraction when modulation is active.
+    """
 
     fmt = output_format.lower().strip()
     if fmt not in {"html", "jupyter"}:
@@ -911,6 +929,14 @@ def plot_huv(
         raise ValueError(
             f"h, u, v must have the same shape — got {h_arr.shape}, {u_arr.shape}, {v_arr.shape}"
         )
+
+    mod_arr = None
+    if modulation is not None:
+        mod_arr = np.asarray(modulation, dtype=float)
+        if mod_arr.shape != h_arr.shape:
+            raise ValueError(
+                f"modulation must have same shape as h — got {mod_arr.shape} vs {h_arr.shape}"
+            )
 
     bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
     w = width or bg_w or h_arr.shape[1]
@@ -928,6 +954,14 @@ def plot_huv(
         seg_gain=seg_gain,
     )
 
+    # Append modulation value as 6th element
+    if mod_arr is not None and arrows:
+        mod_max = float(mod_arr.max()) + 1e-8
+        stride = arrow_stride
+        for arrow in arrows:
+            xi, yi = int(arrow[0]), int(arrow[1])
+            arrow.append(float(mod_arr[yi, xi]) / mod_max)
+
     bg_src = bg_uri or _build_blank_background_data_uri(int(w), int(h_px))
 
     config = {
@@ -939,6 +973,11 @@ def plot_huv(
             "arrowSize": arrow_size,
             "lineWidth": line_width,
             "color": arrow_color,
+            "style": arrow_style,
+            "segmentLength": segment_length,
+            "modulationTarget": modulation_target,
+            "modulationAlphaMin": modulation_alpha_min,
+            "modulationWidthMin": modulation_width_min,
         },
     }
 
