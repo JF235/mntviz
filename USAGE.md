@@ -8,10 +8,11 @@ Detailed usage and API reference for the JavaScript runtime and Python wrapper.
 
 - `Viewer` from `src/viewer.js`
 - `MatchViewer` from `src/match-viewer.js`
-- `MinutiaeRenderer`, `createMarkerShape`, and `parseMinutiaeText` from `src/minutiae-renderer.js`
+- `MinutiaeRenderer`, `createMarkerShape`, `parseMinutiaeText`, and `minutiaDataMap` from `src/minutiae-renderer.js`
 - `MinutiaeInspector` from `src/minutiae-inspector.js`
 - `UVFieldRenderer` from `src/uv-renderer.js`
 - `OverlayLayer` from `src/overlay.js`
+- `plotHuvThumbnail` from `src/plots.js`
 
 Import through `src/index.js`:
 
@@ -21,10 +22,12 @@ import {
   MatchViewer,
   MinutiaeRenderer,
   createMarkerShape,
+  minutiaDataMap,
   MinutiaeInspector,
   parseMinutiaeText,
   UVFieldRenderer,
   OverlayLayer,
+  plotHuvThumbnail,
 } from './mntviz/index.js';
 ```
 
@@ -160,6 +163,14 @@ Parses text rows in format `x y angle [quality]` (`#` comments supported).
 - `setOpacity(value)`
 - `clear()`
 - `destroy()`
+
+#### `minutiaDataMap` (WeakMap)
+
+A `WeakMap<SVGElement, Object>` that associates each rendered SVG marker element with its original minutia data object. Useful for building custom interactions on top of rendered minutiae (e.g. click handlers that need the underlying `{x, y, angle, quality}` record).
+
+#### `plotHuvThumbnail(host, config)` (async)
+
+Renders a lightweight static SVG thumbnail of an HUV plot inside `host`. Clicking the thumbnail opens a full interactive viewer in a modal. The `config` object follows the same schema as the internal `plotHuv` config (image source, overlay, arrows, arrow options). Returns the wrapper `HTMLElement`.
 
 ### Minutiae-Only View (no image)
 
