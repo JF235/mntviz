@@ -9,6 +9,7 @@
  */
 
 import { MinutiaeInspector } from './minutiae-inspector.js';
+import { FieldProbe } from './field-probe.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -30,7 +31,9 @@ export class Viewer {
         this._view = { scale: 1, translateX: 0, translateY: 0, isDragging: false, lastX: 0, lastY: 0 };
         this._abortController = new AbortController();
         this._minutiaeInspector = null;
+        this._fieldProbe = null;
         this._virtualSize = null;
+        this._overlays = new Map();  // name -> { overlay, opts }
 
         this._buildDOM();
         this._bindEvents();
@@ -63,6 +66,43 @@ export class Viewer {
             height: vs ? vs.height : (this._img.naturalHeight || 0),
         };
     }
+
+    /* ── Overlay registry ─────────────────────────────────────── */
+
+    /**
+     * Register an overlay layer.
+     * @param {string} name - Unique key (e.g. 'Mask', 'quality|verifinger').
+     * @param {import('./overlay.js').OverlayLayer} overlay
+     * @param {object} [opts] - Metadata (valueMapper, group, etc.).
+     */
+    addOverlay(name, overlay, opts = {}) {
+        this._overlays.set(name, { overlay, opts });
+    }
+
+    /** Unregister and optionally destroy an overlay. */
+    removeOverlay(name, { destroy = false } = {}) {
+        const entry = this._overlays.get(name);
+        if (!entry) return;
+        if (destroy) entry.overlay.destroy();
+        this._overlays.delete(name);
+    }
+
+    /** Get a single overlay entry by name. */
+    getOverlay(name) {
+        return this._overlays.get(name);
+    }
+
+    /** Return all registered overlays as [{name, overlay, opts}]. */
+    getOverlays() {
+        return [...this._overlays].map(([name, { overlay, opts }]) => ({ name, overlay, opts }));
+    }
+
+    /** Return only visible + loaded overlays. */
+    getVisibleOverlays() {
+        return this.getOverlays().filter(e => e.overlay.visible && e.overlay.loaded);
+    }
+
+    /* ── Image loading ─────────────────────────────────────────── */
 
     /**
      * Load an image and reset the view.
@@ -244,6 +284,9 @@ export class Viewer {
     /** Remove all event listeners and DOM created by this viewer. */
     destroy() {
         this.disableMinutiaeInspector();
+        this.disableFieldProbe();
+        for (const [, { overlay }] of this._overlays) overlay.destroy();
+        this._overlays.clear();
         this._abortController.abort();
         if (this._resizeObserver) this._resizeObserver.disconnect();
         this._el.innerHTML = '';
@@ -271,6 +314,28 @@ export class Viewer {
         if (!this._minutiaeInspector) return;
         this._minutiaeInspector.destroy();
         this._minutiaeInspector = null;
+    }
+
+    /**
+     * Enable field probe (overlay value sampling on hover, toggled via double-click).
+     * @param {object} [options] - FieldProbe options.
+     * @returns {import('./field-probe.js').FieldProbe}
+     */
+    enableFieldProbe(options = {}) {
+        if (this._fieldProbe) {
+            this._fieldProbe.enable();
+            return this._fieldProbe;
+        }
+        this._fieldProbe = new FieldProbe(this, options);
+        this._fieldProbe.enable();
+        return this._fieldProbe;
+    }
+
+    /** Disable and detach the field probe, if active. */
+    disableFieldProbe() {
+        if (!this._fieldProbe) return;
+        this._fieldProbe.destroy();
+        this._fieldProbe = null;
     }
 
     /* ── DOM construction ───────────────────────────────────── */

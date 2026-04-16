@@ -75,6 +75,22 @@ export class MinutiaeInspector {
         this._rerenderPatch();
     }
 
+    /** Whether the tooltip is currently visible (hover or expanded). */
+    get isVisible() {
+        return this._tooltip.classList.contains('mntviz-inspector-visible');
+    }
+
+    /** Set probe overlay content (called by FieldProbe). Pass null to clear. */
+    setProbeContent(html) {
+        if (html) {
+            this._probeFields.innerHTML = html;
+            this._probeFields.style.display = '';
+        } else {
+            this._probeFields.innerHTML = '';
+            this._probeFields.style.display = 'none';
+        }
+    }
+
     destroy() {
         this.disable();
         if (this._tooltip && this._tooltip.parentNode) {
@@ -109,7 +125,11 @@ export class MinutiaeInspector {
             this._collapse();
         });
 
-        tip.append(this._closeBtn, this._fields, this._patchWrap);
+        this._probeFields = document.createElement('div');
+        this._probeFields.className = 'mntviz-probe-fields';
+        this._probeFields.style.display = 'none';
+
+        tip.append(this._closeBtn, this._fields, this._probeFields, this._patchWrap);
         this._tooltip = tip;
         this._viewer.viewport.appendChild(tip);
 
