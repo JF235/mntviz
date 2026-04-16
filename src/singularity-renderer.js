@@ -53,7 +53,6 @@ export class SingularityRenderer {
             // Marker shape: circle for core, triangle for delta
             const shape = type === 'delta' ? 'triangle' : 'circle';
             const marker = createMarkerShape(shape, x, y, markerSize);
-            marker.setAttribute('stroke', color);
             sg.appendChild(marker);
 
             // Direction lines — one per angle
@@ -93,7 +92,7 @@ export function parseSingularityText(text) {
     for (let line of text.split('\n')) {
         line = line.trim();
         if (!line || line.startsWith('#')) continue;
-        const parts = line.split(/\s+/);
+        const parts = line.replace(/,/g, ' ').split(/\s+/);
         if (parts.length < 4) continue;
         const type = parts[0].toLowerCase();
         const x = Number(parts[1]);

@@ -113,7 +113,7 @@ function _renderShapes(svgTarget, shapes) {
  * @param {Viewer} viewer
  * @param {Array<{label: string, color: string, shape?: string}>} items
  */
-function renderLegend(viewer, items) {
+export function renderLegend(viewer, items) {
     if (!items || items.length === 0) return;
 
     const wrap = document.createElement('div');
