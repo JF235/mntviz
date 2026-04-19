@@ -547,6 +547,18 @@
     stroke-opacity: 1 !important;
 }
 
+.mntviz-ghost-cursor {
+    pointer-events: none;
+}
+
+.mntviz-ghost-cursor circle {
+    fill: rgba(230, 232, 235, 0.34);
+    stroke: rgba(255, 255, 255, 0.2);
+    stroke-width: 0.8;
+    vector-effect: non-scaling-stroke;
+    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.28));
+}
+
 /* Dual-patch popup for match inspection */
 .mntviz-match-popup {
     position: absolute;

@@ -411,6 +411,7 @@ export async function plotMatch(host, config) {
         leftSegments: config.matchData.leftSegments ?? [],
         rightSegments: config.matchData.rightSegments ?? [],
         dominantAngle: config.matchData.dominantAngle ?? null,
+        matchTransform: config.matchData.matchTransform ?? null,
         leftTitle: config.leftTitle ?? null,
         rightTitle: config.rightTitle ?? null,
         markerColor: config.markerColor ?? '#00ff00',

@@ -25,6 +25,7 @@ const DEFAULTS = {
     leftSegments: [],
     rightSegments: [],
     dominantAngle: null,
+    matchTransform: null,
     leftTitle: null,
     rightTitle: null,
     markerColor: '#00ff00',
@@ -57,6 +58,9 @@ export class MatchViewer {
         this._xSegPeer = null;
         this._xMatchLine = null;
         this._activePanelMenuSide = null;
+        this._leftGhostCursor = null;
+        this._rightGhostCursor = null;
+        this._ghostSourceSide = null;
         this._ac = new AbortController();
 
         this._buildDOM();
@@ -196,7 +200,16 @@ export class MatchViewer {
             this._alignSelectedSide();
             this._hideContextMenu();
         });
-        this._contextMenu.append(this._contextMenuAlignBtn);
+
+        this._contextMenuGhostBtn = _el('button', 'mntviz-context-menu-btn');
+        this._contextMenuGhostBtn.type = 'button';
+        this._contextMenuGhostBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._toggleGhostSource(this._contextMenuSide);
+            this._hideContextMenu();
+        });
+
+        this._contextMenu.append(this._contextMenuAlignBtn, this._contextMenuGhostBtn);
     }
 
     _buildPanelTools(side, panel, hasTitle = false) {
@@ -305,6 +318,9 @@ export class MatchViewer {
 
         const rightRenderer = new MinutiaeRenderer(this._rightViewer.svgLayer);
         rightRenderer.draw(opts.rightMinutiae, opts.markerColor, rOpts);
+
+        this._leftGhostCursor = this._createGhostCursor(this._leftViewer.svgLayer);
+        this._rightGhostCursor = this._createGhostCursor(this._rightViewer.svgLayer);
 
         // Index minutia <g> markers by pair_id so hovering one side lights
         // up the matching one on the other side.
@@ -593,12 +609,16 @@ export class MatchViewer {
         this._leftViewer.svgLayer.addEventListener('mouseout',  (e) => this._onHoverOut(e, 'left'), sig);
         this._rightViewer.svgLayer.addEventListener('mouseover', (e) => this._onHoverIn(e, 'right'), sig);
         this._rightViewer.svgLayer.addEventListener('mouseout',  (e) => this._onHoverOut(e, 'right'), sig);
-        this._leftViewer.viewport.addEventListener('mousemove', (e) => this._onHoverMove(e), sig);
-        this._rightViewer.viewport.addEventListener('mousemove', (e) => this._onHoverMove(e), sig);
+        this._leftViewer.viewport.addEventListener('mousemove', (e) => this._onViewportPointerMove(e, 'left'), sig);
+        this._rightViewer.viewport.addEventListener('mousemove', (e) => this._onViewportPointerMove(e, 'right'), sig);
+        this._overlaySvg.addEventListener('mousemove', (e) => this._onOverlayPointerMove(e), sig);
+        this._container.addEventListener('mouseleave', () => {
+            this._hideGhostCursor();
+        }, sig);
         for (const line of this._segmentHitLines) {
             line.addEventListener('mouseover', (e) => this._onMatchLineHoverIn(e), sig);
             line.addEventListener('mouseout', (e) => this._onMatchLineHoverOut(e), sig);
-            line.addEventListener('mousemove', (e) => this._onHoverMove(e), sig);
+            line.addEventListener('mousemove', (e) => this._onOverlayPointerMove(e), sig);
         }
 
         // Context menu for side-specific actions.
@@ -685,6 +705,25 @@ export class MatchViewer {
         }
     }
 
+    _onViewportPointerMove(e, side) {
+        this._onHoverMove(e);
+        if (side === this._ghostSourceSide) {
+            this._updateGhostCursor(side, e);
+        } else {
+            this._hideGhostCursor();
+        }
+    }
+
+    _onOverlayPointerMove(e) {
+        this._onHoverMove(e);
+        const side = this._inferPointerSide(e.clientX, e.clientY);
+        if (side === this._ghostSourceSide) {
+            this._updateGhostCursor(side, e);
+        } else {
+            this._hideGhostCursor();
+        }
+    }
+
     _onMatchLineHoverIn(e) {
         const hitLine = e.currentTarget;
         const pairIdx = Number(hitLine?.dataset?.pairIndex);
@@ -750,6 +789,108 @@ export class MatchViewer {
         if (this._segTooltip) this._segTooltip.style.display = 'none';
     }
 
+    _inferPointerSide(clientX, clientY) {
+        const leftRect = this._leftViewer?.viewport?.getBoundingClientRect();
+        if (leftRect && _pointInRect(clientX, clientY, leftRect)) return 'left';
+        const rightRect = this._rightViewer?.viewport?.getBoundingClientRect();
+        if (rightRect && _pointInRect(clientX, clientY, rightRect)) return 'right';
+        return null;
+    }
+
+    _createGhostCursor(svgRoot) {
+        const g = document.createElementNS(SVG_NS, 'g');
+        g.classList.add('mntviz-ghost-cursor');
+        g.style.display = 'none';
+
+        const circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('r', '4');
+        circle.setAttribute('cx', '0');
+        circle.setAttribute('cy', '0');
+        g.append(circle);
+        svgRoot.appendChild(g);
+        return g;
+    }
+
+    _updateGhostCursor(side, event) {
+        const sourceViewer = side === 'left' ? this._leftViewer : this._rightViewer;
+        const targetSide = side === 'left' ? 'right' : 'left';
+        const { x, y } = sourceViewer.screenToImageCoords(event.clientX, event.clientY);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            this._hideGhostCursor(targetSide);
+            return;
+        }
+
+        const sourceSize = sourceViewer.imageSize;
+        if (x < 0 || y < 0 || x > sourceSize.width || y > sourceSize.height) {
+            this._hideGhostCursor(targetSide);
+            return;
+        }
+
+        const mapped = this._mapMatchPoint(side, x, y);
+        if (!mapped) {
+            this._hideGhostCursor(targetSide);
+            return;
+        }
+
+        const targetViewer = side === 'left' ? this._rightViewer : this._leftViewer;
+        const targetSize = targetViewer.imageSize;
+        if (
+            mapped.x < 0 || mapped.y < 0
+            || mapped.x > targetSize.width || mapped.y > targetSize.height
+        ) {
+            this._hideGhostCursor(targetSide);
+            return;
+        }
+
+        this._showGhostCursor(targetSide, mapped.x, mapped.y);
+    }
+
+    _mapMatchPoint(side, x, y) {
+        const t = this._options.matchTransform;
+        if (!t) return null;
+        const angle = Number(t.angle);
+        const tx = Number(t.tx);
+        const ty = Number(t.ty);
+        if (!Number.isFinite(angle) || !Number.isFinite(tx) || !Number.isFinite(ty)) return null;
+
+        const rad = angle * (Math.PI / 180);
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        if (side === 'right') {
+            return {
+                x: x * cos + y * sin + tx,
+                y: -x * sin + y * cos + ty,
+            };
+        }
+
+        const ux = x - tx;
+        const uy = y - ty;
+        return {
+            x: ux * cos - uy * sin,
+            y: ux * sin + uy * cos,
+        };
+    }
+
+    _showGhostCursor(side, x, y) {
+        const ghost = side === 'left' ? this._leftGhostCursor : this._rightGhostCursor;
+        if (!ghost) return;
+        ghost.style.display = '';
+        ghost.setAttribute('transform', `translate(${x} ${y})`);
+    }
+
+    _hideGhostCursor(side = null) {
+        const cursors = side === 'left'
+            ? [this._leftGhostCursor]
+            : side === 'right'
+                ? [this._rightGhostCursor]
+                : [this._leftGhostCursor, this._rightGhostCursor];
+        for (const ghost of cursors) {
+            if (!ghost) continue;
+            ghost.style.display = 'none';
+        }
+    }
+
     _onContextMenu(e, side) {
         e.preventDefault();
         e.stopPropagation();
@@ -760,6 +901,7 @@ export class MatchViewer {
         this._contextMenuSide = side;
         const hasAngle = Number.isFinite(this._options.dominantAngle);
         this._contextMenuAlignBtn.disabled = !hasAngle;
+        this._updateContextMenuButtons(side);
 
         this._contextMenu.style.display = '';
         const rect = this._container.getBoundingClientRect();
@@ -777,6 +919,18 @@ export class MatchViewer {
         if (!this._contextMenu) return;
         this._contextMenu.style.display = 'none';
         this._contextMenuSide = null;
+    }
+
+    _updateContextMenuButtons(side) {
+        if (!this._contextMenuGhostBtn) return;
+        const enabled = side != null && this._ghostSourceSide === side;
+        this._contextMenuGhostBtn.textContent = `${enabled ? '\u2713 ' : ''}Ghost`;
+    }
+
+    _toggleGhostSource(side) {
+        if (side !== 'left' && side !== 'right') return;
+        this._ghostSourceSide = this._ghostSourceSide === side ? null : side;
+        this._hideGhostCursor();
     }
 
     _togglePanelMenu(side) {
@@ -1270,6 +1424,7 @@ export class MatchViewer {
     _hidePopup() {
         this._hideActiveSegment();
         this._activePopupPairIdx = -1;
+        this._hideGhostCursor();
         this._popup.classList.remove('mntviz-match-popup-visible');
         this._popup.style.display = 'none';
     }
@@ -1357,6 +1512,10 @@ function _formatSegmentMetaLines(raw, fallbackKey) {
     }
 
     return lines;
+}
+
+function _pointInRect(x, y, rect) {
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 /** Walk an SVG layer and index minutia <g> markers by their _pairIndex. */

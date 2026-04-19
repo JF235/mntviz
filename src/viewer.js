@@ -222,6 +222,20 @@ export class Viewer {
     }
 
     /**
+     * Map screen/client coordinates to image coordinates.
+     * Works with pan, zoom, and rotation.
+     * @param {number} clientX
+     * @param {number} clientY
+     * @returns {{x:number, y:number}}
+     */
+    screenToImageCoords(clientX, clientY) {
+        const ctm = this._svg.getScreenCTM();
+        if (!ctm) return { x: NaN, y: NaN };
+        const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+        return { x: p.x, y: p.y };
+    }
+
+    /**
      * Map image coordinates to an arbitrary element's local CSS pixels.
      * @param {number} imgX
      * @param {number} imgY

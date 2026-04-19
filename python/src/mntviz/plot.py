@@ -722,6 +722,7 @@ def plot_mnt_match(
     right_minutiae: Any,
     pairs: str | Path | np.ndarray | Sequence | None = None,
     pair_metadata: Sequence[Mapping[str, Any] | None] | None = None,
+    match_transform: Mapping[str, Any] | None = None,
     left_background_img: str | Path | None = None,
     right_background_img: str | Path | None = None,
     output_format: str = "html",
@@ -925,6 +926,19 @@ def plot_mnt_match(
         "pairs": pairs_data,
         "dominantAngle": None if dominant_angle is None else float(dominant_angle),
     }
+    if match_transform is not None:
+        if not isinstance(match_transform, Mapping):
+            raise TypeError("match_transform must be a mapping or None")
+        angle = match_transform.get("angle")
+        tx = match_transform.get("tx")
+        ty = match_transform.get("ty")
+        if angle is None or tx is None or ty is None:
+            raise ValueError("match_transform must contain angle, tx, and ty")
+        match_data["matchTransform"] = {
+            "angle": float(angle),
+            "tx": float(tx),
+            "ty": float(ty),
+        }
 
     left_segments_data = _normalize_segments(
         left_segments, len(left_records), name="left_segments",
