@@ -60,6 +60,9 @@ export class MatchViewer {
         this._leftGhostCursor = null;
         this._rightGhostCursor = null;
         this._ghostSourceSide = null;
+        this._coupledActive = false;
+        this._coupledAnchorSide = null;
+        this._syncingCoupled = false;
         this._ac = new AbortController();
 
         this._buildDOM();
@@ -206,7 +209,19 @@ export class MatchViewer {
             this._hideContextMenu();
         });
 
-        this._contextMenu.append(this._contextMenuAlignBtn, this._contextMenuGhostBtn);
+        this._contextMenuCoupledBtn = _el('button', 'mntviz-context-menu-btn');
+        this._contextMenuCoupledBtn.type = 'button';
+        this._contextMenuCoupledBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._toggleCoupled(this._contextMenuSide);
+            this._hideContextMenu();
+        });
+
+        this._contextMenu.append(
+            this._contextMenuAlignBtn,
+            this._contextMenuGhostBtn,
+            this._contextMenuCoupledBtn,
+        );
     }
 
     /* ── Public API ───────────────────────────────────────── */
@@ -616,7 +631,14 @@ export class MatchViewer {
         this._rotateSideBy(side, delta);
     }
 
-    _onViewerTransform(_side) {
+    _onViewerTransform(side) {
+        if (this._coupledActive && !this._syncingCoupled) {
+            // Whichever panel the user just drove becomes the transient leader;
+            // sync the other side. The guard above prevents the cascade when
+            // our own sync writes back through setRotation/setScale/setTranslate.
+            const followerSide = side === 'left' ? 'right' : 'left';
+            this._applyCoupledFollower(followerSide);
+        }
         this._updateSegments();
     }
 
@@ -897,15 +919,103 @@ export class MatchViewer {
     }
 
     _updateContextMenuButtons(side) {
-        if (!this._contextMenuGhostBtn) return;
-        const enabled = side != null && this._ghostSourceSide === side;
-        this._contextMenuGhostBtn.textContent = `${enabled ? '\u2713 ' : ''}Ghost`;
+        if (this._contextMenuGhostBtn) {
+            const ghostOn = side != null && this._ghostSourceSide === side;
+            this._contextMenuGhostBtn.textContent = `${ghostOn ? '\u2713 ' : ''}Ghost`;
+        }
+        if (this._contextMenuCoupledBtn) {
+            this._contextMenuCoupledBtn.textContent =
+                `${this._coupledActive ? '\u2713 ' : ''}Coupled`;
+            this._contextMenuCoupledBtn.disabled = !_isValidMatchTransform(this._options.matchTransform);
+        }
     }
 
     _toggleGhostSource(side) {
         if (side !== 'left' && side !== 'right') return;
         this._ghostSourceSide = this._ghostSourceSide === side ? null : side;
         this._hideGhostCursor();
+    }
+
+    _toggleCoupled(side) {
+        if (side !== 'left' && side !== 'right') return;
+        if (!_isValidMatchTransform(this._options.matchTransform)) return;
+        if (this._coupledActive) {
+            this._coupledActive = false;
+            this._coupledAnchorSide = null;
+            return;
+        }
+        this._coupledActive = true;
+        this._coupledAnchorSide = side;
+        // Snap the other panel to match the right-clicked (anchor) panel's framing.
+        const followerSide = side === 'left' ? 'right' : 'left';
+        this._applyCoupledFollower(followerSide);
+    }
+
+    /**
+     * Compute the follower viewer's (tx, ty, scale, rotation) so that its
+     * image-space content aligns with the anchor panel under matchTransform.
+     *
+     * Derivation: both viewers use F_X(p) = o_X + t_X + s_X·R(r_X)·(p − o_X)
+     * with rotation around the image center. matchTransform = { α, t } maps
+     * right-image → left-image via p_L = R(−α)·p_R + t (CSS rotate convention).
+     * Setting F_R(p_R) = F_L(R(−α)·p_R + t) for all p_R yields:
+     *   s_R = s_L,  r_R = r_L − α,
+     *   t_R = (o_L − o_R) + t_L + s_L·R(r_L)·(t − o_L) + s_L·R(r_L − α)·o_R.
+     * The left-as-follower case is the symmetric inverse.
+     */
+    _computeCoupledFollowerState(followerSide) {
+        const mt = this._options.matchTransform;
+        if (!_isValidMatchTransform(mt)) return null;
+        if (!this._leftViewer || !this._rightViewer) return null;
+
+        const alpha = mt.angle;
+        const tm = { x: mt.tx, y: mt.ty };
+        const lSize = this._leftViewer.imageSize;
+        const rSize = this._rightViewer.imageSize;
+        const oL = { x: lSize.width / 2, y: lSize.height / 2 };
+        const oR = { x: rSize.width / 2, y: rSize.height / 2 };
+
+        if (followerSide === 'right') {
+            const s = this._leftViewer.viewState;
+            const rR = s.rotation - alpha;
+            const a = _rotVec(s.scale, s.rotation, { x: tm.x - oL.x, y: tm.y - oL.y });
+            const b = _rotVec(s.scale, rR, oR);
+            return {
+                scale: s.scale,
+                rotation: rR,
+                tx: (oL.x - oR.x) + s.translateX + a.x + b.x,
+                ty: (oL.y - oR.y) + s.translateY + a.y + b.y,
+            };
+        }
+        if (followerSide === 'left') {
+            const s = this._rightViewer.viewState;
+            const rL = s.rotation + alpha;
+            const a = _rotVec(s.scale, rL, { x: oL.x - tm.x, y: oL.y - tm.y });
+            const b = _rotVec(s.scale, s.rotation, oR);
+            return {
+                scale: s.scale,
+                rotation: rL,
+                tx: (oR.x - oL.x) + s.translateX + a.x - b.x,
+                ty: (oR.y - oL.y) + s.translateY + a.y - b.y,
+            };
+        }
+        return null;
+    }
+
+    _applyCoupledFollower(followerSide) {
+        const next = this._computeCoupledFollowerState(followerSide);
+        if (!next) return;
+        const follower = followerSide === 'left' ? this._leftViewer : this._rightViewer;
+        if (!follower) return;
+
+        this._syncingCoupled = true;
+        try {
+            follower.setRotation(next.rotation);
+            follower.setScale(next.scale);
+            follower.setTranslate(next.tx, next.ty);
+        } finally {
+            this._syncingCoupled = false;
+        }
     }
 
     _rotateSideBy(side, delta) {
@@ -1442,6 +1552,24 @@ function _formatSegmentMetaLines(raw, fallbackKey) {
 
 function _pointInRect(x, y, rect) {
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+function _isValidMatchTransform(t) {
+    return t != null
+        && Number.isFinite(t.angle)
+        && Number.isFinite(t.tx)
+        && Number.isFinite(t.ty);
+}
+
+/** scale * R_CSS(angleDeg) * v, where R_CSS uses CW-positive screen rotation. */
+function _rotVec(scale, angleDeg, v) {
+    const rad = angleDeg * (Math.PI / 180);
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+    return {
+        x: scale * (c * v.x - s * v.y),
+        y: scale * (s * v.x + c * v.y),
+    };
 }
 
 /** Walk an SVG layer and index minutia <g> markers by their _pairIndex. */

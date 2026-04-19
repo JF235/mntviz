@@ -211,6 +211,18 @@ export class Viewer {
     }
 
     /**
+     * Set absolute pan in viewport pixels.
+     * @param {number} tx
+     * @param {number} ty
+     */
+    setTranslate(tx, ty) {
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) return;
+        this._view.translateX = tx;
+        this._view.translateY = ty;
+        this._applyTransform();
+    }
+
+    /**
      * Map image coordinates to viewport-relative CSS pixels.
      * Works with pan, zoom, and rotation.
      * @param {number} imgX
