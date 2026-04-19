@@ -552,11 +552,11 @@
 }
 
 .mntviz-ghost-cursor circle {
-    fill: rgba(230, 232, 235, 0.34);
-    stroke: rgba(255, 255, 255, 0.2);
+    fill: rgba(230, 232, 235, 0.62);
+    stroke: rgba(255, 255, 255, 0.45);
     stroke-width: 0.8;
     vector-effect: non-scaling-stroke;
-    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.28));
+    filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.38));
 }
 
 /* Dual-patch popup for match inspection */
@@ -661,102 +661,6 @@
 .mntviz-context-menu-btn:disabled {
     color: rgba(255, 255, 255, 0.35);
     cursor: default;
-}
-
-.mntviz-panel-tools {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    z-index: 120;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.mntviz-panel-tools.mntviz-panel-tools-under-title {
-    top: 34px;
-}
-
-.mntviz-panel-gear-btn {
-    width: 24px;
-    height: 24px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 999px;
-    background: rgba(15, 15, 15, 0.62);
-    color: #fff;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 12px;
-    line-height: 1;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    transition:
-        background var(--mntviz-highlight-fade),
-        border-color var(--mntviz-highlight-fade),
-        transform var(--mntviz-highlight-fade);
-}
-
-.mntviz-panel-gear-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.24);
-}
-
-.mntviz-panel-gear-btn.mntviz-open {
-    transform: rotate(18deg);
-}
-
-.mntviz-panel-menu {
-    position: absolute;
-    top: 28px;
-    right: 0;
-    z-index: 121;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 4px;
-    padding: 5px 6px;
-    background: var(--mntviz-surface-bg);
-    border: 1px solid var(--mntviz-surface-border);
-    border-radius: 10px;
-    box-shadow: var(--mntviz-surface-shadow);
-    backdrop-filter: blur(6px);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 10px;
-    line-height: 1.2;
-    opacity: 0;
-    transform: translateY(-4px);
-    pointer-events: none;
-    transition:
-        opacity var(--mntviz-highlight-fade),
-        transform var(--mntviz-highlight-fade);
-}
-
-.mntviz-panel-tools.mntviz-open .mntviz-panel-menu {
-    opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
-}
-
-.mntviz-panel-angle-readout {
-    color: #fff;
-    min-width: 64px;
-    text-align: center;
-    font-weight: 600;
-}
-
-.mntviz-panel-angle-slider {
-    width: 138px;
-    margin: 0;
-    accent-color: rgba(255, 255, 255, 0.92);
-    cursor: ew-resize;
-}
-
-@media (max-width: 1100px) {
-    .mntviz-panel-menu {
-        top: 28px;
-        right: 0;
-    }
 }
 
 /* ── Legend ────────────────────────────────────────────── */

@@ -12058,8 +12058,8 @@ var UVFieldRenderer = class {
 
 // src/match-viewer.js
 var SVG_NS6 = "http://www.w3.org/2000/svg";
-var PANEL_ROTATION_SLIDER_RANGE = 180;
 var PATCH_NEIGHBOR_ALPHA = 0.4;
+var WHEEL_ROTATION_DEG_PER_TICK = 2;
 var DEFAULTS5 = {
   leftMinutiae: [],
   rightMinutiae: [],
@@ -12095,7 +12095,6 @@ var MatchViewer = class {
     this._xSegSelf = null;
     this._xSegPeer = null;
     this._xMatchLine = null;
-    this._activePanelMenuSide = null;
     this._leftGhostCursor = null;
     this._rightGhostCursor = null;
     this._ghostSourceSide = null;
@@ -12114,7 +12113,6 @@ var MatchViewer = class {
     }
     this._leftHost = _el2("div", "mntviz-match-viewer-host");
     this._leftPanel.appendChild(this._leftHost);
-    this._buildPanelTools("left", this._leftPanel, Boolean(this._options.leftTitle));
     this._rightPanel = _el2("div", "mntviz-match-panel");
     if (this._options.rightTitle) {
       const t = _el2("div", "mntviz-match-title");
@@ -12123,7 +12121,6 @@ var MatchViewer = class {
     }
     this._rightHost = _el2("div", "mntviz-match-viewer-host");
     this._rightPanel.appendChild(this._rightHost);
-    this._buildPanelTools("right", this._rightPanel, Boolean(this._options.rightTitle));
     this._overlaySvg = document.createElementNS(SVG_NS6, "svg");
     this._overlaySvg.classList.add("mntviz-match-overlay");
     this._overlaySvg.setAttribute("width", "100%");
@@ -12214,42 +12211,6 @@ var MatchViewer = class {
       this._hideContextMenu();
     });
     this._contextMenu.append(this._contextMenuAlignBtn, this._contextMenuGhostBtn);
-  }
-  _buildPanelTools(side, panel, hasTitle = false) {
-    const wrap = _el2("div", "mntviz-panel-tools");
-    if (hasTitle) wrap.classList.add("mntviz-panel-tools-under-title");
-    const gearBtn = _el2("button", "mntviz-panel-gear-btn");
-    gearBtn.type = "button";
-    gearBtn.textContent = "\u2699";
-    const menu = _el2("div", "mntviz-panel-menu");
-    const currentValue = document.createElement("b");
-    currentValue.className = "mntviz-panel-angle-readout";
-    currentValue.textContent = "+0.0\xB0";
-    const angleSlider = document.createElement("input");
-    angleSlider.className = "mntviz-panel-angle-slider";
-    angleSlider.type = "range";
-    angleSlider.min = String(-PANEL_ROTATION_SLIDER_RANGE);
-    angleSlider.max = String(PANEL_ROTATION_SLIDER_RANGE);
-    angleSlider.step = "0.5";
-    angleSlider.value = "0";
-    menu.append(currentValue, angleSlider);
-    wrap.append(gearBtn, menu);
-    panel.appendChild(wrap);
-    gearBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this._togglePanelMenu(side);
-    });
-    menu.addEventListener("click", (e) => e.stopPropagation());
-    angleSlider.addEventListener("input", () => {
-      this._applyPanelSliderRotation(side);
-    });
-    this[`_${side}PanelTools`] = {
-      wrap,
-      gearBtn,
-      menu,
-      currentValue,
-      angleSlider
-    };
   }
   /* ── Public API ───────────────────────────────────────── */
   /**
@@ -12342,8 +12303,6 @@ var MatchViewer = class {
     if (this._allSegmentsVisible) {
       this._showAllSegments();
     }
-    this._updatePanelControls("left");
-    this._updatePanelControls("right");
   }
   /**
    * Serialize the full match view as a standalone SVG string.
@@ -12430,8 +12389,6 @@ var MatchViewer = class {
    * @returns {string} SVG markup.
    */
   exportSVGView(gap = 4) {
-    const lRegion = this._leftViewer.visibleRegion();
-    const rRegion = this._rightViewer.visibleRegion();
     const lVpW = this._leftViewer.viewport.clientWidth;
     const lVpH = this._leftViewer.viewport.clientHeight;
     const rVpW = this._rightViewer.viewport.clientWidth;
@@ -12444,35 +12401,41 @@ var MatchViewer = class {
     svg.setAttribute("width", totalW);
     svg.setAttribute("height", totalH);
     svg.setAttribute("viewBox", `0 0 ${totalW} ${totalH}`);
-    const embedView = (viewer, region, vpW, vpH, offsetX) => {
+    const embedView = (viewer, vpW, vpH, offsetX) => {
       const nested = document.createElementNS(SVG_NS6, "svg");
       nested.setAttribute("x", offsetX);
       nested.setAttribute("y", 0);
       nested.setAttribute("width", vpW);
       nested.setAttribute("height", vpH);
-      nested.setAttribute("viewBox", `${region.x} ${region.y} ${region.w} ${region.h}`);
+      nested.setAttribute("viewBox", `0 0 ${vpW} ${vpH}`);
+      const { translateX: tx, translateY: ty, scale: s, rotation: r } = viewer.viewState;
+      const { width: iw, height: ih } = viewer.imageSize;
+      const ox = iw / 2;
+      const oy = ih / 2;
+      const g = document.createElementNS(SVG_NS6, "g");
+      g.setAttribute(
+        "transform",
+        `translate(${ox}, ${oy}) translate(${tx}, ${ty}) scale(${s}) rotate(${r}) translate(${-ox}, ${-oy})`
+      );
       const img = viewer.imageElement;
       if (img.src) {
         const canvas = document.createElement("canvas");
-        const nw = img.naturalWidth;
-        const nh = img.naturalHeight;
-        canvas.width = nw;
-        canvas.height = nh;
+        canvas.width = iw;
+        canvas.height = ih;
         canvas.getContext("2d").drawImage(img, 0, 0);
         const svgImg = document.createElementNS(SVG_NS6, "image");
         svgImg.setAttribute("href", canvas.toDataURL("image/png"));
-        svgImg.setAttribute("width", nw);
-        svgImg.setAttribute("height", nh);
-        nested.appendChild(svgImg);
+        svgImg.setAttribute("width", iw);
+        svgImg.setAttribute("height", ih);
+        g.appendChild(svgImg);
       }
       const mntClone = viewer.svgLayer.cloneNode(true);
-      mntClone.removeAttribute("class");
-      mntClone.removeAttribute("style");
-      while (mntClone.firstChild) nested.appendChild(mntClone.firstChild);
+      while (mntClone.firstChild) g.appendChild(mntClone.firstChild);
+      nested.appendChild(g);
       return nested;
     };
-    svg.appendChild(embedView(this._leftViewer, lRegion, lVpW, lVpH, 0));
-    svg.appendChild(embedView(this._rightViewer, rRegion, rVpW, rVpH, lVpW + gap));
+    svg.appendChild(embedView(this._leftViewer, lVpW, lVpH, 0));
+    svg.appendChild(embedView(this._rightViewer, rVpW, rVpH, lVpW + gap));
     const opts = this._options;
     const segG = document.createElementNS(SVG_NS6, "g");
     for (let i = 0; i < opts.pairs.length; i++) {
@@ -12481,15 +12444,13 @@ var MatchViewer = class {
       const p = opts.pairs[i];
       const lm = opts.leftMinutiae[p.leftIdx];
       const rm = opts.rightMinutiae[p.rightIdx];
-      const x1 = (lm.x - lRegion.x) / lRegion.w * lVpW;
-      const y1 = (lm.y - lRegion.y) / lRegion.h * lVpH;
-      const x2 = lVpW + gap + (rm.x - rRegion.x) / rRegion.w * rVpW;
-      const y2 = (rm.y - rRegion.y) / rRegion.h * rVpH;
+      const lp = this._leftViewer.imageToElementCoords(lm.x, lm.y, this._leftViewer.viewport);
+      const rp = this._rightViewer.imageToElementCoords(rm.x, rm.y, this._rightViewer.viewport);
       const line = document.createElementNS(SVG_NS6, "line");
-      line.setAttribute("x1", x1);
-      line.setAttribute("y1", y1);
-      line.setAttribute("x2", x2);
-      line.setAttribute("y2", y2);
+      line.setAttribute("x1", lp.x);
+      line.setAttribute("y1", lp.y);
+      line.setAttribute("x2", lVpW + gap + rp.x);
+      line.setAttribute("y2", rp.y);
       line.setAttribute("stroke", domLine.getAttribute("stroke"));
       line.setAttribute("stroke-opacity", domLine.getAttribute("stroke-opacity"));
       line.setAttribute("stroke-width", domLine.getAttribute("stroke-width"));
@@ -12543,26 +12504,39 @@ var MatchViewer = class {
       line.addEventListener("mouseout", (e) => this._onMatchLineHoverOut(e), sig);
       line.addEventListener("mousemove", (e) => this._onOverlayPointerMove(e), sig);
     }
+    this._leftViewer.viewport.addEventListener(
+      "wheel",
+      (e) => this._onWheelRotate(e, "left"),
+      { capture: true, passive: false, ...sig }
+    );
+    this._rightViewer.viewport.addEventListener(
+      "wheel",
+      (e) => this._onWheelRotate(e, "right"),
+      { capture: true, passive: false, ...sig }
+    );
     this._leftViewer.viewport.addEventListener("contextmenu", (e) => this._onContextMenu(e, "left"), sig);
     this._rightViewer.viewport.addEventListener("contextmenu", (e) => this._onContextMenu(e, "right"), sig);
     window.addEventListener("click", () => {
       this._hideContextMenu();
-      this._hidePanelMenus();
     }, sig);
     window.addEventListener("blur", () => {
       this._hideContextMenu();
-      this._hidePanelMenus();
     }, sig);
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         this._hideContextMenu();
-        this._hidePanelMenus();
       }
     }, sig);
   }
-  _onViewerTransform(side) {
+  _onWheelRotate(e, side) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const delta = e.deltaY > 0 ? -WHEEL_ROTATION_DEG_PER_TICK : WHEEL_ROTATION_DEG_PER_TICK;
+    this._rotateSideBy(side, delta);
+  }
+  _onViewerTransform(_side) {
     this._updateSegments();
-    this._updatePanelControls(side);
   }
   /* ── Cross-panel hover highlighting ───────────────────── */
   _onHoverIn(e, side) {
@@ -12810,53 +12784,9 @@ var MatchViewer = class {
     this._ghostSourceSide = this._ghostSourceSide === side ? null : side;
     this._hideGhostCursor();
   }
-  _togglePanelMenu(side) {
-    const tools = this[`_${side}PanelTools`];
-    if (!tools) return;
-    if (this._activePanelMenuSide === side && tools.wrap.classList.contains("mntviz-open")) {
-      this._hidePanelMenus();
-      return;
-    }
-    this._hidePanelMenus(side);
-    this._updatePanelControls(side);
-    tools.wrap.classList.add("mntviz-open");
-    tools.gearBtn.classList.add("mntviz-open");
-    this._activePanelMenuSide = side;
-  }
-  _hidePanelMenus(exceptSide = null) {
-    for (const side of ["left", "right"]) {
-      if (side === exceptSide) continue;
-      const tools = this[`_${side}PanelTools`];
-      if (!tools) continue;
-      tools.wrap.classList.remove("mntviz-open");
-      tools.gearBtn.classList.remove("mntviz-open");
-    }
-    if (!exceptSide) this._activePanelMenuSide = null;
-  }
-  _updatePanelControls(side) {
-    const tools = this[`_${side}PanelTools`];
-    const viewer = side === "left" ? this._leftViewer : this._rightViewer;
-    if (!tools || !viewer) return;
-    const rot = viewer.viewState.rotation || 0;
-    tools.currentValue.textContent = `${rot >= 0 ? "+" : ""}${rot.toFixed(1)}\xB0`;
-    tools.angleSlider.value = String(rot);
-  }
-  _applyPanelSliderRotation(side) {
-    const tools = this[`_${side}PanelTools`];
-    if (!tools) return;
-    const sliderValue = Number(tools.angleSlider.value);
-    if (!Number.isFinite(sliderValue)) return;
-    this._setSideRotation(side, sliderValue);
-  }
-  _setSideRotation(side, angle) {
-    const viewer = side === "left" ? this._leftViewer : this._rightViewer;
-    viewer?.setRotation(angle);
-    this._updatePanelControls(side);
-  }
   _rotateSideBy(side, delta) {
     const viewer = side === "left" ? this._leftViewer : this._rightViewer;
     viewer?.rotateBy(delta);
-    this._updatePanelControls(side);
   }
   _alignSelectedSide() {
     if (!this._contextMenuSide) return;
@@ -12868,11 +12798,9 @@ var MatchViewer = class {
     if (side === "left") {
       const rightRot = this._rightViewer?.viewState.rotation || 0;
       this._leftViewer?.setRotation(rightRot + angle);
-      this._updatePanelControls("left");
     } else if (side === "right") {
       const leftRot = this._leftViewer?.viewState.rotation || 0;
       this._rightViewer?.setRotation(leftRot - angle);
-      this._updatePanelControls("right");
     }
   }
   _clearCrossMinutiaHighlight() {
@@ -13076,7 +13004,8 @@ var MatchViewer = class {
     this._activePopupPairIdx = pairIdx != null && pairIdx >= 0 ? pairIdx : -1;
     const leftSeg = pairIdx != null && pairIdx >= 0 ? this._leftSegDataByPair.get(pairIdx) || (side === "left" ? segment : null) : side === "left" ? segment : null;
     const rightSeg = pairIdx != null && pairIdx >= 0 ? this._rightSegDataByPair.get(pairIdx) || (side === "right" ? segment : null) : side === "right" ? segment : null;
-    const color = pairIdx != null && pairIdx >= 0 ? this._options.pairs[pairIdx]?.color || segment.color || this._options.markerColor : segment.color || this._options.markerColor;
+    const pairColor = pairIdx != null && pairIdx >= 0 ? this._options.pairs[pairIdx]?.color : null;
+    const color = segment.color || pairColor || this._options.markerColor;
     const meta = leftSeg || rightSeg || segment;
     const lines = [];
     if (pairIdx != null && pairIdx >= 0) {
