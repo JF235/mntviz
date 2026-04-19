@@ -12,17 +12,24 @@
 
 import { Viewer } from './viewer.js';
 import { MinutiaeRenderer, minutiaDataMap, createMarkerShape } from './minutiae-renderer.js';
+import { SegmentsRenderer, segmentDataMap } from './segments-renderer.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const PANEL_ROTATION_SLIDER_RANGE = 180;
+const PATCH_NEIGHBOR_ALPHA = 0.4;
 
 const DEFAULTS = {
     leftMinutiae: [],
     rightMinutiae: [],
     pairs: [],
+    leftSegments: [],
+    rightSegments: [],
+    dominantAngle: null,
     leftTitle: null,
     rightTitle: null,
     markerColor: '#00ff00',
     rendererOptions: {},
+    segmentOptions: {},
     patchSize: 128,
     patchDisplaySize: 192,
     showSegmentsOnLoad: false,
@@ -45,6 +52,11 @@ export class MatchViewer {
         this._allSegmentsVisible = this._options.showSegmentsOnLoad;
         this._activePopupPairIdx = -1;
         this._segmentLines = [];
+        this._xMntPeer = null;
+        this._xSegSelf = null;
+        this._xSegPeer = null;
+        this._xMatchLine = null;
+        this._activePanelMenuSide = null;
         this._ac = new AbortController();
 
         this._buildDOM();
@@ -66,6 +78,7 @@ export class MatchViewer {
         }
         this._leftHost = _el('div', 'mntviz-match-viewer-host');
         this._leftPanel.appendChild(this._leftHost);
+        this._buildPanelTools('left', this._leftPanel, Boolean(this._options.leftTitle));
 
         // Right panel
         this._rightPanel = _el('div', 'mntviz-match-panel');
@@ -76,6 +89,7 @@ export class MatchViewer {
         }
         this._rightHost = _el('div', 'mntviz-match-viewer-host');
         this._rightPanel.appendChild(this._rightHost);
+        this._buildPanelTools('right', this._rightPanel, Boolean(this._options.rightTitle));
 
         // Overlay SVG for segments (no viewBox — uses CSS pixel coords)
         this._overlaySvg = document.createElementNS(SVG_NS, 'svg');
@@ -87,6 +101,11 @@ export class MatchViewer {
         this._popup = _el('div', 'mntviz-match-popup');
         this._popup.style.display = 'none';
         this._buildPopup();
+
+        // Context menu
+        this._contextMenu = _el('div', 'mntviz-context-menu');
+        this._contextMenu.style.display = 'none';
+        this._buildContextMenu();
 
         // SVG export buttons
         this._exportBtnWrap = _el('div', 'mntviz-export-btns');
@@ -103,7 +122,14 @@ export class MatchViewer {
 
         this._exportBtnWrap.append(this._exportBtn, this._exportViewBtn);
 
-        this._container.append(this._leftPanel, this._rightPanel, this._overlaySvg, this._popup, this._exportBtnWrap);
+        this._container.append(
+            this._leftPanel,
+            this._rightPanel,
+            this._overlaySvg,
+            this._popup,
+            this._contextMenu,
+            this._exportBtnWrap,
+        );
         this._el.appendChild(this._container);
     }
 
@@ -161,6 +187,60 @@ export class MatchViewer {
         });
     }
 
+    _buildContextMenu() {
+        this._contextMenuAlignBtn = _el('button', 'mntviz-context-menu-btn');
+        this._contextMenuAlignBtn.type = 'button';
+        this._contextMenuAlignBtn.textContent = 'Align';
+        this._contextMenuAlignBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._alignSelectedSide();
+            this._hideContextMenu();
+        });
+        this._contextMenu.append(this._contextMenuAlignBtn);
+    }
+
+    _buildPanelTools(side, panel, hasTitle = false) {
+        const wrap = _el('div', 'mntviz-panel-tools');
+        if (hasTitle) wrap.classList.add('mntviz-panel-tools-under-title');
+        const gearBtn = _el('button', 'mntviz-panel-gear-btn');
+        gearBtn.type = 'button';
+        gearBtn.textContent = '\u2699';
+
+        const menu = _el('div', 'mntviz-panel-menu');
+        const currentValue = document.createElement('b');
+        currentValue.className = 'mntviz-panel-angle-readout';
+        currentValue.textContent = '+0.0\u00b0';
+
+        const angleSlider = document.createElement('input');
+        angleSlider.className = 'mntviz-panel-angle-slider';
+        angleSlider.type = 'range';
+        angleSlider.min = String(-PANEL_ROTATION_SLIDER_RANGE);
+        angleSlider.max = String(PANEL_ROTATION_SLIDER_RANGE);
+        angleSlider.step = '0.5';
+        angleSlider.value = '0';
+
+        menu.append(currentValue, angleSlider);
+        wrap.append(gearBtn, menu);
+        panel.appendChild(wrap);
+
+        gearBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._togglePanelMenu(side);
+        });
+        menu.addEventListener('click', (e) => e.stopPropagation());
+        angleSlider.addEventListener('input', () => {
+            this._applyPanelSliderRotation(side);
+        });
+
+        this[`_${side}PanelTools`] = {
+            wrap,
+            gearBtn,
+            menu,
+            currentValue,
+            angleSlider,
+        };
+    }
+
     /* ── Public API ───────────────────────────────────────── */
 
     /**
@@ -172,11 +252,11 @@ export class MatchViewer {
         // Create viewers with onTransform to keep segments in sync
         this._leftViewer = new Viewer(this._leftHost, {
             minimap: false,
-            onTransform: () => this._updateSegments(),
+            onTransform: () => this._onViewerTransform('left'),
         });
         this._rightViewer = new Viewer(this._rightHost, {
             minimap: false,
-            onTransform: () => this._updateSegments(),
+            onTransform: () => this._onViewerTransform('right'),
         });
 
         await Promise.all([
@@ -188,11 +268,54 @@ export class MatchViewer {
         const opts = this._options;
         const rOpts = opts.rendererOptions;
 
+        // Intra-panel segments (SPG minutiae graph, Delaunay, etc.) are drawn
+        // first so they sit under the minutiae markers. Keep references to
+        // each segment's <g> wrapper indexed by pair_id for cross-highlight.
+        this._leftSegEls = [];
+        this._rightSegEls = [];
+        this._leftSegByPair = new Map();
+        this._rightSegByPair = new Map();
+        this._leftSegDataByPair = new Map();
+        this._rightSegDataByPair = new Map();
+        if (opts.leftSegments && opts.leftSegments.length) {
+            const lsr = new SegmentsRenderer(this._leftViewer.svgLayer);
+            this._leftSegEls = lsr.draw(opts.leftMinutiae, opts.leftSegments, opts.segmentOptions);
+            for (let i = 0; i < opts.leftSegments.length; i++) {
+                const pid = opts.leftSegments[i].pair_id;
+                if (pid != null) {
+                    if (this._leftSegEls[i]) this._leftSegByPair.set(pid, this._leftSegEls[i]);
+                    this._leftSegDataByPair.set(pid, opts.leftSegments[i]);
+                }
+            }
+        }
+        if (opts.rightSegments && opts.rightSegments.length) {
+            const rsr = new SegmentsRenderer(this._rightViewer.svgLayer);
+            this._rightSegEls = rsr.draw(opts.rightMinutiae, opts.rightSegments, opts.segmentOptions);
+            for (let i = 0; i < opts.rightSegments.length; i++) {
+                const pid = opts.rightSegments[i].pair_id;
+                if (pid != null) {
+                    if (this._rightSegEls[i]) this._rightSegByPair.set(pid, this._rightSegEls[i]);
+                    this._rightSegDataByPair.set(pid, opts.rightSegments[i]);
+                }
+            }
+        }
+
         const leftRenderer = new MinutiaeRenderer(this._leftViewer.svgLayer);
         leftRenderer.draw(opts.leftMinutiae, opts.markerColor, rOpts);
 
         const rightRenderer = new MinutiaeRenderer(this._rightViewer.svgLayer);
         rightRenderer.draw(opts.rightMinutiae, opts.markerColor, rOpts);
+
+        // Index minutia <g> markers by pair_id so hovering one side lights
+        // up the matching one on the other side.
+        this._leftMntByPair = _indexMarkersByPair(this._leftViewer.svgLayer);
+        this._rightMntByPair = _indexMarkersByPair(this._rightViewer.svgLayer);
+
+        // Floating tooltip for segment hover info — anchored to the outer
+        // container so it overlays both panels.
+        this._segTooltip = _el('div', 'mntviz-seg-tooltip');
+        this._segTooltip.style.display = 'none';
+        this._container.appendChild(this._segTooltip);
 
         // Enable hover tooltips via MinutiaeInspector on both viewers
         this._leftViewer.enableMinutiaeInspector({
@@ -206,6 +329,7 @@ export class MatchViewer {
 
         // Build segment line elements (initially hidden)
         this._segmentLines = [];
+        this._segmentHitLines = [];
         for (let i = 0; i < opts.pairs.length; i++) {
             const p = opts.pairs[i];
             const line = document.createElementNS(SVG_NS, 'line');
@@ -216,6 +340,13 @@ export class MatchViewer {
             line.style.display = 'none';
             this._overlaySvg.appendChild(line);
             this._segmentLines.push(line);
+
+            const hitLine = document.createElementNS(SVG_NS, 'line');
+            hitLine.classList.add('mntviz-match-segment-hitbox');
+            hitLine.dataset.pairIndex = String(i);
+            hitLine.style.display = 'none';
+            this._overlaySvg.appendChild(hitLine);
+            this._segmentHitLines.push(hitLine);
         }
 
         this._bindEvents();
@@ -224,6 +355,9 @@ export class MatchViewer {
         if (this._allSegmentsVisible) {
             this._showAllSegments();
         }
+
+        this._updatePanelControls('left');
+        this._updatePanelControls('right');
     }
 
     /**
@@ -454,12 +588,289 @@ export class MatchViewer {
         this._leftViewer.viewport.addEventListener('dblclick', (e) => this._onDblClick(e), sig);
         this._rightViewer.viewport.addEventListener('dblclick', (e) => this._onDblClick(e), sig);
 
+        // Cross-panel highlight on hover — minutiae and segments.
+        this._leftViewer.svgLayer.addEventListener('mouseover', (e) => this._onHoverIn(e, 'left'), sig);
+        this._leftViewer.svgLayer.addEventListener('mouseout',  (e) => this._onHoverOut(e, 'left'), sig);
+        this._rightViewer.svgLayer.addEventListener('mouseover', (e) => this._onHoverIn(e, 'right'), sig);
+        this._rightViewer.svgLayer.addEventListener('mouseout',  (e) => this._onHoverOut(e, 'right'), sig);
+        this._leftViewer.viewport.addEventListener('mousemove', (e) => this._onHoverMove(e), sig);
+        this._rightViewer.viewport.addEventListener('mousemove', (e) => this._onHoverMove(e), sig);
+        for (const line of this._segmentHitLines) {
+            line.addEventListener('mouseover', (e) => this._onMatchLineHoverIn(e), sig);
+            line.addEventListener('mouseout', (e) => this._onMatchLineHoverOut(e), sig);
+            line.addEventListener('mousemove', (e) => this._onHoverMove(e), sig);
+        }
+
+        // Context menu for side-specific actions.
+        this._leftViewer.viewport.addEventListener('contextmenu', (e) => this._onContextMenu(e, 'left'), sig);
+        this._rightViewer.viewport.addEventListener('contextmenu', (e) => this._onContextMenu(e, 'right'), sig);
+        window.addEventListener('click', () => {
+            this._hideContextMenu();
+            this._hidePanelMenus();
+        }, sig);
+        window.addEventListener('blur', () => {
+            this._hideContextMenu();
+            this._hidePanelMenus();
+        }, sig);
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this._hideContextMenu();
+                this._hidePanelMenus();
+            }
+        }, sig);
+    }
+
+    _onViewerTransform(side) {
+        this._updateSegments();
+        this._updatePanelControls(side);
+    }
+
+    /* ── Cross-panel hover highlighting ───────────────────── */
+
+    _onHoverIn(e, side) {
+        // Minutia hover → highlight paired minutia on the opposite side.
+        const marker = e.target.closest('.mntviz-mnt-marker');
+        if (marker) {
+            this._clearCrossMinutiaHighlight();
+            const m = minutiaDataMap.get(marker);
+            if (m && m._pairIndex != null && m._pairIndex >= 0) {
+                const otherMap = side === 'left' ? this._rightMntByPair : this._leftMntByPair;
+                const peer = otherMap.get(m._pairIndex);
+                if (peer) {
+                    peer.classList.add('mntviz-mnt-cross-highlighted');
+                    peer.parentNode?.appendChild(peer);
+                }
+                this._xMntPeer = peer || null;
+            }
+            return;
+        }
+
+        // Segment hover → highlight this segment + paired segment, show info.
+        const seg = e.target.closest('.mntviz-segment-marker');
+        if (seg) {
+            this._clearSegmentHighlights();
+            const data = segmentDataMap.get(seg);
+            if (!data) return;
+            seg.classList.add('mntviz-seg-highlighted');
+            seg.parentNode?.appendChild(seg);
+            this._xSegSelf = seg;
+            if (data.pair_id != null) {
+                const otherMap = side === 'left' ? this._rightSegByPair : this._leftSegByPair;
+                const peer = otherMap.get(data.pair_id);
+                if (peer) {
+                    peer.classList.add('mntviz-seg-cross-highlighted');
+                    peer.parentNode?.appendChild(peer);
+                    this._xSegPeer = peer;
+                }
+            }
+            this._showSegTooltip(data, e);
+        }
+    }
+
+    _onHoverOut(e, side) {
+        const marker = e.target.closest('.mntviz-mnt-marker');
+        if (marker) {
+            this._clearCrossMinutiaHighlight();
+        }
+        const seg = e.target.closest('.mntviz-segment-marker');
+        if (seg) {
+            this._clearSegmentHighlights();
+            this._hideSegTooltip();
+        }
+    }
+
+    _onHoverMove(e) {
+        if (this._segTooltip && this._segTooltip.style.display !== 'none') {
+            this._positionSegTooltip(e);
+        }
+    }
+
+    _onMatchLineHoverIn(e) {
+        const hitLine = e.currentTarget;
+        const pairIdx = Number(hitLine?.dataset?.pairIndex);
+        if (!Number.isInteger(pairIdx) || pairIdx < 0) return;
+        const pair = this._options.pairs[pairIdx];
+        if (!pair) return;
+        const line = this._segmentLines[pairIdx];
+        if (!line) return;
+        line.classList.add('mntviz-match-segment-hovered');
+        this._xMatchLine = line;
+        this._showMatchLineTooltip(pairIdx, e);
+    }
+
+    _onMatchLineHoverOut() {
+        if (this._xMatchLine) {
+            this._xMatchLine.classList.remove('mntviz-match-segment-hovered');
+            this._xMatchLine = null;
+        }
+        this._hideSegTooltip();
+    }
+
+    _showSegTooltip(data, event) {
+        const parts = [];
+        if (data.pair_id != null) {
+            parts.push(`<span>pair:</span> <b style="color:${data.color || '#fff'}">#${data.pair_id}</b>`);
+        }
+        parts.push(`<span>m1:</span> ${data.m1}  <span>m2:</span> ${data.m2}`);
+        parts.push(..._formatSegmentMetaLines(data.label, 'seg'));
+        parts.push(..._formatSegmentMetaLines(data.info, 'info'));
+        this._segTooltip.innerHTML = parts.join('<br>');
+        this._segTooltip.style.display = '';
+        this._positionSegTooltip(event);
+    }
+
+    _showMatchLineTooltip(pairIdx, event) {
+        const pair = this._options.pairs[pairIdx];
+        if (!pair) return;
+        const parts = [
+            `<span>pair:</span> <b style="color:${pair.color || '#fff'}">#${pairIdx}</b>`,
+            `<span>L idx:</span> ${pair.leftIdx}  <span>R idx:</span> ${pair.rightIdx}`,
+        ];
+        if (_isFiniteNumber(pair.similarity)) {
+            parts.push(`<span>sim:</span> ${_fmtSimilarity(pair.similarity)}`);
+        }
+        this._segTooltip.innerHTML = parts.join('<br>');
+        this._segTooltip.style.display = '';
+        this._positionSegTooltip(event);
+    }
+
+    _positionSegTooltip(event) {
+        const rect = this._container.getBoundingClientRect();
+        const x = event.clientX - rect.left + 12;
+        const y = event.clientY - rect.top + 12;
+        const w = this._segTooltip.offsetWidth;
+        const h = this._segTooltip.offsetHeight;
+        const left = Math.min(rect.width - w - 4, x);
+        const top  = Math.min(rect.height - h - 4, y);
+        this._segTooltip.style.left = `${Math.max(0, left)}px`;
+        this._segTooltip.style.top  = `${Math.max(0, top)}px`;
+    }
+
+    _hideSegTooltip() {
+        if (this._segTooltip) this._segTooltip.style.display = 'none';
+    }
+
+    _onContextMenu(e, side) {
+        e.preventDefault();
+        e.stopPropagation();
+        this._showContextMenu(e, side);
+    }
+
+    _showContextMenu(event, side) {
+        this._contextMenuSide = side;
+        const hasAngle = Number.isFinite(this._options.dominantAngle);
+        this._contextMenuAlignBtn.disabled = !hasAngle;
+
+        this._contextMenu.style.display = '';
+        const rect = this._container.getBoundingClientRect();
+        const menuW = this._contextMenu.offsetWidth;
+        const menuH = this._contextMenu.offsetHeight;
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        const left = Math.min(Math.max(4, x), Math.max(4, rect.width - menuW - 4));
+        const top = Math.min(Math.max(4, y), Math.max(4, rect.height - menuH - 4));
+        this._contextMenu.style.left = `${left}px`;
+        this._contextMenu.style.top = `${top}px`;
+    }
+
+    _hideContextMenu() {
+        if (!this._contextMenu) return;
+        this._contextMenu.style.display = 'none';
+        this._contextMenuSide = null;
+    }
+
+    _togglePanelMenu(side) {
+        const tools = this[`_${side}PanelTools`];
+        if (!tools) return;
+        if (this._activePanelMenuSide === side && tools.wrap.classList.contains('mntviz-open')) {
+            this._hidePanelMenus();
+            return;
+        }
+        this._hidePanelMenus(side);
+        this._updatePanelControls(side);
+        tools.wrap.classList.add('mntviz-open');
+        tools.gearBtn.classList.add('mntviz-open');
+        this._activePanelMenuSide = side;
+    }
+
+    _hidePanelMenus(exceptSide = null) {
+        for (const side of ['left', 'right']) {
+            if (side === exceptSide) continue;
+            const tools = this[`_${side}PanelTools`];
+            if (!tools) continue;
+            tools.wrap.classList.remove('mntviz-open');
+            tools.gearBtn.classList.remove('mntviz-open');
+        }
+        if (!exceptSide) this._activePanelMenuSide = null;
+    }
+
+    _updatePanelControls(side) {
+        const tools = this[`_${side}PanelTools`];
+        const viewer = side === 'left' ? this._leftViewer : this._rightViewer;
+        if (!tools || !viewer) return;
+
+        const rot = viewer.viewState.rotation || 0;
+        tools.currentValue.textContent = `${rot >= 0 ? '+' : ''}${rot.toFixed(1)}\u00b0`;
+        tools.angleSlider.value = String(rot);
+    }
+
+    _applyPanelSliderRotation(side) {
+        const tools = this[`_${side}PanelTools`];
+        if (!tools) return;
+        const sliderValue = Number(tools.angleSlider.value);
+        if (!Number.isFinite(sliderValue)) return;
+        this._setSideRotation(side, sliderValue);
+    }
+
+    _setSideRotation(side, angle) {
+        const viewer = side === 'left' ? this._leftViewer : this._rightViewer;
+        viewer?.setRotation(angle);
+        this._updatePanelControls(side);
+    }
+
+    _rotateSideBy(side, delta) {
+        const viewer = side === 'left' ? this._leftViewer : this._rightViewer;
+        viewer?.rotateBy(delta);
+        this._updatePanelControls(side);
+    }
+
+    _alignSelectedSide() {
+        if (!this._contextMenuSide) return;
+        this._alignSide(this._contextMenuSide);
+    }
+
+    _alignSide(side) {
+        if (!Number.isFinite(this._options.dominantAngle)) return;
+        const angle = this._options.dominantAngle;
+        if (side === 'left') {
+            const rightRot = this._rightViewer?.viewState.rotation || 0;
+            this._leftViewer?.setRotation(rightRot + angle);
+            this._updatePanelControls('left');
+        } else if (side === 'right') {
+            const leftRot = this._leftViewer?.viewState.rotation || 0;
+            this._rightViewer?.setRotation(leftRot - angle);
+            this._updatePanelControls('right');
+        }
+    }
+
+    _clearCrossMinutiaHighlight() {
+        if (!this._xMntPeer) return;
+        this._xMntPeer.classList.remove('mntviz-mnt-cross-highlighted');
+        this._xMntPeer = null;
+    }
+
+    _clearSegmentHighlights() {
+        if (this._xSegSelf) this._xSegSelf.classList.remove('mntviz-seg-highlighted');
+        if (this._xSegPeer) this._xSegPeer.classList.remove('mntviz-seg-cross-highlighted');
+        this._xSegSelf = null;
+        this._xSegPeer = null;
     }
 
     _onSvgMouseDown(e) {
         this._mouseDownPos = { x: e.clientX, y: e.clientY };
         const marker = e.target.closest('.mntviz-mnt-marker');
-        if (marker) {
+        const segment = e.target.closest('.mntviz-segment-marker');
+        if (marker || segment) {
             e.stopPropagation();
             e.preventDefault();
         }
@@ -473,25 +884,38 @@ export class MatchViewer {
         if (Math.abs(dx) > 3 || Math.abs(dy) > 3) return; // drag, not click
 
         const marker = e.target.closest('.mntviz-mnt-marker');
-        if (!marker) return;
+        const viewer = side === 'left' ? this._leftViewer : this._rightViewer;
+        if (marker) {
+            const m = minutiaDataMap.get(marker);
+            if (!m) return;
 
-        const m = minutiaDataMap.get(marker);
-        if (!m) return;
+            e.stopPropagation();
+
+            // Collapse the MinutiaeInspector tooltip if expanded (we handle clicks ourselves)
+            if (viewer._minutiaeInspector) {
+                viewer._minutiaeInspector._collapse();
+            }
+
+            this._onMarkerClick(side, m, e);
+            return;
+        }
+
+        const segment = e.target.closest('.mntviz-segment-marker');
+        if (!segment) return;
+
+        const data = segmentDataMap.get(segment);
+        if (!data) return;
 
         e.stopPropagation();
-
-        // Collapse the MinutiaeInspector tooltip if expanded (we handle clicks ourselves)
-        const viewer = side === 'left' ? this._leftViewer : this._rightViewer;
         if (viewer._minutiaeInspector) {
             viewer._minutiaeInspector._collapse();
         }
-
-        this._onMarkerClick(side, m, e);
+        this._onSegmentClick(side, data, e);
     }
 
     _onDblClick(e) {
         // Only toggle if the double-click was NOT on a marker
-        if (e.target.closest('.mntviz-mnt-marker')) return;
+        if (e.target.closest('.mntviz-mnt-marker') || e.target.closest('.mntviz-segment-marker')) return;
 
         this._allSegmentsVisible = !this._allSegmentsVisible;
 
@@ -527,6 +951,15 @@ export class MatchViewer {
         this._showDualPatchPopup(leftM, rightM, pairIdx, event);
     }
 
+    _onSegmentClick(side, segment, event) {
+        const pairIdx = segment.pair_id;
+        if (pairIdx != null && pairIdx >= 0) {
+            this._showSegment(pairIdx);
+            this._updateSegments();
+        }
+        this._showSegmentMetadataPopup(side, segment, event);
+    }
+
     /* ── Segment management ───────────────────────────────── */
 
     _showSegment(idx) {
@@ -534,31 +967,40 @@ export class MatchViewer {
             this._segmentLines[idx].style.display = '';
             this._segmentLines[idx].classList.add('mntviz-match-segment-active');
         }
+        if (this._segmentHitLines[idx]) {
+            this._segmentHitLines[idx].style.display = '';
+        }
         this._updateSegments();
     }
 
     _showAllSegments() {
-        for (const line of this._segmentLines) {
+        for (let i = 0; i < this._segmentLines.length; i++) {
+            const line = this._segmentLines[i];
             line.style.display = '';
             line.classList.remove('mntviz-match-segment-active');
+            if (this._segmentHitLines[i]) this._segmentHitLines[i].style.display = '';
         }
         this._updateSegments();
     }
 
     _hideAllSegments() {
-        for (const line of this._segmentLines) {
+        for (let i = 0; i < this._segmentLines.length; i++) {
+            const line = this._segmentLines[i];
             line.style.display = 'none';
             line.classList.remove('mntviz-match-segment-active');
+            if (this._segmentHitLines[i]) this._segmentHitLines[i].style.display = 'none';
         }
     }
 
     _hideActiveSegment() {
         if (this._activePopupPairIdx >= 0 && !this._allSegmentsVisible) {
             const line = this._segmentLines[this._activePopupPairIdx];
+            const hitLine = this._segmentHitLines[this._activePopupPairIdx];
             if (line) {
                 line.style.display = 'none';
                 line.classList.remove('mntviz-match-segment-active');
             }
+            if (hitLine) hitLine.style.display = 'none';
         } else if (this._activePopupPairIdx >= 0 && this._allSegmentsVisible) {
             const line = this._segmentLines[this._activePopupPairIdx];
             if (line) line.classList.remove('mntviz-match-segment-active');
@@ -576,6 +1018,7 @@ export class MatchViewer {
 
         for (let i = 0; i < pairs.length; i++) {
             const line = this._segmentLines[i];
+            const hitLine = this._segmentHitLines[i];
             if (line.style.display === 'none') continue;
 
             const p = pairs[i];
@@ -589,6 +1032,12 @@ export class MatchViewer {
             line.setAttribute('y1', lp.y);
             line.setAttribute('x2', rp.x);
             line.setAttribute('y2', rp.y);
+            if (hitLine) {
+                hitLine.setAttribute('x1', lp.x);
+                hitLine.setAttribute('y1', lp.y);
+                hitLine.setAttribute('x2', rp.x);
+                hitLine.setAttribute('y2', rp.y);
+            }
         }
     }
 
@@ -596,17 +1045,7 @@ export class MatchViewer {
      * Convert image coordinates to container-relative pixel coords.
      */
     _imageToContainerCoords(viewer, imgX, imgY, containerRect) {
-        const svgRect = viewer.svgLayer.getBoundingClientRect();
-        const imgSize = viewer.imageSize;
-        if (!imgSize.width || !imgSize.height) return { x: 0, y: 0 };
-
-        const scaleX = svgRect.width / imgSize.width;
-        const scaleY = svgRect.height / imgSize.height;
-
-        return {
-            x: svgRect.left - containerRect.left + imgX * scaleX,
-            y: svgRect.top - containerRect.top + imgY * scaleY,
-        };
+        return viewer.imageToElementCoords(imgX, imgY, this._container);
     }
 
     /* ── Dual-patch popup ─────────────────────────────────── */
@@ -618,20 +1057,41 @@ export class MatchViewer {
         // Fields
         const pair = this._options.pairs[pairIdx];
         const color = pair.color || this._options.markerColor;
-        this._popupFields.innerHTML = [
+        const lines = [
             `<span>pair:</span> <b style="color:${color}">#${pairIdx}</b>`,
             `<span>L:</span> (${Math.round(leftM.x)}, ${Math.round(leftM.y)}, ${Math.round(leftM.angle)}\u00b0)`
             + `  <span>R:</span> (${Math.round(rightM.x)}, ${Math.round(rightM.y)}, ${Math.round(rightM.angle)}\u00b0)`,
-        ].join('<br>');
+        ];
+        if (_isFiniteNumber(pair.similarity)) {
+            lines.push(`<span>sim:</span> ${_fmtSimilarity(pair.similarity)}`);
+        }
+        this._popupFields.innerHTML = lines.join('<br>');
 
         // Extract and render patches
         const ps = this._options.patchSize;
         const ds = this._options.patchDisplaySize;
 
-        this._renderOnePatch(this._leftPatchCanvas, this._leftPatchSvg, this._leftViewer, leftM, ps, ds);
-        this._renderOnePatch(this._rightPatchCanvas, this._rightPatchSvg, this._rightViewer, rightM, ps, ds);
+        this._renderOnePatch(
+            this._leftPatchCanvas,
+            this._leftPatchSvg,
+            this._leftViewer,
+            leftM,
+            this._options.leftMinutiae,
+            ps,
+            ds,
+        );
+        this._renderOnePatch(
+            this._rightPatchCanvas,
+            this._rightPatchSvg,
+            this._rightViewer,
+            rightM,
+            this._options.rightMinutiae,
+            ps,
+            ds,
+        );
 
         // Show and position
+        this._popupPatchesWrap.style.display = '';
         this._popup.style.display = '';
         this._popup.classList.add('mntviz-match-popup-visible');
 
@@ -641,8 +1101,82 @@ export class MatchViewer {
         requestAnimationFrame(() => this._positionPopup(event));
     }
 
-    _renderOnePatch(canvas, svg, viewer, m, ps, ds) {
+    _showSegmentMetadataPopup(side, segment, event) {
+        const pairIdx = segment.pair_id;
+        this._hideActiveSegment();
+        this._activePopupPairIdx = (pairIdx != null && pairIdx >= 0) ? pairIdx : -1;
+
+        const leftSeg = pairIdx != null && pairIdx >= 0
+            ? (this._leftSegDataByPair.get(pairIdx) || (side === 'left' ? segment : null))
+            : (side === 'left' ? segment : null);
+        const rightSeg = pairIdx != null && pairIdx >= 0
+            ? (this._rightSegDataByPair.get(pairIdx) || (side === 'right' ? segment : null))
+            : (side === 'right' ? segment : null);
+
+        const color = pairIdx != null && pairIdx >= 0
+            ? (this._options.pairs[pairIdx]?.color || segment.color || this._options.markerColor)
+            : (segment.color || this._options.markerColor);
+        const meta = leftSeg || rightSeg || segment;
+        const lines = [];
+
+        if (pairIdx != null && pairIdx >= 0) {
+            lines.push(`<span>pair:</span> <b style="color:${color}">#${pairIdx}</b>`);
+        }
+
+        if (leftSeg && rightSeg) {
+            lines.push(`<span>L seg:</span> ${_fmtIndex(leftSeg.idx)}  <span>R seg:</span> ${_fmtIndex(rightSeg.idx)}`);
+            lines.push(`<span>L m1:</span> ${leftSeg.m1}  <span>L m2:</span> ${leftSeg.m2}`);
+            lines.push(`<span>R m1:</span> ${rightSeg.m1}  <span>R m2:</span> ${rightSeg.m2}`);
+            if (_isFiniteNumber(leftSeg.len) || _isFiniteNumber(rightSeg.len)) {
+                lines.push(`<span>L len:</span> ${_fmtNumber(leftSeg.len)}  <span>R len:</span> ${_fmtNumber(rightSeg.len)}`);
+            }
+            if (_isFiniteNumber(leftSeg.slope) || _isFiniteNumber(rightSeg.slope)) {
+                lines.push(`<span>L th:</span> ${_fmtAngle(leftSeg.slope)}  <span>R th:</span> ${_fmtAngle(rightSeg.slope)}`);
+            }
+        } else {
+            const localKey = side === 'left' ? 'L' : 'R';
+            lines.push(`<span>${localKey} seg:</span> ${_fmtIndex(segment.idx)}`);
+            lines.push(`<span>m1:</span> ${segment.m1}  <span>m2:</span> ${segment.m2}`);
+            if (_isFiniteNumber(segment.len)) lines.push(`<span>len:</span> ${_fmtNumber(segment.len)}`);
+            if (_isFiniteNumber(segment.slope)) lines.push(`<span>th:</span> ${_fmtAngle(segment.slope)}`);
+        }
+
+        if (leftSeg && rightSeg && (
+            _isFiniteNumber(leftSeg.a1) || _isFiniteNumber(rightSeg.a1)
+            || _isFiniteNumber(leftSeg.a2) || _isFiniteNumber(rightSeg.a2)
+        )) {
+            lines.push(`<span>L a1:</span> ${_fmtAngle(leftSeg.a1)}  <span>R a1:</span> ${_fmtAngle(rightSeg.a1)}`);
+            lines.push(`<span>L a2:</span> ${_fmtAngle(leftSeg.a2)}  <span>R a2:</span> ${_fmtAngle(rightSeg.a2)}`);
+        } else if (_isFiniteNumber(meta.a1) || _isFiniteNumber(meta.a2)) {
+            lines.push(`<span>a1:</span> ${_fmtAngle(meta.a1)}  <span>a2:</span> ${_fmtAngle(meta.a2)}`);
+        }
+        if (_isFiniteNumber(meta.dtheta) || _isFiniteNumber(meta.da1) || _isFiniteNumber(meta.da2)) {
+            lines.push(
+                `<span>dth:</span> ${_fmtAngle(meta.dtheta)}  `
+                + `<span>da1:</span> ${_fmtAngle(meta.da1)}  `
+                + `<span>da2:</span> ${_fmtAngle(meta.da2)}`
+            );
+        }
+        if (meta.inverted != null) {
+            lines.push(`<span>inv:</span> ${meta.inverted ? 'yes' : 'no'}`);
+        }
+
+        this._popupFields.innerHTML = lines.join('<br>');
+        this._popupPatchesWrap.style.display = 'none';
+        this._popup.style.display = '';
+        this._popup.classList.add('mntviz-match-popup-visible');
+
+        if (pairIdx != null && pairIdx >= 0) {
+            this._showSegment(pairIdx);
+        }
+
+        requestAnimationFrame(() => this._positionPopup(event));
+    }
+
+    _renderOnePatch(canvas, svg, viewer, m, allMinutiae, ps, ds) {
         const rotAngle = m.angle * (Math.PI / 180);
+        const cos = Math.cos(rotAngle);
+        const sin = Math.sin(rotAngle);
 
         // Extract patch from image
         const tmpCanvas = document.createElement('canvas');
@@ -667,6 +1201,22 @@ export class MatchViewer {
 
         const color = m._color || this._options.markerColor;
         const shape = m._shape || this._options.rendererOptions.markerShape || 'circle';
+
+        for (const other of allMinutiae || []) {
+            if (other === m) continue;
+
+            const dx = other.x - m.x;
+            const dy = other.y - m.y;
+            const px = dx * cos - dy * sin + ps / 2;
+            const py = dx * sin + dy * cos + ps / 2;
+            if (px < 0 || px > ps || py < 0 || py > ps) continue;
+
+            const pa = ((other.angle - m.angle) % 360 + 360) % 360;
+            const otherColor = other._color || this._options.markerColor;
+            const otherShape = other._shape || this._options.rendererOptions.markerShape || 'circle';
+            this._drawPatchMarker(svg, px, py, pa, otherColor, PATCH_NEIGHBOR_ALPHA, otherShape);
+        }
+
         this._drawPatchMarker(svg, ps / 2, ps / 2, 0, color, 1.0, shape);
     }
 
@@ -731,4 +1281,92 @@ function _el(tag, className) {
     const el = document.createElement(tag);
     el.className = className;
     return el;
+}
+
+function _isFiniteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value);
+}
+
+function _fmtNumber(value, digits = 1) {
+    return _isFiniteNumber(value) ? value.toFixed(digits) : '-';
+}
+
+function _fmtAngle(value, digits = 1) {
+    return _isFiniteNumber(value) ? `${value.toFixed(digits)}\u00b0` : '-';
+}
+
+function _fmtIndex(value) {
+    return _isFiniteNumber(value) ? `#${Math.round(value)}` : '-';
+}
+
+function _fmtSimilarity(value, digits = 3) {
+    return _isFiniteNumber(value) ? value.toFixed(digits) : '-';
+}
+
+function _escapeHtml(text) {
+    return String(text)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+function _normalizeSegmentMetaKey(key, fallback) {
+    const normalized = String(key)
+        .trim()
+        .toLowerCase()
+        .replaceAll('α₁', 'a1')
+        .replaceAll('α₂', 'a2')
+        .replaceAll('α1', 'a1')
+        .replaceAll('α2', 'a2');
+    return normalized || fallback;
+}
+
+function _formatSegmentMetaLines(raw, fallbackKey) {
+    if (raw == null) return [];
+
+    const text = String(raw).trim();
+    if (!text) return [];
+
+    const chunks = text
+        .split(/\s{2,}|<br\s*\/?>/i)
+        .map(part => part.trim())
+        .filter(Boolean);
+
+    const lines = [];
+    for (const chunk of (chunks.length ? chunks : [text])) {
+        const segMatch = chunk.match(/^seg\s*#\s*(\d+)$/i);
+        if (segMatch) {
+            lines.push(`<span>seg:</span> #${_escapeHtml(segMatch[1])}`);
+            continue;
+        }
+
+        const kvMatches = Array.from(
+            chunk.matchAll(/([^\s:=]+)\s*=\s*(.+?)(?=\s+[^\s:=]+\s*=|$)/gu)
+        );
+        if (kvMatches.length) {
+            for (const [, rawKey, rawValue] of kvMatches) {
+                const key = _normalizeSegmentMetaKey(rawKey, fallbackKey);
+                lines.push(`<span>${_escapeHtml(key)}:</span> ${_escapeHtml(rawValue.trim())}`);
+            }
+            continue;
+        }
+
+        lines.push(`<span>${_escapeHtml(fallbackKey)}:</span> ${_escapeHtml(chunk)}`);
+    }
+
+    return lines;
+}
+
+/** Walk an SVG layer and index minutia <g> markers by their _pairIndex. */
+function _indexMarkersByPair(svgLayer) {
+    const map = new Map();
+    for (const el of svgLayer.querySelectorAll('.mntviz-mnt-marker')) {
+        const m = minutiaDataMap.get(el);
+        if (m && m._pairIndex != null && m._pairIndex >= 0) {
+            map.set(m._pairIndex, el);
+        }
+    }
+    return map;
 }

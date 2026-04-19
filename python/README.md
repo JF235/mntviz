@@ -81,6 +81,10 @@ match_fig
 | `overlays` | list or None | `None` | List of `(minutiae, color)` or `(minutiae, color, shape)` tuples for multi-layer rendering |
 | `overlay_labels` | list[str], bool, or None | `None` | Legend labels for overlay layers; `True` for auto-labels ("Layer 0", "Layer 1", …) |
 | `labels` | Sequence or None | `None` | Per-minutia text label (str, int, or float); length must match minutiae count |
+| `segments` | ndarray, list[dict], or None | `None` | Segments to draw between minutiae — either `(M, 2+)` array of `(m1, m2)` endpoint indices or a list of dicts with keys `m1`, `m2` (+ optional `color`, `width`, `alpha`). |
+| `segment_color` | str | `"#00ff00"` | Default segment color when not per-segment. |
+| `segment_width` | float | `1.0` | Default segment stroke width. |
+| `segment_alpha` | float | `0.7` | Default segment opacity. |
 
 ## Examples
 
@@ -150,6 +154,30 @@ Side-by-side match viewer with connecting segments between paired minutiae.
 | `right_title` | str or None | `None` | Title for right panel |
 | `title` | str or None | `None` | Page title for HTML output |
 | `width` / `height` | int or None | `None` | Canvas size (auto-detected from image) |
+| `left_segments` / `right_segments` | ndarray, list[dict], or None | `None` | Intra-panel segments to draw on each side — `(M, 2+)` array of `(m1, m2)` endpoint indices or a list of dicts with keys `m1`, `m2` (+ optional `color`, `width`, `alpha`). Useful for SPG minutiae graphs, Delaunay, k-NN edges. |
+| `segment_color` | str | `"#00ff00"` | Default intra-panel segment color. |
+| `segment_width` | float | `1.0` | Default intra-panel segment stroke width. |
+| `segment_alpha` | float | `0.7` | Default intra-panel segment opacity. |
+
+### Intra-panel segments example
+
+```python
+import numpy as np
+from mntviz import plot_mnt_match
+
+# 2-column (m1, m2) index arrays are the simplest form.
+left_segs = np.array([[0, 1], [1, 2], [0, 2]], dtype=int)
+right_segs = np.array([[3, 4], [4, 5]], dtype=int)
+
+plot_mnt_match(
+    left_minutiae=latent, right_minutiae=reference,
+    pairs=pairs,
+    left_background_img="latent.png", right_background_img="ref.png",
+    left_segments=left_segs, right_segments=right_segs,
+    segment_color="#facc15", segment_width=1.2, segment_alpha=0.9,
+    output_format="jupyter",
+)
+```
 
 ## `plot_overlay` Parameters
 

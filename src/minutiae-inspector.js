@@ -284,6 +284,12 @@ export class MinutiaeInspector {
 
     _updateFields(m) {
         const lines = [];
+        if (m._pairIndex != null && m._pairIndex >= 0) {
+            lines.push(`<span>pair:</span> <b style="color:${m._color || '#fff'}">#${m._pairIndex}</b>`);
+        }
+        if (m._index != null) {
+            lines.push(`<span>idx:</span> ${m._index}`);
+        }
         if (m._label) {
             lines.push(`<span>src:</span> <b style="color:${m._color || '#fff'}">${m._label}</b>`);
         }
@@ -300,16 +306,8 @@ export class MinutiaeInspector {
     /* ── Tooltip positioning ──────────────────────────────── */
 
     _positionTooltip(mx, my) {
-        const svgRect = this._viewer.svgLayer.getBoundingClientRect();
         const vpRect = this._viewer.viewport.getBoundingClientRect();
-        const imgSize = this._viewer.imageSize;
-        if (!imgSize.width || !imgSize.height) return;
-
-        const scaleX = svgRect.width / imgSize.width;
-        const scaleY = svgRect.height / imgSize.height;
-
-        const screenX = svgRect.left - vpRect.left + mx * scaleX;
-        const screenY = svgRect.top - vpRect.top + my * scaleY;
+        const { x: screenX, y: screenY } = this._viewer.imageToViewportCoords(mx, my);
 
         const tipW = this._tooltip.offsetWidth;
         const tipH = this._tooltip.offsetHeight;

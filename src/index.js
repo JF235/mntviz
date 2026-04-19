@@ -10,6 +10,7 @@
 
 export { Viewer } from './viewer.js';
 export { MinutiaeRenderer, createMarkerShape, parseMinutiaeText, minutiaDataMap } from './minutiae-renderer.js';
+export { SegmentsRenderer, segmentDataMap } from './segments-renderer.js';
 export { UVFieldRenderer } from './uv-renderer.js';
 export { OverlayLayer } from './overlay.js';
 export { MinutiaeInspector } from './minutiae-inspector.js';

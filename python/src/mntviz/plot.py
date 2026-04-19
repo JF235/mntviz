@@ -184,6 +184,87 @@ def load_pairs(pairs: Any) -> np.ndarray:
     return arr.astype(int, copy=False)
 
 
+def _normalize_segments(
+    segments: Any,
+    n_minutiae: int,
+    name: str = "segments",
+) -> list[dict]:
+    """Coerce segment input into a list of JSON-ready dicts.
+
+    Accepts any of:
+    - None → []
+    - numpy array or sequence of shape (M, 2+): first two columns are
+      ``m1``/``m2`` endpoint indices; extra columns are ignored.
+    - Iterable of dicts with keys ``m1``, ``m2`` (+ optional
+      ``color``, ``width``, ``alpha``).
+    - Iterable of tuples/lists ``(m1, m2)`` or
+      ``(m1, m2, color, width, alpha)``.
+    """
+    if segments is None:
+        return []
+
+    # Array-like
+    if isinstance(segments, np.ndarray) or (
+        isinstance(segments, Sequence) and segments
+        and not isinstance(segments[0], (Mapping, dict))
+    ):
+        arr = np.asarray(segments)
+        if arr.ndim != 2 or arr.shape[1] < 2:
+            raise ValueError(
+                f"{name} must be a 2D array with shape (M, 2+) or a list of dicts"
+            )
+        out: list[dict] = []
+        for row in arr:
+            m1 = int(row[0])
+            m2 = int(row[1])
+            if not (0 <= m1 < n_minutiae and 0 <= m2 < n_minutiae):
+                raise ValueError(
+                    f"{name}: endpoint indices must be in [0, {n_minutiae})"
+                )
+            out.append({"m1": m1, "m2": m2})
+        return out
+
+    # Iterable of dicts
+    if not isinstance(segments, Iterable) or isinstance(segments, (str, bytes, bytearray)):
+        raise TypeError(f"{name} must be a path, array, or iterable of dict/tuple rows")
+
+    out = []
+    for i, item in enumerate(segments):
+        if isinstance(item, Mapping):
+            if "m1" not in item or "m2" not in item:
+                raise ValueError(f"{name}[{i}] is missing 'm1' or 'm2'")
+            rec = {"m1": int(item["m1"]), "m2": int(item["m2"])}
+            if "color" in item:   rec["color"] = str(item["color"])
+            if "width" in item:   rec["width"] = float(item["width"])
+            if "alpha" in item:   rec["alpha"] = float(item["alpha"])
+            if "pair_id" in item and item["pair_id"] is not None:
+                rec["pair_id"] = int(item["pair_id"])
+            if "label" in item and item["label"] is not None:
+                rec["label"] = str(item["label"])
+            if "info" in item and item["info"] is not None:
+                rec["info"] = str(item["info"])
+            for key, value in item.items():
+                if key in {"m1", "m2", "color", "width", "alpha", "pair_id", "label", "info"}:
+                    continue
+                if value is None or isinstance(value, (str, bool, int, float)):
+                    rec[key] = value
+        else:
+            seq = list(item)
+            if len(seq) < 2:
+                raise ValueError(f"{name}[{i}] must have at least 2 elements (m1, m2)")
+            rec = {"m1": int(seq[0]), "m2": int(seq[1])}
+            if len(seq) > 2 and seq[2] is not None: rec["color"] = str(seq[2])
+            if len(seq) > 3 and seq[3] is not None: rec["width"] = float(seq[3])
+            if len(seq) > 4 and seq[4] is not None: rec["alpha"] = float(seq[4])
+
+        if not (0 <= rec["m1"] < n_minutiae and 0 <= rec["m2"] < n_minutiae):
+            raise ValueError(
+                f"{name}[{i}]: endpoint indices must be in [0, {n_minutiae})"
+            )
+        out.append(rec)
+    return out
+
+
 # ── Image & color helpers ────────────────────────────────────
 
 
@@ -497,6 +578,10 @@ def plot_mnt(
     colormap_values: Sequence[float] | np.ndarray | None = None,
     overlays: list[tuple[Any, str]] | None = None,
     overlay_labels: list[str] | bool | None = None,
+    segments: Any = None,
+    segment_color: str = "#00ff00",
+    segment_width: float = 1.0,
+    segment_alpha: float = 0.7,
 ) -> str | MntVizFigure:
     """Render minutiae plot as interactive HTML or Jupyter display object."""
 
@@ -605,6 +690,16 @@ def plot_mnt(
         },
     }
 
+    if segments is not None:
+        seg_list = _normalize_segments(segments, len(all_records), name="segments")
+        if seg_list:
+            config["segments"] = seg_list
+            config["segmentOptions"] = {
+                "color": segment_color,
+                "width": segment_width,
+                "alpha": segment_alpha,
+            }
+
     if legend_items is not None:
         config["legend"] = legend_items
 
@@ -626,6 +721,7 @@ def plot_mnt_match(
     left_minutiae: Any,
     right_minutiae: Any,
     pairs: str | Path | np.ndarray | Sequence | None = None,
+    pair_metadata: Sequence[Mapping[str, Any] | None] | None = None,
     left_background_img: str | Path | None = None,
     right_background_img: str | Path | None = None,
     output_format: str = "html",
@@ -641,11 +737,14 @@ def plot_mnt_match(
     color: str = "#00ff00",
     colormap: str | None = None,
     colormap_values: Sequence[float] | np.ndarray | None = None,
+    pair_colors: Sequence[str] | None = None,
     unpaired_color: str = "#555555",
     unpaired_opacity: float = 0.3,
+    unpaired_marker_scale: float = 1.0,
     # Match segment styling
     match_line_colormap: str | None = None,
     match_line_colormap_values: Sequence[float] | np.ndarray | None = None,
+    match_line_colors: Sequence[str] | None = None,
     match_line_alpha: float | Sequence[float] = 0.6,
     match_line_width: float | Sequence[float] = 1.0,
     show_segments: bool = False,
@@ -654,6 +753,13 @@ def plot_mnt_match(
     right_labels: Sequence[str | int] | None = None,
     show_labels: bool = False,
     label_fontsize: float | None = None,
+    # Intra-panel segments (minutiae graph drawn on each side)
+    left_segments: Any = None,
+    right_segments: Any = None,
+    segment_color: str = "#00ff00",
+    segment_width: float = 1.0,
+    segment_alpha: float = 0.7,
+    dominant_angle: float | None = None,
     # Titles
     left_title: str | None = None,
     right_title: str | None = None,
@@ -706,14 +812,54 @@ def plot_mnt_match(
 
     n_pairs = len(pairs_array)
 
-    # Resolve pair colors
-    if colormap is not None:
+    normalized_pair_metadata: list[dict[str, Any]]
+    if pair_metadata is None:
+        normalized_pair_metadata = [{} for _ in range(n_pairs)]
+    else:
+        if len(pair_metadata) != n_pairs:
+            raise ValueError(
+                f"pair_metadata length ({len(pair_metadata)}) must match pairs count ({n_pairs})"
+            )
+        normalized_pair_metadata = []
+        for idx, meta in enumerate(pair_metadata):
+            if meta is None:
+                normalized_pair_metadata.append({})
+                continue
+            if not isinstance(meta, Mapping):
+                raise TypeError(f"pair_metadata[{idx}] must be a mapping or None")
+            record: dict[str, Any] = {}
+            for key, value in meta.items():
+                if key in {"leftIdx", "rightIdx", "color", "alpha", "width"}:
+                    continue
+                if isinstance(value, np.generic):
+                    value = value.item()
+                record[str(key)] = value
+            normalized_pair_metadata.append(record)
+
+    # Resolve pair colors. `pair_colors` beats `colormap`; both beat `color`.
+    if pair_colors is not None:
+        if colormap is not None:
+            raise ValueError("pair_colors and colormap are mutually exclusive")
+        if len(pair_colors) != n_pairs:
+            raise ValueError(
+                f"pair_colors length ({len(pair_colors)}) must match pairs count ({n_pairs})"
+            )
+        pair_colors = [str(c) for c in pair_colors]
+    elif colormap is not None:
         pair_colors = _resolve_colormap(colormap, colormap_values, n_pairs)
     else:
         pair_colors = [color] * n_pairs
 
-    # Resolve segment colors
-    if match_line_colormap is not None:
+    # Resolve match-line colors with the same override chain.
+    if match_line_colors is not None:
+        if match_line_colormap is not None:
+            raise ValueError("match_line_colors and match_line_colormap are mutually exclusive")
+        if len(match_line_colors) != n_pairs:
+            raise ValueError(
+                f"match_line_colors length ({len(match_line_colors)}) must match pairs count ({n_pairs})"
+            )
+        segment_colors = [str(c) for c in match_line_colors]
+    elif match_line_colormap is not None:
         segment_colors = _resolve_colormap(match_line_colormap, match_line_colormap_values, n_pairs)
     else:
         segment_colors = pair_colors
@@ -745,16 +891,21 @@ def plot_mnt_match(
         left_paired_indices.add(int(li))
         right_paired_indices.add(int(ri))
 
+    unpaired_size = marker_size * unpaired_marker_scale
     for i, rec in enumerate(left_records):
         if i not in left_paired_indices:
             rec["_color"] = unpaired_color
             rec["_pairIndex"] = -1
             rec["_unpaired"] = True
+            rec["_opacity"] = unpaired_opacity
+            rec["_size"] = unpaired_size
     for i, rec in enumerate(right_records):
         if i not in right_paired_indices:
             rec["_color"] = unpaired_color
             rec["_pairIndex"] = -1
             rec["_unpaired"] = True
+            rec["_opacity"] = unpaired_opacity
+            rec["_size"] = unpaired_size
 
     # Build match data
     pairs_data = []
@@ -765,13 +916,26 @@ def plot_mnt_match(
             "color": segment_colors[k],
             "alpha": segment_alphas[k],
             "width": segment_widths[k],
+            **normalized_pair_metadata[k],
         })
 
     match_data = {
         "leftMinutiae": left_records,
         "rightMinutiae": right_records,
         "pairs": pairs_data,
+        "dominantAngle": None if dominant_angle is None else float(dominant_angle),
     }
+
+    left_segments_data = _normalize_segments(
+        left_segments, len(left_records), name="left_segments",
+    )
+    right_segments_data = _normalize_segments(
+        right_segments, len(right_records), name="right_segments",
+    )
+    if left_segments_data:
+        match_data["leftSegments"] = left_segments_data
+    if right_segments_data:
+        match_data["rightSegments"] = right_segments_data
 
     # Background images
     left_uri, left_w, left_h = _image_to_data_uri(left_background_img)
@@ -808,6 +972,13 @@ def plot_mnt_match(
         "leftTitle": left_title,
         "rightTitle": right_title,
     }
+
+    if left_segments_data or right_segments_data:
+        config["segmentOptions"] = {
+            "color": segment_color,
+            "width": segment_width,
+            "alpha": segment_alpha,
+        }
 
     html_inline, html_standalone = _build_runtime_html(
         "plotMatch", config,

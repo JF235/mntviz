@@ -117,46 +117,73 @@ export class MinutiaeRenderer {
         textGroup.setAttribute('stroke', 'none');
         textGroup.setAttribute('fill', color);
 
-        for (const m of minutiae) {
+        for (const [index, m] of minutiae.entries()) {
             const { x, y, angle, quality } = m;
             const mntColor = m._color || color;
             const mntShape = m._shape || markerShape;
-            const opacity = qualityAlpha
-                ? baseOpacity * Math.min(1.0, Math.max(0.2, quality / 100))
-                : baseOpacity;
+            // Per-minutia `_size` scales the marker radius, direction line
+            // length, and — by the same ratio — the stroke width, unless an
+            // explicit `_lineWidth` is provided.
+            const mntSize = m._size != null ? m._size : markerSize;
+            const sizeRatio = m._size != null ? (mntSize / markerSize) : 1;
+            const mntSegLen = segmentLength * sizeRatio;
+            const mntLineWidth = m._lineWidth != null
+                ? m._lineWidth
+                : lineWidth * sizeRatio;
+            // Per-minutia `_opacity` takes precedence over the computed one.
+            const opacity = m._opacity != null
+                ? m._opacity
+                : (qualityAlpha
+                    ? baseOpacity * Math.min(1.0, Math.max(0.2, quality / 100))
+                    : baseOpacity);
 
             const mg = document.createElementNS(SVG_NS, 'g');
             mg.setAttribute('opacity', opacity);
             mg.setAttribute('stroke', mntColor);
+            mg.setAttribute('stroke-width', mntLineWidth);
             mg.classList.add('mntviz-mnt-marker');
             mg.style.pointerEvents = 'auto';
             mg.style.cursor = 'crosshair';
-            minutiaDataMap.set(mg, { ...m, _color: mntColor, _shape: mntShape, _label: m._label || opts.label || null });
+            minutiaDataMap.set(mg, {
+                ...m,
+                _index: m._index != null ? m._index : index,
+                _color: mntColor,
+                _shape: mntShape,
+                _label: m._label || opts.label || null,
+            });
+
+            // Keep the hit target separate from the visible geometry so CSS
+            // scale transforms can target only the marker visuals without
+            // shifting due to the larger hover hit area.
+            const visual = document.createElementNS(SVG_NS, 'g');
+            visual.classList.add('mntviz-mnt-visual');
 
             // Invisible hit-test circle (easier to hover/click small markers)
             const hitCircle = document.createElementNS(SVG_NS, 'circle');
             hitCircle.setAttribute('cx', x);
             hitCircle.setAttribute('cy', y);
-            hitCircle.setAttribute('r', markerSize + 4);
+            hitCircle.setAttribute('r', mntSize + 4);
             hitCircle.setAttribute('fill', 'transparent');
             hitCircle.setAttribute('stroke', 'none');
             mg.appendChild(hitCircle);
 
             // Marker shape (per-minutia _shape overrides global markerShape)
-            const marker = createMarkerShape(mntShape, x, y, markerSize);
-            mg.appendChild(marker);
+            const marker = createMarkerShape(mntShape, x, y, mntSize);
+            visual.appendChild(marker);
 
             // Direction line
             const rad = angle * (Math.PI / 180);
-            const xEnd = x + segmentLength * Math.cos(rad);
-            const yEnd = y - segmentLength * Math.sin(rad);
+            const xEnd = x + mntSegLen * Math.cos(rad);
+            const yEnd = y - mntSegLen * Math.sin(rad);
 
             const line = document.createElementNS(SVG_NS, 'line');
             line.setAttribute('x1', x);
             line.setAttribute('y1', y);
             line.setAttribute('x2', xEnd);
             line.setAttribute('y2', yEnd);
-            mg.appendChild(line);
+            visual.appendChild(line);
+
+            mg.appendChild(visual);
 
             g.appendChild(mg);
 

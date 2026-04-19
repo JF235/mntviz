@@ -28,7 +28,15 @@ export class Viewer {
         if (!this._el) throw new Error(`mntviz: container not found: ${container}`);
 
         this._options = { minimap: true, ...options };
-        this._view = { scale: 1, translateX: 0, translateY: 0, isDragging: false, lastX: 0, lastY: 0 };
+        this._view = {
+            scale: 1,
+            translateX: 0,
+            translateY: 0,
+            rotation: 0,
+            isDragging: false,
+            lastX: 0,
+            lastY: 0,
+        };
         this._abortController = new AbortController();
         this._minutiaeInspector = null;
         this._fieldProbe = null;
@@ -55,7 +63,12 @@ export class Viewer {
 
     /** Current view state (read-only snapshot). */
     get viewState() {
-        return { scale: this._view.scale, translateX: this._view.translateX, translateY: this._view.translateY };
+        return {
+            scale: this._view.scale,
+            translateX: this._view.translateX,
+            translateY: this._view.translateY,
+            rotation: this._view.rotation,
+        };
     }
 
     /** Natural dimensions of the loaded image (or virtual size). */
@@ -164,7 +177,63 @@ export class Viewer {
         this._view.scale = scale;
         this._view.translateX = (vw - iw * scale) / 2;
         this._view.translateY = (vh - ih * scale) / 2;
+        this._view.rotation = 0;
         this._applyTransform();
+    }
+
+    /**
+     * Set absolute image scale.
+     * @param {number} scale
+     */
+    setScale(scale) {
+        const nextScale = Math.min(Math.max(Number(scale), 0.1), 20);
+        if (!Number.isFinite(nextScale)) return;
+        this._view.scale = nextScale;
+        this._applyTransform();
+    }
+
+    /**
+     * Set absolute image rotation in degrees.
+     * Positive values rotate clockwise on screen.
+     * @param {number} angleDeg
+     */
+    setRotation(angleDeg) {
+        this._view.rotation = _normalizeAngle180(angleDeg);
+        this._applyTransform();
+    }
+
+    /**
+     * Rotate the image by a relative delta in degrees.
+     * @param {number} deltaDeg
+     */
+    rotateBy(deltaDeg) {
+        this.setRotation(this._view.rotation + deltaDeg);
+    }
+
+    /**
+     * Map image coordinates to viewport-relative CSS pixels.
+     * Works with pan, zoom, and rotation.
+     * @param {number} imgX
+     * @param {number} imgY
+     * @returns {{x:number, y:number}}
+     */
+    imageToViewportCoords(imgX, imgY) {
+        return this.imageToElementCoords(imgX, imgY, this._viewport);
+    }
+
+    /**
+     * Map image coordinates to an arbitrary element's local CSS pixels.
+     * @param {number} imgX
+     * @param {number} imgY
+     * @param {HTMLElement} element
+     * @returns {{x:number, y:number}}
+     */
+    imageToElementCoords(imgX, imgY, element) {
+        const ctm = this._svg.getScreenCTM();
+        if (!ctm || !element) return { x: 0, y: 0 };
+        const p = new DOMPoint(imgX, imgY).matrixTransform(ctm);
+        const rect = element.getBoundingClientRect();
+        return { x: p.x - rect.left, y: p.y - rect.top };
     }
 
     /**
@@ -373,9 +442,9 @@ export class Viewer {
 
         // Zoom indicator
         this._zoomWrap = _el('div', 'mntviz-zoom-controls');
-        this._zoomLabel = _el('span', 'mntviz-zoom-level');
-        this._zoomLabel.textContent = '100%';
-        this._zoomWrap.append(this._zoomLabel);
+        this._zoomField = this._buildHudField('zoom', 'mntviz-zoom-level', '%');
+        this._rotationField = this._buildHudField('rot', 'mntviz-rotation-level', '°');
+        this._zoomWrap.append(this._zoomField.wrap, this._rotationField.wrap);
         this._viewport.append(this._zoomWrap);
 
         // SVG export buttons
@@ -406,6 +475,8 @@ export class Viewer {
         this._viewport.addEventListener('mousedown', (e) => this._onMouseDown(e), sig);
         window.addEventListener('mousemove', (e) => this._onMouseMove(e), sig);
         window.addEventListener('mouseup', () => this._onMouseUp(), sig);
+        this._bindHudField(this._zoomField.input, () => this._applyZoomInput());
+        this._bindHudField(this._rotationField.input, () => this._applyRotationInput());
 
         this._resizeObserver = new ResizeObserver(() => {
             this._syncLayers();
@@ -465,9 +536,12 @@ export class Viewer {
     /* ── Internal rendering ─────────────────────────────────── */
 
     _applyTransform() {
-        const { translateX: tx, translateY: ty, scale: s } = this._view;
-        this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
-        this._zoomLabel.textContent = `${Math.round(s * 100)}%`;
+        const { translateX: tx, translateY: ty, scale: s, rotation: r } = this._view;
+        const { width, height } = this.imageSize;
+        this._canvas.style.transformOrigin = `${width / 2}px ${height / 2}px`;
+        this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s}) rotate(${r}deg)`;
+        this._setHudInputValue(this._zoomField.input, `${Math.round(s * 100)}`);
+        this._setHudInputValue(this._rotationField.input, _formatSignedAngle(r));
         this._updateMinimap();
         if (this._options.onTransform) this._options.onTransform();
     }
@@ -482,6 +556,8 @@ export class Viewer {
         this._svg.setAttribute('height', nh);
         const cw = vs ? vs.width : this._img.clientWidth;
         const ch = vs ? vs.height : this._img.clientHeight;
+        this._canvas.style.width = `${nw}px`;
+        this._canvas.style.height = `${nh}px`;
         this._svg.style.width = cw + 'px';
         this._svg.style.height = ch + 'px';
         this._svg.setAttribute('viewBox', `0 0 ${nw} ${nh}`);
@@ -530,6 +606,62 @@ export class Viewer {
             height: `${Math.max(0, bottom - top)}px`,
         });
     }
+
+    _buildHudField(prefix, fieldClass, suffix) {
+        const wrap = _el('label', `mntviz-hud-field ${fieldClass}`);
+        const prefixEl = _el('span', 'mntviz-hud-prefix');
+        prefixEl.textContent = prefix;
+        const input = document.createElement('input');
+        input.className = 'mntviz-hud-input';
+        input.type = 'text';
+        input.inputMode = 'decimal';
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        const suffixEl = _el('span', 'mntviz-hud-suffix');
+        suffixEl.textContent = suffix;
+        wrap.append(prefixEl, input, suffixEl);
+        return { wrap, input };
+    }
+
+    _bindHudField(input, onCommit) {
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('click', (e) => e.stopPropagation());
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                onCommit();
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                this._applyTransform();
+                input.blur();
+            }
+        });
+        input.addEventListener('blur', onCommit);
+    }
+
+    _setHudInputValue(input, value) {
+        if (document.activeElement === input) return;
+        input.value = String(value);
+    }
+
+    _applyZoomInput() {
+        const scale = _parseScaleInput(this._zoomField.input.value);
+        if (scale == null) {
+            this._applyTransform();
+            return;
+        }
+        this.setScale(scale);
+    }
+
+    _applyRotationInput() {
+        const angle = _parseAngleInput(this._rotationField.input.value);
+        if (angle == null) {
+            this._applyTransform();
+            return;
+        }
+        this.setRotation(angle);
+    }
 }
 
 /* ── Helpers ────────────────────────────────────────────────── */
@@ -538,4 +670,29 @@ function _el(tag, className) {
     const el = document.createElement(tag);
     el.className = className;
     return el;
+}
+
+function _normalizeAngle180(angle) {
+    return ((Number(angle) + 180) % 360 + 360) % 360 - 180;
+}
+
+function _parseScaleInput(value) {
+    const cleaned = String(value).replace('%', '').trim();
+    if (!cleaned) return null;
+    const percent = Number(cleaned);
+    if (!Number.isFinite(percent)) return null;
+    return percent / 100;
+}
+
+function _parseAngleInput(value) {
+    const cleaned = String(value).replace('°', '').replace(/^rot\s*/i, '').trim();
+    if (!cleaned) return null;
+    const angle = Number(cleaned);
+    if (!Number.isFinite(angle)) return null;
+    return angle;
+}
+
+function _formatSignedAngle(angle) {
+    const n = Number(angle) || 0;
+    return `${n >= 0 ? '+' : ''}${n.toFixed(1)}`;
 }

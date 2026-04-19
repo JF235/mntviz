@@ -11,6 +11,7 @@
 
 import { Viewer } from './viewer.js';
 import { MinutiaeRenderer, createMarkerShape } from './minutiae-renderer.js';
+import { SegmentsRenderer } from './segments-renderer.js';
 import { OverlayLayer } from './overlay.js';
 import { UVFieldRenderer } from './uv-renderer.js';
 import { MatchViewer } from './match-viewer.js';
@@ -164,6 +165,12 @@ export function renderLegend(viewer, items) {
 export async function plotMinutiae(host, config) {
     const viewer = new Viewer(host, { minimap: true });
     await viewer.loadImage(config.imageSrc);
+
+    // Segments are drawn first so they sit under the minutiae markers.
+    if (config.segments && config.segments.length) {
+        const sr = new SegmentsRenderer(viewer.svgLayer);
+        sr.draw(config.minutiae, config.segments, config.segmentOptions ?? {});
+    }
 
     const renderer = new MinutiaeRenderer(viewer.svgLayer);
     renderer.draw(config.minutiae, config.color ?? '#00ff00', config.rendererOptions ?? {});
@@ -401,10 +408,14 @@ export async function plotMatch(host, config) {
         leftMinutiae: config.matchData.leftMinutiae,
         rightMinutiae: config.matchData.rightMinutiae,
         pairs: config.matchData.pairs,
+        leftSegments: config.matchData.leftSegments ?? [],
+        rightSegments: config.matchData.rightSegments ?? [],
+        dominantAngle: config.matchData.dominantAngle ?? null,
         leftTitle: config.leftTitle ?? null,
         rightTitle: config.rightTitle ?? null,
         markerColor: config.markerColor ?? '#00ff00',
         rendererOptions: config.rendererOptions ?? {},
+        segmentOptions: config.segmentOptions ?? {},
         showSegmentsOnLoad: config.showSegments ?? false,
     });
     await mv.loadImages(config.leftImageSrc, config.rightImageSrc);
