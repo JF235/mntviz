@@ -1176,8 +1176,9 @@ var Viewer = class {
   _applyTransform() {
     const { translateX: tx, translateY: ty, scale: s, rotation: r } = this._view;
     const { width, height } = this.imageSize;
-    this._canvas.style.transformOrigin = `${width / 2}px ${height / 2}px`;
-    this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s}) rotate(${r}deg)`;
+    const cx = width / 2;
+    const cy = height / 2;
+    this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s}) translate(${cx}px, ${cy}px) rotate(${r}deg) translate(${-cx}px, ${-cy}px)`;
     this._setHudInputValue(this._zoomField.input, `${Math.round(s * 100)}`);
     this._setHudInputValue(this._rotationField.input, _formatSignedAngle(r));
     this._updateMinimap();
@@ -12440,7 +12441,7 @@ var MatchViewer = class {
       const g = document.createElementNS(SVG_NS6, "g");
       g.setAttribute(
         "transform",
-        `translate(${ox}, ${oy}) translate(${tx}, ${ty}) scale(${s}) rotate(${r}) translate(${-ox}, ${-oy})`
+        `translate(${tx}, ${ty}) scale(${s}) translate(${ox}, ${oy}) rotate(${r}) translate(${-ox}, ${-oy})`
       );
       const img = viewer.imageElement;
       if (img.src) {

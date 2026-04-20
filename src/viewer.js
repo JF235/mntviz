@@ -564,8 +564,14 @@ export class Viewer {
     _applyTransform() {
         const { translateX: tx, translateY: ty, scale: s, rotation: r } = this._view;
         const { width, height } = this.imageSize;
-        this._canvas.style.transformOrigin = `${width / 2}px ${height / 2}px`;
-        this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s}) rotate(${r}deg)`;
+        // Rotate around the image center while keeping origin-at-zero semantics
+        // for (tx, ty, s). `_onWheel` / `resetView` assume screen = img*s + t;
+        // the `translate(cx,cy) rotate translate(-cx,-cy)` sandwich is a no-op
+        // at r=0, so pan/zoom math is preserved.
+        const cx = width / 2;
+        const cy = height / 2;
+        this._canvas.style.transform =
+            `translate(${tx}px, ${ty}px) scale(${s}) translate(${cx}px, ${cy}px) rotate(${r}deg) translate(${-cx}px, ${-cy}px)`;
         this._setHudInputValue(this._zoomField.input, `${Math.round(s * 100)}`);
         this._setHudInputValue(this._rotationField.input, _formatSignedAngle(r));
         this._updateMinimap();

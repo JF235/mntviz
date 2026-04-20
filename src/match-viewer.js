@@ -478,7 +478,7 @@ export class MatchViewer {
             const g = document.createElementNS(SVG_NS, 'g');
             g.setAttribute(
                 'transform',
-                `translate(${ox}, ${oy}) translate(${tx}, ${ty}) scale(${s}) rotate(${r}) translate(${-ox}, ${-oy})`,
+                `translate(${tx}, ${ty}) scale(${s}) translate(${ox}, ${oy}) rotate(${r}) translate(${-ox}, ${-oy})`,
             );
 
             // Background image at natural size — transform maps it into viewport space.
