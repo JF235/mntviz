@@ -537,6 +537,8 @@
     stroke-linecap: round;
     pointer-events: stroke;
     cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .mntviz-match-segment-active {

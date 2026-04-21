@@ -592,6 +592,13 @@ export class MatchViewer {
             line.addEventListener('mouseover', (e) => this._onMatchLineHoverIn(e), sig);
             line.addEventListener('mouseout', (e) => this._onMatchLineHoverOut(e), sig);
             line.addEventListener('mousemove', (e) => this._onOverlayPointerMove(e), sig);
+            // Hitbox lines have `pointer-events: stroke` to catch hover, which
+            // otherwise swallows wheel/mousedown and breaks zoom/pan + lets the
+            // browser start text selection. Forward those to the viewport below.
+            line.addEventListener('wheel', (e) => this._forwardToViewport(e), { passive: false, ...sig });
+            line.addEventListener('mousedown', (e) => this._forwardToViewport(e), sig);
+            line.addEventListener('dblclick', (e) => this._forwardToViewport(e), sig);
+            line.addEventListener('contextmenu', (e) => this._forwardToViewport(e), sig);
         }
 
         // Ctrl + wheel rotates the panel instead of zooming.
@@ -719,6 +726,46 @@ export class MatchViewer {
         } else {
             this._hideGhostCursor();
         }
+    }
+
+    _forwardToViewport(e) {
+        const side = this._inferPointerSide(e.clientX, e.clientY);
+        const viewport = side === 'left' ? this._leftViewer?.viewport
+                       : side === 'right' ? this._rightViewer?.viewport
+                       : null;
+        if (!viewport) return;
+
+        e.preventDefault();
+
+        const init = {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: e.view,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            screenX: e.screenX,
+            screenY: e.screenY,
+            button: e.button,
+            buttons: e.buttons,
+            ctrlKey: e.ctrlKey,
+            shiftKey: e.shiftKey,
+            altKey: e.altKey,
+            metaKey: e.metaKey,
+        };
+        let clone;
+        if (e.type === 'wheel') {
+            clone = new WheelEvent('wheel', {
+                ...init,
+                deltaX: e.deltaX,
+                deltaY: e.deltaY,
+                deltaZ: e.deltaZ,
+                deltaMode: e.deltaMode,
+            });
+        } else {
+            clone = new MouseEvent(e.type, init);
+        }
+        viewport.dispatchEvent(clone);
     }
 
     _onMatchLineHoverIn(e) {
