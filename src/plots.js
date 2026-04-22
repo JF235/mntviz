@@ -119,6 +119,8 @@ export function renderLegend(viewer, items) {
 
     const wrap = document.createElement('div');
     wrap.classList.add('mntviz-legend');
+    // Stash raw items so SVG export can rebuild a native-SVG version.
+    wrap._legendItems = items;
 
     for (const { label, color, shape } of items) {
         const row = document.createElement('div');

@@ -171,17 +171,20 @@ export class MinutiaeRenderer {
             const marker = createMarkerShape(mntShape, x, y, mntSize);
             visual.appendChild(marker);
 
-            // Direction line
-            const rad = angle * (Math.PI / 180);
-            const xEnd = x + mntSegLen * Math.cos(rad);
-            const yEnd = y - mntSegLen * Math.sin(rad);
+            // Direction line — skip when length <= 0 (stroke-linecap: round
+            // would otherwise render a dot at the origin).
+            if (mntSegLen > 0) {
+                const rad = angle * (Math.PI / 180);
+                const xEnd = x + mntSegLen * Math.cos(rad);
+                const yEnd = y - mntSegLen * Math.sin(rad);
 
-            const line = document.createElementNS(SVG_NS, 'line');
-            line.setAttribute('x1', x);
-            line.setAttribute('y1', y);
-            line.setAttribute('x2', xEnd);
-            line.setAttribute('y2', yEnd);
-            visual.appendChild(line);
+                const line = document.createElementNS(SVG_NS, 'line');
+                line.setAttribute('x1', x);
+                line.setAttribute('y1', y);
+                line.setAttribute('x2', xEnd);
+                line.setAttribute('y2', yEnd);
+                visual.appendChild(line);
+            }
 
             mg.appendChild(visual);
 

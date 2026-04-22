@@ -19,3 +19,4 @@ export { MatchViewer } from './match-viewer.js';
 export { SingularityRenderer, parseSingularityText } from './singularity-renderer.js';
 export { plotHuvThumbnail, renderLegend } from './plots.js';
 export { applyColormap, COLORMAP_NAMES } from './colormaps.js';
+export { MultiViewer } from './multi-viewer.js';
