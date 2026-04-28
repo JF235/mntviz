@@ -289,46 +289,17 @@ export class Viewer {
         const gapSw  = 6  * scale;
         const margin = 10 * scale;  // gap from the region's edge
 
-        // Measure the actual rendered label widths instead of estimating from
-        // a per-character constant. Two strategies, in order:
-        //   1. The on-screen legend has spans styled at sans-serif 12px (same
-        //      family/size used in the SVG export, modulo `scale`). Reading
-        //      their `getBoundingClientRect().width` is exact for the CSS
-        //      pipeline, and Inkscape's sans-serif metrics match closely.
-        //   2. Fallback to a hidden SVG text + `getComputedTextLength()`,
-        //      which works even when `_buildLegendSVG` runs without an
-        //      attached on-screen legend.
-        const labelStr = it => String(it.label || '');
-        let maxLabelWidth = 0;
-        const labelEls = this._viewport
-            ? this._viewport.querySelectorAll('.mntviz-legend .mntviz-legend-label')
-            : [];
-        if (labelEls.length === items.length) {
-            labelEls.forEach(el => {
-                const w = el.getBoundingClientRect().width;
-                if (w > maxLabelWidth) maxLabelWidth = w;
-            });
-        } else {
-            const tmpSVG = document.createElementNS(SVG_NS, 'svg');
-            tmpSVG.style.cssText = 'position:absolute;visibility:hidden;left:-99999px;top:-99999px;';
-            document.body.appendChild(tmpSVG);
-            for (const it of items) {
-                const t = document.createElementNS(SVG_NS, 'text');
-                t.setAttribute('font-family', 'sans-serif');
-                t.setAttribute('font-size', '12');
-                t.textContent = labelStr(it);
-                tmpSVG.appendChild(t);
-                const w = t.getComputedTextLength();
-                if (w > maxLabelWidth) maxLabelWidth = w;
-                tmpSVG.removeChild(t);
-            }
-            document.body.removeChild(tmpSVG);
-        }
-        // Both strategies measure at 12px CSS; the SVG export uses 12*scale
-        // image units, so we scale up. Add a small safety margin (4 image px)
-        // for cross-renderer font-metric differences.
-        const labelW = maxLabelWidth * scale + 4 * scale;
-        const boxW = pad * 2 + swSize + gapSw + labelW;
+        // Estimate the longest label's rendered width using a conservative
+        // per-glyph constant. Live DOM measurement (`getBoundingClientRect`,
+        // `getComputedTextLength`) was unreliable here: ancestor CSS transforms
+        // and flex-context behavior produced wildly inflated widths. The
+        // 0.62 used previously clipped capitals/digits, so 0.66 is the
+        // smallest constant that consistently fits the labels we use without
+        // visible clipping in Inkscape's sans-serif metrics.
+        const maxChars = items.reduce(
+            (m, it) => Math.max(m, String(it.label || '').length), 0,
+        );
+        const boxW = pad * 2 + swSize + gapSw + maxChars * (fontSz * 0.66);
         const boxH = pad * 2 + items.length * itemH;
 
         let originX, originY;

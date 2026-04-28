@@ -961,32 +961,11 @@ var Viewer = class {
     const fontSz = 12 * scale;
     const gapSw = 6 * scale;
     const margin = 10 * scale;
-    const labelStr = (it) => String(it.label || "");
-    let maxLabelWidth = 0;
-    const labelEls = this._viewport ? this._viewport.querySelectorAll(".mntviz-legend .mntviz-legend-label") : [];
-    if (labelEls.length === items.length) {
-      labelEls.forEach((el) => {
-        const w2 = el.getBoundingClientRect().width;
-        if (w2 > maxLabelWidth) maxLabelWidth = w2;
-      });
-    } else {
-      const tmpSVG = document.createElementNS(SVG_NS3, "svg");
-      tmpSVG.style.cssText = "position:absolute;visibility:hidden;left:-99999px;top:-99999px;";
-      document.body.appendChild(tmpSVG);
-      for (const it of items) {
-        const t = document.createElementNS(SVG_NS3, "text");
-        t.setAttribute("font-family", "sans-serif");
-        t.setAttribute("font-size", "12");
-        t.textContent = labelStr(it);
-        tmpSVG.appendChild(t);
-        const w2 = t.getComputedTextLength();
-        if (w2 > maxLabelWidth) maxLabelWidth = w2;
-        tmpSVG.removeChild(t);
-      }
-      document.body.removeChild(tmpSVG);
-    }
-    const labelW = maxLabelWidth * scale + 4 * scale;
-    const boxW = pad * 2 + swSize + gapSw + labelW;
+    const maxChars = items.reduce(
+      (m, it) => Math.max(m, String(it.label || "").length),
+      0
+    );
+    const boxW = pad * 2 + swSize + gapSw + maxChars * (fontSz * 0.66);
     const boxH = pad * 2 + items.length * itemH;
     let originX, originY;
     const { x, y, w, h } = bounds;
