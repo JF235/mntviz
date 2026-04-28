@@ -142,15 +142,17 @@ var MinutiaeRenderer = class {
       mg.appendChild(hitCircle);
       const marker = createMarkerShape(mntShape, x, y, mntSize);
       visual.appendChild(marker);
-      const rad = angle * (Math.PI / 180);
-      const xEnd = x + mntSegLen * Math.cos(rad);
-      const yEnd = y - mntSegLen * Math.sin(rad);
-      const line = document.createElementNS(SVG_NS, "line");
-      line.setAttribute("x1", x);
-      line.setAttribute("y1", y);
-      line.setAttribute("x2", xEnd);
-      line.setAttribute("y2", yEnd);
-      visual.appendChild(line);
+      if (mntSegLen > 0) {
+        const rad = angle * (Math.PI / 180);
+        const xEnd = x + mntSegLen * Math.cos(rad);
+        const yEnd = y - mntSegLen * Math.sin(rad);
+        const line = document.createElementNS(SVG_NS, "line");
+        line.setAttribute("x1", x);
+        line.setAttribute("y1", y);
+        line.setAttribute("x2", xEnd);
+        line.setAttribute("y2", yEnd);
+        visual.appendChild(line);
+      }
       mg.appendChild(visual);
       g.appendChild(mg);
       if (showQuality) {
@@ -937,12 +939,85 @@ var Viewer = class {
    * Serialize the SVG layer (with background image embedded) as a standalone SVG string.
    * @returns {string} SVG markup.
    */
+  /**
+   * Build a native-SVG legend group matching the on-screen `.mntviz-legend`.
+   * @param {Array} items - Array of {label, color, shape}.
+   * @param {number} originX - Top-left x in SVG coords.
+   * @param {number} originY - Top-left y in SVG coords.
+   * @param {number} [scale=1] - Unit scale (use 1 for image-coord SVG; pass
+   *                              `imgUnitsPerScreenPx` for a viewBox-scaled SVG so
+   *                              the legend stays at a stable screen size).
+   * @returns {SVGGElement}
+   * @private
+   */
+  _buildLegendSVG(items, originX, originY, scale = 1) {
+    const pad = 8 * scale;
+    const itemH = 22 * scale;
+    const swSize = 14 * scale;
+    const swR = 5 * scale;
+    const fontSz = 12 * scale;
+    const gapSw = 6 * scale;
+    const maxChars = items.reduce((m, it) => Math.max(m, String(it.label || "").length), 0);
+    const boxW = pad * 2 + swSize + gapSw + maxChars * (fontSz * 0.62);
+    const boxH = pad * 2 + items.length * itemH;
+    const g = document.createElementNS(SVG_NS3, "g");
+    g.setAttribute("transform", `translate(${originX}, ${originY})`);
+    const bg = document.createElementNS(SVG_NS3, "rect");
+    bg.setAttribute("x", 0);
+    bg.setAttribute("y", 0);
+    bg.setAttribute("width", boxW);
+    bg.setAttribute("height", boxH);
+    bg.setAttribute("fill", "rgb(0,0,0)");
+    bg.setAttribute("fill-opacity", "0.65");
+    bg.setAttribute("stroke", "rgb(255,255,255)");
+    bg.setAttribute("stroke-opacity", "0.2");
+    bg.setAttribute("stroke-width", 1 * scale);
+    bg.setAttribute("rx", 6 * scale);
+    g.appendChild(bg);
+    items.forEach(({ label, color, shape }, idx) => {
+      const rowY = pad + idx * itemH;
+      const cx = pad + swSize / 2;
+      const cy = rowY + swSize / 2;
+      let marker;
+      if (shape === "square") {
+        marker = document.createElementNS(SVG_NS3, "rect");
+        marker.setAttribute("x", cx - swR);
+        marker.setAttribute("y", cy - swR);
+        marker.setAttribute("width", 2 * swR);
+        marker.setAttribute("height", 2 * swR);
+      } else {
+        marker = document.createElementNS(SVG_NS3, "circle");
+        marker.setAttribute("cx", cx);
+        marker.setAttribute("cy", cy);
+        marker.setAttribute("r", swR);
+      }
+      marker.setAttribute("stroke", color);
+      marker.setAttribute("fill", "none");
+      marker.setAttribute("stroke-width", 1.5 * scale);
+      g.appendChild(marker);
+      const text = document.createElementNS(SVG_NS3, "text");
+      text.setAttribute("x", pad + swSize + gapSw);
+      text.setAttribute("y", cy + fontSz * 0.35);
+      text.setAttribute("fill", "#fff");
+      text.setAttribute("font-family", "sans-serif");
+      text.setAttribute("font-size", fontSz);
+      text.textContent = label;
+      g.appendChild(text);
+    });
+    return g;
+  }
+  /** @private Pulls stashed `_legendItems` from the on-screen legend element. */
+  _getLegendItems() {
+    const el = this._viewport.querySelector(".mntviz-legend");
+    return el && el._legendItems ? el._legendItems : null;
+  }
   exportSVG() {
     const clone = this._svg.cloneNode(true);
     clone.setAttribute("xmlns", SVG_NS3);
     clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     clone.classList.remove("mntviz-mnt-layer");
     clone.removeAttribute("style");
+    const layers = [];
     if (this._img.src) {
       const canvas = document.createElement("canvas");
       const w = this._img.naturalWidth;
@@ -950,12 +1025,32 @@ var Viewer = class {
       canvas.width = w;
       canvas.height = h;
       canvas.getContext("2d").drawImage(this._img, 0, 0);
-      const dataUri = canvas.toDataURL("image/png");
-      const img = document.createElementNS(SVG_NS3, "image");
-      img.setAttribute("href", dataUri);
-      img.setAttribute("width", w);
-      img.setAttribute("height", h);
-      clone.insertBefore(img, clone.firstChild);
+      const bg = document.createElementNS(SVG_NS3, "image");
+      bg.setAttribute("href", canvas.toDataURL("image/png"));
+      bg.setAttribute("width", w);
+      bg.setAttribute("height", h);
+      layers.push(bg);
+    }
+    for (const { overlay } of this.getVisibleOverlays()) {
+      const cvs = overlay.imageElement;
+      if (!cvs || !cvs.width || !cvs.height) continue;
+      const w = this._img.naturalWidth || cvs.width;
+      const h = this._img.naturalHeight || cvs.height;
+      const el = document.createElementNS(SVG_NS3, "image");
+      el.setAttribute("href", cvs.toDataURL("image/png"));
+      el.setAttribute("width", w);
+      el.setAttribute("height", h);
+      el.setAttribute("image-rendering", "pixelated");
+      const op = cvs.style.opacity;
+      if (op) el.setAttribute("opacity", op);
+      layers.push(el);
+    }
+    for (let i = layers.length - 1; i >= 0; i--) {
+      clone.insertBefore(layers[i], clone.firstChild);
+    }
+    const legendItems = this._getLegendItems();
+    if (legendItems) {
+      clone.appendChild(this._buildLegendSVG(legendItems, 10, 10, 1));
     }
     return new XMLSerializer().serializeToString(clone);
   }
@@ -1010,10 +1105,35 @@ var Viewer = class {
       img.setAttribute("height", nh);
       svg.appendChild(img);
     }
+    for (const { overlay } of this.getVisibleOverlays()) {
+      const cvs = overlay.imageElement;
+      if (!cvs || !cvs.width || !cvs.height) continue;
+      const nw = this._img.naturalWidth || cvs.width;
+      const nh = this._img.naturalHeight || cvs.height;
+      const el = document.createElementNS(SVG_NS3, "image");
+      el.setAttribute("href", cvs.toDataURL("image/png"));
+      el.setAttribute("width", nw);
+      el.setAttribute("height", nh);
+      el.setAttribute("image-rendering", "pixelated");
+      const op = cvs.style.opacity;
+      if (op) el.setAttribute("opacity", op);
+      svg.appendChild(el);
+    }
     const mntClone = this._svg.cloneNode(true);
     mntClone.removeAttribute("class");
     mntClone.removeAttribute("style");
     while (mntClone.firstChild) svg.appendChild(mntClone.firstChild);
+    const legendItems = this._getLegendItems();
+    if (legendItems) {
+      const scale = w / vpW;
+      const legendG = this._buildLegendSVG(
+        legendItems,
+        x + 10 * scale,
+        y + 10 * scale,
+        scale
+      );
+      svg.appendChild(legendG);
+    }
     return new XMLSerializer().serializeToString(svg);
   }
   /**
@@ -13438,6 +13558,7 @@ function renderLegend(viewer, items) {
   if (!items || items.length === 0) return;
   const wrap = document.createElement("div");
   wrap.classList.add("mntviz-legend");
+  wrap._legendItems = items;
   for (const { label, color, shape } of items) {
     const row = document.createElement("div");
     row.classList.add("mntviz-legend-item");

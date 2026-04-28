@@ -290,7 +290,9 @@ export class Viewer {
         const margin = 10 * scale;  // gap from the region's edge
 
         const maxChars = items.reduce((m, it) => Math.max(m, String(it.label || '').length), 0);
-        const boxW = pad * 2 + swSize + gapSw + maxChars * (fontSz * 0.6);
+        // 0.62 is a conservative average glyph width for sans-serif at the
+        // sizes we use; 0.6 was clipping wide labels (e.g. capitals like W/M).
+        const boxW = pad * 2 + swSize + gapSw + maxChars * (fontSz * 0.62);
         const boxH = pad * 2 + items.length * itemH;
 
         let originX, originY;
@@ -306,13 +308,17 @@ export class Viewer {
         const g = document.createElementNS(SVG_NS, 'g');
         g.setAttribute('transform', `translate(${originX}, ${originY})`);
 
+        // SVG 1.1 doesn't support rgba() in `fill`/`stroke`; alpha must go in
+        // *-opacity attributes so Inkscape and PDF converters keep it.
         const bg = document.createElementNS(SVG_NS, 'rect');
         bg.setAttribute('x', 0);
         bg.setAttribute('y', 0);
         bg.setAttribute('width', boxW);
         bg.setAttribute('height', boxH);
-        bg.setAttribute('fill', 'rgba(0,0,0,0.65)');
-        bg.setAttribute('stroke', 'rgba(255,255,255,0.2)');
+        bg.setAttribute('fill', 'rgb(0,0,0)');
+        bg.setAttribute('fill-opacity', '0.65');
+        bg.setAttribute('stroke', 'rgb(255,255,255)');
+        bg.setAttribute('stroke-opacity', '0.2');
         bg.setAttribute('stroke-width', 1 * scale);
         bg.setAttribute('rx', 6 * scale);
         g.appendChild(bg);
