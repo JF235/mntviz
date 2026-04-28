@@ -371,6 +371,7 @@ export class Viewer {
     _getLegendMeta() {
         const el = this._viewport.querySelector('.mntviz-legend');
         if (!el || !el._legendItems) return null;
+        if (el.style.display === 'none') return null;
         return {
             items: el._legendItems,
             position: el.dataset.pos || 'TL',
