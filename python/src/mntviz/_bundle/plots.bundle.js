@@ -942,24 +942,73 @@ var Viewer = class {
   /**
    * Build a native-SVG legend group matching the on-screen `.mntviz-legend`.
    * @param {Array} items - Array of {label, color, shape}.
-   * @param {number} originX - Top-left x in SVG coords.
-   * @param {number} originY - Top-left y in SVG coords.
-   * @param {number} [scale=1] - Unit scale (use 1 for image-coord SVG; pass
-   *                              `imgUnitsPerScreenPx` for a viewBox-scaled SVG so
-   *                              the legend stays at a stable screen size).
+   * @param {{x:number, y:number, w:number, h:number}} bounds - Region in SVG
+   *        coords where the legend should be anchored (image-coord box for
+   *        exportSVG; viewBox for exportSVGView).
+   * @param {object} [options]
+   * @param {'TL'|'TR'|'BL'|'BR'} [options.position='TL']
+   * @param {number} [options.scale=1] - Overall size multiplier. For a
+   *        viewBox-scaled SVG also multiply by `imgUnitsPerScreenPx` so the
+   *        legend keeps a stable on-screen size.
    * @returns {SVGGElement}
    * @private
    */
-  _buildLegendSVG(items, originX, originY, scale = 1) {
+  _buildLegendSVG(items, bounds, { position = "TL", scale = 1 } = {}) {
     const pad = 8 * scale;
     const itemH = 22 * scale;
     const swSize = 14 * scale;
     const swR = 5 * scale;
     const fontSz = 12 * scale;
     const gapSw = 6 * scale;
-    const maxChars = items.reduce((m, it) => Math.max(m, String(it.label || "").length), 0);
-    const boxW = pad * 2 + swSize + gapSw + maxChars * (fontSz * 0.62);
+    const margin = 10 * scale;
+    const labelStr = (it) => String(it.label || "");
+    let maxLabelWidth = 0;
+    const labelEls = this._viewport ? this._viewport.querySelectorAll(".mntviz-legend .mntviz-legend-label") : [];
+    if (labelEls.length === items.length) {
+      labelEls.forEach((el) => {
+        const w2 = el.getBoundingClientRect().width;
+        if (w2 > maxLabelWidth) maxLabelWidth = w2;
+      });
+    } else {
+      const tmpSVG = document.createElementNS(SVG_NS3, "svg");
+      tmpSVG.style.cssText = "position:absolute;visibility:hidden;left:-99999px;top:-99999px;";
+      document.body.appendChild(tmpSVG);
+      for (const it of items) {
+        const t = document.createElementNS(SVG_NS3, "text");
+        t.setAttribute("font-family", "sans-serif");
+        t.setAttribute("font-size", "12");
+        t.textContent = labelStr(it);
+        tmpSVG.appendChild(t);
+        const w2 = t.getComputedTextLength();
+        if (w2 > maxLabelWidth) maxLabelWidth = w2;
+        tmpSVG.removeChild(t);
+      }
+      document.body.removeChild(tmpSVG);
+    }
+    const labelW = maxLabelWidth * scale + 4 * scale;
+    const boxW = pad * 2 + swSize + gapSw + labelW;
     const boxH = pad * 2 + items.length * itemH;
+    let originX, originY;
+    const { x, y, w, h } = bounds;
+    switch (position) {
+      case "TR":
+        originX = x + w - boxW - margin;
+        originY = y + margin;
+        break;
+      case "BL":
+        originX = x + margin;
+        originY = y + h - boxH - margin;
+        break;
+      case "BR":
+        originX = x + w - boxW - margin;
+        originY = y + h - boxH - margin;
+        break;
+      case "TL":
+      default:
+        originX = x + margin;
+        originY = y + margin;
+        break;
+    }
     const g = document.createElementNS(SVG_NS3, "g");
     g.setAttribute("transform", `translate(${originX}, ${originY})`);
     const bg = document.createElementNS(SVG_NS3, "rect");
@@ -1006,10 +1055,16 @@ var Viewer = class {
     });
     return g;
   }
-  /** @private Pulls stashed `_legendItems` from the on-screen legend element. */
-  _getLegendItems() {
+  /** @private Pulls stashed legend data from the on-screen legend element.
+   * Returns {items, position, scale} or null if no legend is present. */
+  _getLegendMeta() {
     const el = this._viewport.querySelector(".mntviz-legend");
-    return el && el._legendItems ? el._legendItems : null;
+    if (!el || !el._legendItems) return null;
+    return {
+      items: el._legendItems,
+      position: el.dataset.pos || "TL",
+      scale: parseFloat(el.dataset.scale) || 1
+    };
   }
   exportSVG() {
     const clone = this._svg.cloneNode(true);
@@ -1048,9 +1103,18 @@ var Viewer = class {
     for (let i = layers.length - 1; i >= 0; i--) {
       clone.insertBefore(layers[i], clone.firstChild);
     }
-    const legendItems = this._getLegendItems();
-    if (legendItems) {
-      clone.appendChild(this._buildLegendSVG(legendItems, 10, 10, 1));
+    const lm = this._getLegendMeta();
+    if (lm) {
+      const bounds = {
+        x: 0,
+        y: 0,
+        w: this._img.naturalWidth || 0,
+        h: this._img.naturalHeight || 0
+      };
+      clone.appendChild(this._buildLegendSVG(lm.items, bounds, {
+        position: lm.position,
+        scale: lm.scale
+      }));
     }
     return new XMLSerializer().serializeToString(clone);
   }
@@ -1123,15 +1187,13 @@ var Viewer = class {
     mntClone.removeAttribute("class");
     mntClone.removeAttribute("style");
     while (mntClone.firstChild) svg.appendChild(mntClone.firstChild);
-    const legendItems = this._getLegendItems();
-    if (legendItems) {
-      const scale = w / vpW;
-      const legendG = this._buildLegendSVG(
-        legendItems,
-        x + 10 * scale,
-        y + 10 * scale,
-        scale
-      );
+    const lm = this._getLegendMeta();
+    if (lm) {
+      const unitPx = w / vpW;
+      const legendG = this._buildLegendSVG(lm.items, { x, y, w, h }, {
+        position: lm.position,
+        scale: unitPx * lm.scale
+      });
       svg.appendChild(legendG);
     }
     return new XMLSerializer().serializeToString(svg);
