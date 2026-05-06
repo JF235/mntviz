@@ -222,23 +222,54 @@ export const COLORMAP_NAMES = ["magma", "viridis", "RdYlGn", "Greens", "Reds", "
  * @param {number} width
  * @param {number} height
  * @param {string} cmapName - Colormap name (key in COLORMAP_NAMES).
+ * @param {object} [opts]
+ * @param {('value'|'opaque')} [opts.alpha='value'] - How per-pixel alpha is derived.
+ * @param {Uint8ClampedArray|null} [opts.alphaData=null] - Optional separate alpha array.
+ * @param {number} [opts.fadeGamma=1.0] - Gamma exponent on the value→alpha curve when
+ *     `alpha === 'value'` and `alphaData` is null. >1 fades low values harder, <1 softens.
+ * @param {boolean} [opts.invert=false] - If true, treat the grayscale value as `255 - v`
+ *     before LUT and value→alpha lookup. Source bytes are not modified.
+ * @param {Uint8ClampedArray|null} [opts.valueLUT=null] - Optional 256-entry remap
+ *     applied to each input byte before invert/colormap (e.g. percentile auto-stretch).
  * @returns {ImageData} RGBA image data ready for putImageData.
  */
 export function applyColormap(gray, width, height, cmapName, opts = {}) {
     const lut = _LUTS[cmapName] || _LUTS.magma;
     const alphaMode = opts.alpha ?? 'value';
     const alphaArr = opts.alphaData ?? null;  // optional separate alpha array (Uint8ClampedArray)
+    const fadeGamma = opts.fadeGamma ?? 1.0;
+    const invert = !!opts.invert;
+    const valueLUT = opts.valueLUT ?? null;
     const n = width * height;
     const rgba = new Uint8ClampedArray(n * 4);
+
+    // Precompute a gamma LUT for the value→alpha mapping (only matters when
+    // alpha === 'value' and we have no explicit alphaData). For gamma=1 this is a
+    // no-op identity, so we skip to the fast path.
+    let alphaLUT = null;
+    if (!alphaArr && alphaMode === 'value' && fadeGamma !== 1.0) {
+        alphaLUT = new Uint8ClampedArray(256);
+        for (let v = 0; v < 256; v++) {
+            alphaLUT[v] = Math.round(255 * Math.pow(v / 255, fadeGamma));
+        }
+    }
+
     for (let i = 0; i < n; i++) {
-        const v = gray[i];
+        const stretched = valueLUT ? valueLUT[gray[i]] : gray[i];
+        const v = invert ? 255 - stretched : stretched;
         const a = alphaArr ? alphaArr[i] : v;
         if (a === 0 && v === 0) continue;  // transparent
         const li = v * 4;
         rgba[i * 4]     = lut[li];
         rgba[i * 4 + 1] = lut[li + 1];
         rgba[i * 4 + 2] = lut[li + 2];
-        rgba[i * 4 + 3] = alphaArr ? a : (alphaMode === 'value' ? v : 255);
+        if (alphaArr) {
+            rgba[i * 4 + 3] = a;
+        } else if (alphaMode === 'value') {
+            rgba[i * 4 + 3] = alphaLUT ? alphaLUT[v] : v;
+        } else {
+            rgba[i * 4 + 3] = 255;
+        }
     }
     return new ImageData(rgba, width, height);
 }

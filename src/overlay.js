@@ -30,6 +30,15 @@ export class OverlayLayer {
         this._visible = false;
         this._colormap = options.colormap || null;
         this._alphaMode = options.alpha || 'value';  // 'value' | 'opaque'
+        this._fadeGamma = options.fadeGamma ?? 1.0;
+        this._invert = !!options.invert;
+        // Auto-stretch: percentile-based per-image dynamic-range expansion.
+        // When on, a 256-entry LUT mapping [p_lo, p_hi] → [0, 255] is built from
+        // the loaded raw bytes and used at draw time.
+        this._autoStretch = !!options.autoStretch;
+        this._stretchLow = options.stretchLow ?? 0.01;   // p1 by default
+        this._stretchHigh = options.stretchHigh ?? 0.99; // p99 by default
+        this._stretchLUT = null;
 
         // Raw grayscale data (set after load when colormap is active)
         this._rawData = null;    // Uint8ClampedArray (w * h)
@@ -88,11 +97,14 @@ export class OverlayLayer {
                     const tmpCtx = tmpCanvas.getContext('2d', { willReadFrequently: true });
                     tmpCtx.drawImage(this._sourceImg, 0, 0);
                     const imgData = tmpCtx.getImageData(0, 0, w, h);
-                    // For grayscale PNGs: pixel value is in the R channel (or any — they're equal)
+                    // For grayscale PNGs: pixel value is in the R channel (or any — they're equal).
+                    // Inversion is applied later at draw time (see _applyAndDraw) so it can
+                    // be toggled cheaply without re-decoding.
                     this._rawData = new Uint8ClampedArray(w * h);
                     for (let i = 0; i < w * h; i++) {
                         this._rawData[i] = imgData.data[i * 4];  // R channel
                     }
+                    this._refreshStretchLUT();
                     this._applyAndDraw();
                 } else {
                     // Legacy: draw RGBA PNG as-is
@@ -137,6 +149,86 @@ export class OverlayLayer {
     setColormap(name) {
         this._colormap = name;
         if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * Change the fade gamma exponent applied to the value→alpha curve.
+     * Only meaningful when `alpha === 'value'`. Re-applies LUT immediately.
+     * @param {number} gamma - >=0. 1 is linear. >1 fades low values harder.
+     */
+    setFadeGamma(gamma) {
+        this._fadeGamma = gamma;
+        if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * Toggle whether the grayscale value is inverted (255 - v) before colormap
+     * lookup. Cheap — only triggers a redraw, no re-decoding.
+     * @param {boolean} invert
+     */
+    setInvert(invert) {
+        const next = !!invert;
+        if (next === this._invert) return;
+        this._invert = next;
+        if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * Toggle percentile-based auto-stretch of the input range.
+     * Useful for low-contrast inputs (e.g. FingerNet gabor, std≈18) where the
+     * raw byte range fills only a narrow band and the colormap looks flat.
+     * @param {boolean} on
+     */
+    setAutoStretch(on) {
+        const next = !!on;
+        if (next === this._autoStretch) return;
+        this._autoStretch = next;
+        this._refreshStretchLUT();
+        if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * @private Build a 256-entry remap LUT that stretches [p_lo, p_hi] to [0, 255].
+     * Called automatically after load and when auto-stretch is toggled.
+     */
+    _refreshStretchLUT() {
+        if (!this._autoStretch || !this._rawData) {
+            this._stretchLUT = null;
+            return;
+        }
+        const data = this._rawData;
+        const n = data.length;
+        if (n === 0) { this._stretchLUT = null; return; }
+
+        // 256-bin histogram (single pass).
+        const hist = new Uint32Array(256);
+        for (let i = 0; i < n; i++) hist[data[i]]++;
+
+        const lowCount = Math.floor(n * this._stretchLow);
+        const highCount = Math.floor(n * (1 - this._stretchHigh));
+        let cum = 0, pLo = 0, pHi = 255;
+        for (let v = 0; v < 256; v++) {
+            cum += hist[v];
+            if (cum >= lowCount) { pLo = v; break; }
+        }
+        cum = 0;
+        for (let v = 255; v >= 0; v--) {
+            cum += hist[v];
+            if (cum >= highCount) { pHi = v; break; }
+        }
+        if (pHi <= pLo) {
+            // Degenerate (constant image): no stretch possible.
+            this._stretchLUT = null;
+            return;
+        }
+        const range = pHi - pLo;
+        const out = new Uint8ClampedArray(256);
+        for (let v = 0; v < 256; v++) {
+            if (v <= pLo) out[v] = 0;
+            else if (v >= pHi) out[v] = 255;
+            else out[v] = Math.round(255 * (v - pLo) / range);
+        }
+        this._stretchLUT = out;
     }
 
     /**
@@ -238,7 +330,13 @@ export class OverlayLayer {
         if (!this._rawData || !this._colormap) return;
         const imageData = applyColormap(
             this._rawData, this._rawWidth, this._rawHeight, this._colormap,
-            { alpha: this._alphaMode, alphaData: this._alphaData || null },
+            {
+                alpha: this._alphaMode,
+                alphaData: this._alphaData || null,
+                fadeGamma: this._fadeGamma,
+                invert: this._invert,
+                valueLUT: this._stretchLUT,
+            },
         );
         const ctx = this._canvas.getContext('2d');
         ctx.putImageData(imageData, 0, 0);
