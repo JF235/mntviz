@@ -582,8 +582,17 @@ def plot_mnt(
     segment_color: str = "#00ff00",
     segment_width: float = 1.0,
     segment_alpha: float = 0.7,
+    picker: bool | dict | None = None,
+    initial_points: list[dict[str, Any]] | None = None,
 ) -> str | MntVizFigure:
-    """Render minutiae plot as interactive HTML or Jupyter display object."""
+    """Render minutiae plot as interactive HTML or Jupyter display object.
+
+    If ``picker`` is truthy, the viewer's point picker is enabled (toggle
+    button on the HUD; left-click adds, right-click removes the nearest
+    point) and the function returns an anywidget whose ``points`` traitlet
+    is synced with the JS picker. Pass a dict to override picker styling
+    (``color``, ``markerRadius``, ``showLabels``, ``markerStyle``).
+    """
 
     fmt = output_format.lower().strip()
     if fmt not in {"html", "jupyter"}:
@@ -702,6 +711,13 @@ def plot_mnt(
 
     if legend_items is not None:
         config["legend"] = legend_items
+
+    if picker:
+        from .picker import build_picker_widget
+        return build_picker_widget(
+            "plotMinutiae", config,
+            picker=picker, height=int(h), initial_points=initial_points,
+        )
 
     html_inline, html_standalone = _build_runtime_html(
         "plotMinutiae", config, container_h=int(h), title=title,
@@ -1025,8 +1041,15 @@ def plot_overlay(
     output_path: str | Path | None = None,
     width: int | None = None,
     height: int | None = None,
+    picker: bool | dict | None = None,
+    initial_points: list[dict[str, Any]] | None = None,
 ) -> str | MntVizFigure:
-    """Render a 2D array as a colormapped overlay on a background image."""
+    """Render a 2D array as a colormapped overlay on a background image.
+
+    Pass ``picker=True`` (or a dict of options) to enable the point picker
+    on the resulting viewer; the function then returns an anywidget with a
+    synced ``points`` traitlet. See ``plot_mnt`` docs for the picker contract.
+    """
 
     fmt = output_format.lower().strip()
     if fmt not in {"html", "jupyter"}:
@@ -1048,6 +1071,13 @@ def plot_overlay(
         "overlaySrc": overlay_uri,
         "overlayOpacity": 1.0,
     }
+
+    if picker:
+        from .picker import build_picker_widget
+        return build_picker_widget(
+            "plotOverlay", config,
+            picker=picker, height=int(h), initial_points=initial_points,
+        )
 
     html_inline, html_standalone = _build_runtime_html(
         "plotOverlay", config, container_h=int(h), title=title,
@@ -1085,8 +1115,20 @@ def plot_huv(
     output_path: str | Path | None = None,
     width: int | None = None,
     height: int | None = None,
+    picker: bool | dict | None = None,
+    initial_points: list[dict[str, Any]] | None = None,
+    shapes: list[dict[str, Any]] | None = None,
 ) -> str | MntVizFigure:
     """Render an HUV combined plot: heatmap overlay + UV orientation arrows.
+
+    Pass ``picker=True`` (or a dict of options) to enable the point picker
+    on the resulting viewer; the function then returns an anywidget with a
+    synced ``points`` traitlet. See ``plot_mnt`` docs for the picker contract.
+
+    ``shapes`` is forwarded to the JS layer for ad-hoc overlays. Each entry
+    is a dict like ``{"type": "polygon", "points": [[x, y], ...], "stroke":
+    "#22c55e", "strokeWidth": 2}``; see ``src/plots.js`` for supported types
+    (``polygon``, ``cross``, ``path``, ``minutia``).
 
     Args:
         arrow_style: ``'arrow'`` (directed, with arrowhead) or ``'segment'``
@@ -1165,6 +1207,16 @@ def plot_huv(
             "modulationWidthMin": modulation_width_min,
         },
     }
+
+    if shapes:
+        config["shapes"] = list(shapes)
+
+    if picker:
+        from .picker import build_picker_widget
+        return build_picker_widget(
+            "plotHuv", config,
+            picker=picker, height=int(h_px), initial_points=initial_points,
+        )
 
     html_inline, html_standalone = _build_runtime_html(
         "plotHuv", config, container_h=int(h_px), title=title,

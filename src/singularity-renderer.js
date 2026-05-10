@@ -47,8 +47,11 @@ export class SingularityRenderer {
 
         for (const s of singularities) {
             const { type, x, y, angles } = s;
+            // Confidence (when present in the .sin) modulates per-singularity
+            // opacity so weak detections fade out without being filtered.
+            const conf = (typeof s.confidence === 'number') ? s.confidence : 1.0;
             const sg = document.createElementNS(SVG_NS, 'g');
-            sg.setAttribute('opacity', baseOpacity);
+            sg.setAttribute('opacity', baseOpacity * conf);
 
             // Marker shape: circle for core, triangle for delta
             const shape = type === 'delta' ? 'triangle' : 'circle';
@@ -82,10 +85,20 @@ export class SingularityRenderer {
 }
 
 /**
- * Parse singularity text (TYPE X Y ANGLE [ANGLE2 ANGLE3] per line) into objects.
+ * Parse singularity text into objects.
+ *
+ * Supported line formats (header optional, comment lines start with `#`):
+ *   ``CORE  x y angle  [confidence]``        → 1 angle, optional confidence
+ *   ``DELTA x y a1 a2 a3 [confidence]``      → 3 angles, optional confidence
+ *
+ * The number of expected angles is determined by ``TYPE``; any one extra
+ * trailing field is taken as a confidence in [0, 1]. This matches the
+ * extended ``# TYPE X Y ANGLE [ANGLE2 ANGLE3] CONFIDENCE`` header written
+ * by ``mntstitch`` ``extract_singularities.py combine``.
  *
  * @param {string} text - Singularity text content.
- * @returns {Array<{type: string, x: number, y: number, angles: number[]}>}
+ * @returns {Array<{type: string, x: number, y: number,
+ *                  angles: number[], confidence?: number}>}
  */
 export function parseSingularityText(text) {
     const result = [];
@@ -97,8 +110,16 @@ export function parseSingularityText(text) {
         const type = parts[0].toLowerCase();
         const x = Number(parts[1]);
         const y = Number(parts[2]);
-        const angles = parts.slice(3).map(Number);
-        result.push({ type, x, y, angles });
+        const expectedAngles = (type === 'delta') ? 3 : 1;
+        const angleEnd = 3 + expectedAngles;
+        if (parts.length < angleEnd) continue;
+        const angles = parts.slice(3, angleEnd).map(Number);
+        const out = { type, x, y, angles };
+        if (parts.length > angleEnd) {
+            const conf = Number(parts[angleEnd]);
+            if (Number.isFinite(conf)) out.confidence = conf;
+        }
+        result.push(out);
     }
     return result;
 }

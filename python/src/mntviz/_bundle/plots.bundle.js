@@ -708,8 +708,322 @@ var FieldProbe = class {
   }
 };
 
-// src/viewer.js
+// src/point-picker.js
 var SVG_NS3 = "http://www.w3.org/2000/svg";
+var DEFAULT_OPTIONS = {
+  color: "#22c55e",
+  markerRadius: 8,
+  strokeWidth: 1.6,
+  showLabels: true,
+  labelFontSize: 11,
+  // Drag distance (image px) below which the release is treated as a
+  // pure click — point recorded without an angle. Above the threshold,
+  // the angle is atan2(dy, dx) in CW image convention.
+  angleThreshold: 5,
+  segmentLength: null,
+  // defaults to markerRadius * 2 if null
+  // Double-click detection (window — first click is left to the Viewer
+  // for pan; second click + optional drag adds the point).
+  doubleClickMs: 350,
+  doubleClickDistPx: 8
+};
+var PointPicker = class {
+  /**
+   * @param {Viewer} viewer
+   * @param {Object} [options]
+   */
+  constructor(viewer, options = {}) {
+    this._viewer = viewer;
+    this._options = { ...DEFAULT_OPTIONS, ...options };
+    this._points = [];
+    this._listeners = /* @__PURE__ */ new Map();
+    this._ac = null;
+    this._dragStart = null;
+    this._rightDownPos = null;
+    this._previewLine = null;
+    this._lastClickTime = 0;
+    this._lastClickPos = null;
+    this._group = document.createElementNS(SVG_NS3, "g");
+    this._group.setAttribute("class", "mntviz-picker-layer");
+    this._group.setAttribute("pointer-events", "none");
+    this._viewer.svgLayer.appendChild(this._group);
+  }
+  /* ── Public API ────────────────────────────────────────────── */
+  enable() {
+    if (this._ac) this._ac.abort();
+    this._ac = new AbortController();
+    const sig = { signal: this._ac.signal };
+    const vp = this._viewer.viewport;
+    vp.addEventListener("mousedown", (e) => this._onMouseDown(e), { ...sig, capture: true });
+    window.addEventListener("mousemove", (e) => this._onMouseMove(e), { ...sig, capture: true });
+    window.addEventListener("mouseup", (e) => this._onMouseUp(e), { ...sig, capture: true });
+    vp.addEventListener("contextmenu", (e) => this._onContextMenu(e), sig);
+    vp.addEventListener(
+      "dblclick",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      },
+      { ...sig, capture: true }
+    );
+    vp.classList.add("mntviz-picker-active");
+    this._render();
+  }
+  disable() {
+    if (this._ac) {
+      this._ac.abort();
+      this._ac = null;
+    }
+    this._dragStart = null;
+    this._rightDownPos = null;
+    this._lastClickTime = 0;
+    this._lastClickPos = null;
+    this._hidePreview();
+    this._viewer.viewport.classList.remove("mntviz-picker-active");
+  }
+  isEnabled() {
+    return this._ac !== null;
+  }
+  destroy() {
+    this.disable();
+    if (this._group && this._group.parentNode) {
+      this._group.parentNode.removeChild(this._group);
+    }
+    this._listeners.clear();
+  }
+  getPoints() {
+    return this._points.map((p) => ({ ...p }));
+  }
+  setPoints(points) {
+    this._points = (points || []).map((p) => ({
+      x: Number(p.x),
+      y: Number(p.y),
+      ...p.angle != null ? { angle: Number(p.angle) } : {},
+      ...p.label != null ? { label: p.label } : {}
+    })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+    this._render();
+    this._emit("change", this.getPoints());
+  }
+  addPoint(x, y, meta = {}) {
+    this._points.push({ x: Number(x), y: Number(y), ...meta });
+    this._render();
+    this._emit("add", { x, y, ...meta });
+    this._emit("change", this.getPoints());
+  }
+  removeLast() {
+    if (this._points.length === 0) return null;
+    const removed = this._points.pop();
+    this._render();
+    this._emit("change", this.getPoints());
+    return removed;
+  }
+  /**
+   * Remove the point nearest to (x, y) in image space. The implicit hit
+   * radius scales with `markerRadius` and the current zoom so right-click
+   * stays usable when zoomed out.
+   */
+  removeNearest(x, y, radius = null) {
+    if (this._points.length === 0) return null;
+    const scale = this._viewer.viewState && this._viewer.viewState.scale || 1;
+    const r = radius != null ? radius : Math.max(6, this._options.markerRadius * 2) / scale;
+    let bestIdx = -1, bestD2 = r * r;
+    for (let i = 0; i < this._points.length; i++) {
+      const p = this._points[i];
+      const dx = p.x - x, dy = p.y - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestD2) {
+        bestD2 = d2;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) return null;
+    const removed = this._points.splice(bestIdx, 1)[0];
+    this._render();
+    this._emit("change", this.getPoints());
+    return removed;
+  }
+  clear() {
+    if (this._points.length === 0) return;
+    this._points = [];
+    this._render();
+    this._emit("change", this.getPoints());
+  }
+  setOptions(options) {
+    this._options = { ...this._options, ...options };
+    this._render();
+  }
+  on(event, fn) {
+    if (!this._listeners.has(event)) this._listeners.set(event, /* @__PURE__ */ new Set());
+    this._listeners.get(event).add(fn);
+    return () => this._listeners.get(event)?.delete(fn);
+  }
+  off(event, fn) {
+    this._listeners.get(event)?.delete(fn);
+  }
+  /* ── Pointer handling ──────────────────────────────────────── */
+  _onMouseDown(e) {
+    if (e.button === 2) {
+      e.preventDefault();
+      e.stopPropagation();
+      this._rightDownPos = { clientX: e.clientX, clientY: e.clientY };
+      return;
+    }
+    if (e.button !== 0) return;
+    const now = Date.now();
+    const last = this._lastClickPos;
+    const isDouble = last && now - this._lastClickTime <= this._options.doubleClickMs && Math.abs(e.clientX - last.x) <= this._options.doubleClickDistPx && Math.abs(e.clientY - last.y) <= this._options.doubleClickDistPx;
+    if (!isDouble) {
+      this._lastClickTime = now;
+      this._lastClickPos = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    this._lastClickTime = 0;
+    this._lastClickPos = null;
+    if (e.target && e.target.closest && e.target.closest(".mntviz-mnt-marker")) return;
+    const { x, y } = this._mouseToImage(e);
+    const sz = this._viewer.imageSize;
+    if (x < 0 || y < 0 || x >= sz.width || y >= sz.height) return;
+    this._dragStart = { x, y };
+    this._showPreview(x, y, x, y);
+  }
+  _onMouseMove(e) {
+    if (!this._dragStart) return;
+    const { x, y } = this._mouseToImage(e);
+    this._showPreview(this._dragStart.x, this._dragStart.y, x, y);
+  }
+  _onMouseUp(e) {
+    if (e.button === 2 && this._rightDownPos) {
+      const dx2 = e.clientX - this._rightDownPos.clientX;
+      const dy2 = e.clientY - this._rightDownPos.clientY;
+      this._rightDownPos = null;
+      if (Math.abs(dx2) > 3 || Math.abs(dy2) > 3) return;
+      const { x: x2, y: y2 } = this._mouseToImage(e);
+      this.removeNearest(x2, y2);
+      return;
+    }
+    if (e.button !== 0 || !this._dragStart) return;
+    const start = this._dragStart;
+    this._dragStart = null;
+    this._hidePreview();
+    const { x, y } = this._mouseToImage(e);
+    const dx = x - start.x;
+    const dy = y - start.y;
+    const distSq = dx * dx + dy * dy;
+    const thr = this._options.angleThreshold;
+    const meta = {};
+    if (distSq >= thr * thr) {
+      const ang = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+      meta.angle = ang;
+    }
+    this.addPoint(start.x, start.y, meta);
+  }
+  _onContextMenu(e) {
+    e.preventDefault();
+  }
+  _mouseToImage(e) {
+    const vpRect = this._viewer.viewport.getBoundingClientRect();
+    const { scale, translateX, translateY } = this._viewer.viewState;
+    return {
+      x: Math.round((e.clientX - vpRect.left - translateX) / scale),
+      y: Math.round((e.clientY - vpRect.top - translateY) / scale)
+    };
+  }
+  /* ── Rendering ─────────────────────────────────────────────── */
+  _render() {
+    const preview = this._previewLine;
+    while (this._group.firstChild) this._group.removeChild(this._group.firstChild);
+    const { color, markerRadius: r, strokeWidth, showLabels, labelFontSize } = this._options;
+    const segLen = this._options.segmentLength != null ? this._options.segmentLength : r * 2;
+    this._points.forEach((p, i) => {
+      const g = document.createElementNS(SVG_NS3, "g");
+      g.setAttribute("class", "mntviz-picker-point");
+      const c = document.createElementNS(SVG_NS3, "circle");
+      c.setAttribute("cx", p.x);
+      c.setAttribute("cy", p.y);
+      c.setAttribute("r", r);
+      c.setAttribute("fill", `${color}33`);
+      c.setAttribute("stroke", color);
+      c.setAttribute("stroke-width", strokeWidth);
+      g.appendChild(c);
+      const dot = document.createElementNS(SVG_NS3, "circle");
+      dot.setAttribute("cx", p.x);
+      dot.setAttribute("cy", p.y);
+      dot.setAttribute("r", Math.max(1, r * 0.2));
+      dot.setAttribute("fill", color);
+      g.appendChild(dot);
+      if (p.angle != null && Number.isFinite(p.angle)) {
+        const rad = p.angle * Math.PI / 180;
+        const x2 = p.x + Math.cos(rad) * segLen;
+        const y2 = p.y + Math.sin(rad) * segLen;
+        const seg = document.createElementNS(SVG_NS3, "line");
+        seg.setAttribute("x1", p.x);
+        seg.setAttribute("y1", p.y);
+        seg.setAttribute("x2", x2);
+        seg.setAttribute("y2", y2);
+        seg.setAttribute("stroke", color);
+        seg.setAttribute("stroke-width", strokeWidth);
+        seg.setAttribute("stroke-linecap", "round");
+        g.appendChild(seg);
+      }
+      if (showLabels) {
+        const t = document.createElementNS(SVG_NS3, "text");
+        t.setAttribute("x", p.x + r + 2);
+        t.setAttribute("y", p.y - r - 2);
+        t.setAttribute("font-size", labelFontSize);
+        t.setAttribute("font-family", "monospace");
+        t.setAttribute("fill", color);
+        t.setAttribute("paint-order", "stroke");
+        t.setAttribute("stroke", "rgba(0,0,0,0.6)");
+        t.setAttribute("stroke-width", "0.4");
+        t.textContent = p.label != null ? String(p.label) : String(i + 1);
+        g.appendChild(t);
+      }
+      this._group.appendChild(g);
+    });
+    if (preview && this._previewLine === preview) {
+      this._group.appendChild(preview);
+    }
+  }
+  _showPreview(x1, y1, x2, y2) {
+    const { color, strokeWidth } = this._options;
+    if (!this._previewLine) {
+      this._previewLine = document.createElementNS(SVG_NS3, "line");
+      this._previewLine.setAttribute("class", "mntviz-picker-preview");
+      this._previewLine.setAttribute("stroke", color);
+      this._previewLine.setAttribute("stroke-width", strokeWidth);
+      this._previewLine.setAttribute("stroke-dasharray", "4 3");
+      this._previewLine.setAttribute("stroke-linecap", "round");
+      this._previewLine.setAttribute("opacity", "0.85");
+      this._group.appendChild(this._previewLine);
+    }
+    this._previewLine.setAttribute("x1", x1);
+    this._previewLine.setAttribute("y1", y1);
+    this._previewLine.setAttribute("x2", x2);
+    this._previewLine.setAttribute("y2", y2);
+  }
+  _hidePreview() {
+    if (this._previewLine && this._previewLine.parentNode) {
+      this._previewLine.parentNode.removeChild(this._previewLine);
+    }
+    this._previewLine = null;
+  }
+  _emit(event, payload) {
+    const subs = this._listeners.get(event);
+    if (!subs) return;
+    for (const fn of subs) {
+      try {
+        fn(payload);
+      } catch (err) {
+        console.error("PointPicker listener error", err);
+      }
+    }
+  }
+};
+
+// src/viewer.js
+var SVG_NS4 = "http://www.w3.org/2000/svg";
 var Viewer = class {
   /**
    * @param {string|HTMLElement} container - CSS selector or element.
@@ -988,9 +1302,9 @@ var Viewer = class {
         originY = y + margin;
         break;
     }
-    const g = document.createElementNS(SVG_NS3, "g");
+    const g = document.createElementNS(SVG_NS4, "g");
     g.setAttribute("transform", `translate(${originX}, ${originY})`);
-    const bg = document.createElementNS(SVG_NS3, "rect");
+    const bg = document.createElementNS(SVG_NS4, "rect");
     bg.setAttribute("x", 0);
     bg.setAttribute("y", 0);
     bg.setAttribute("width", boxW);
@@ -1008,13 +1322,13 @@ var Viewer = class {
       const cy = rowY + swSize / 2;
       let marker;
       if (shape === "square") {
-        marker = document.createElementNS(SVG_NS3, "rect");
+        marker = document.createElementNS(SVG_NS4, "rect");
         marker.setAttribute("x", cx - swR);
         marker.setAttribute("y", cy - swR);
         marker.setAttribute("width", 2 * swR);
         marker.setAttribute("height", 2 * swR);
       } else {
-        marker = document.createElementNS(SVG_NS3, "circle");
+        marker = document.createElementNS(SVG_NS4, "circle");
         marker.setAttribute("cx", cx);
         marker.setAttribute("cy", cy);
         marker.setAttribute("r", swR);
@@ -1023,7 +1337,7 @@ var Viewer = class {
       marker.setAttribute("fill", "none");
       marker.setAttribute("stroke-width", 1.5 * scale);
       g.appendChild(marker);
-      const text = document.createElementNS(SVG_NS3, "text");
+      const text = document.createElementNS(SVG_NS4, "text");
       text.setAttribute("x", pad + swSize + gapSw);
       text.setAttribute("y", cy + fontSz * 0.35);
       text.setAttribute("fill", "#fff");
@@ -1039,6 +1353,7 @@ var Viewer = class {
   _getLegendMeta() {
     const el = this._viewport.querySelector(".mntviz-legend");
     if (!el || !el._legendItems) return null;
+    if (el.style.display === "none") return null;
     return {
       items: el._legendItems,
       position: el.dataset.pos || "TL",
@@ -1047,7 +1362,7 @@ var Viewer = class {
   }
   exportSVG() {
     const clone = this._svg.cloneNode(true);
-    clone.setAttribute("xmlns", SVG_NS3);
+    clone.setAttribute("xmlns", SVG_NS4);
     clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     clone.classList.remove("mntviz-mnt-layer");
     clone.removeAttribute("style");
@@ -1059,7 +1374,7 @@ var Viewer = class {
       canvas.width = w;
       canvas.height = h;
       canvas.getContext("2d").drawImage(this._img, 0, 0);
-      const bg = document.createElementNS(SVG_NS3, "image");
+      const bg = document.createElementNS(SVG_NS4, "image");
       bg.setAttribute("href", canvas.toDataURL("image/png"));
       bg.setAttribute("width", w);
       bg.setAttribute("height", h);
@@ -1070,7 +1385,7 @@ var Viewer = class {
       if (!cvs || !cvs.width || !cvs.height) continue;
       const w = this._img.naturalWidth || cvs.width;
       const h = this._img.naturalHeight || cvs.height;
-      const el = document.createElementNS(SVG_NS3, "image");
+      const el = document.createElementNS(SVG_NS4, "image");
       el.setAttribute("href", cvs.toDataURL("image/png"));
       el.setAttribute("width", w);
       el.setAttribute("height", h);
@@ -1129,8 +1444,8 @@ var Viewer = class {
     const { x, y, w, h } = this.visibleRegion();
     const vpW = this._viewport.clientWidth;
     const vpH = this._viewport.clientHeight;
-    const svg = document.createElementNS(SVG_NS3, "svg");
-    svg.setAttribute("xmlns", SVG_NS3);
+    const svg = document.createElementNS(SVG_NS4, "svg");
+    svg.setAttribute("xmlns", SVG_NS4);
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     svg.setAttribute("width", vpW);
     svg.setAttribute("height", vpH);
@@ -1142,7 +1457,7 @@ var Viewer = class {
       canvas.width = nw;
       canvas.height = nh;
       canvas.getContext("2d").drawImage(this._img, 0, 0);
-      const img = document.createElementNS(SVG_NS3, "image");
+      const img = document.createElementNS(SVG_NS4, "image");
       img.setAttribute("href", canvas.toDataURL("image/png"));
       img.setAttribute("width", nw);
       img.setAttribute("height", nh);
@@ -1153,7 +1468,7 @@ var Viewer = class {
       if (!cvs || !cvs.width || !cvs.height) continue;
       const nw = this._img.naturalWidth || cvs.width;
       const nh = this._img.naturalHeight || cvs.height;
-      const el = document.createElementNS(SVG_NS3, "image");
+      const el = document.createElementNS(SVG_NS4, "image");
       el.setAttribute("href", cvs.toDataURL("image/png"));
       el.setAttribute("width", nw);
       el.setAttribute("height", nh);
@@ -1195,6 +1510,10 @@ var Viewer = class {
   destroy() {
     this.disableMinutiaeInspector();
     this.disableFieldProbe();
+    if (this._pointPicker) {
+      this._pointPicker.destroy();
+      this._pointPicker = null;
+    }
     for (const [, { overlay }] of this._overlays) overlay.destroy();
     this._overlays.clear();
     this._abortController.abort();
@@ -1242,6 +1561,66 @@ var Viewer = class {
     this._fieldProbe.destroy();
     this._fieldProbe = null;
   }
+  /**
+   * Enable the point picker (click adds, right-click removes nearest).
+   * Idempotent: re-calls update options on the existing picker.
+   * The toggle button on the HUD reflects the active state.
+   *
+   * @param {object} [options] - Forwarded to PointPicker.
+   * @returns {import('./point-picker.js').PointPicker}
+   */
+  enablePointPicker(options = {}) {
+    this._ensurePickerButton();
+    if (this._pointPicker) {
+      this._pointPicker.setOptions(options);
+      if (options.points) this._pointPicker.setPoints(options.points);
+      this._pointPicker.enable();
+      this._setPickerButtonState(true);
+      return this._pointPicker;
+    }
+    this._pointPicker = new PointPicker(this, options);
+    if (options.points && options.points.length) {
+      this._pointPicker.setPoints(options.points);
+    }
+    this._pointPicker.enable();
+    this._setPickerButtonState(true);
+    return this._pointPicker;
+  }
+  /** Disable the picker but keep the instance + state for re-enabling. */
+  disablePointPicker() {
+    if (!this._pointPicker) return;
+    this._pointPicker.disable();
+    this._setPickerButtonState(false);
+  }
+  /** Toggle picker on/off; creates the picker on first toggle if missing. */
+  togglePointPicker(options = {}) {
+    if (this._pointPicker && this._pointPicker.isEnabled()) {
+      this.disablePointPicker();
+    } else {
+      this.enablePointPicker(options);
+    }
+    return this._pointPicker;
+  }
+  /** Active picker instance (or null). */
+  get pointPicker() {
+    return this._pointPicker || null;
+  }
+  /** Lazily create the HUD toggle button — kept off the DOM until opt-in. */
+  _ensurePickerButton() {
+    if (this._pickerBtn) return;
+    this._pickerBtn = _el("button", "mntviz-export-svg-btn mntviz-picker-btn");
+    this._pickerBtn.textContent = "Pick";
+    this._pickerBtn.setAttribute("aria-pressed", "false");
+    this._pickerBtn.title = "Enable point picker";
+    this._pickerBtn.addEventListener("click", () => this.togglePointPicker());
+    this._exportBtnWrap.insertBefore(this._pickerBtn, this._exportBtnWrap.firstChild);
+  }
+  _setPickerButtonState(active) {
+    if (!this._pickerBtn) return;
+    this._pickerBtn.classList.toggle("mntviz-active", active);
+    this._pickerBtn.setAttribute("aria-pressed", String(active));
+    this._pickerBtn.title = active ? "Picker on \u2014 double-click adds (drag for angle), right-click removes" : "Enable point picker";
+  }
   /* ── DOM construction ───────────────────────────────────── */
   _buildDOM() {
     this._el.innerHTML = "";
@@ -1249,7 +1628,7 @@ var Viewer = class {
     this._canvas = _el("div", "mntviz-canvas-container");
     this._img = _el("img", "mntviz-img-layer");
     this._img.draggable = false;
-    this._svg = document.createElementNS(SVG_NS3, "svg");
+    this._svg = document.createElementNS(SVG_NS4, "svg");
     this._svg.classList.add("mntviz-mnt-layer");
     this._canvas.append(this._img, this._svg);
     this._viewport.append(this._canvas);
@@ -1482,7 +1861,7 @@ function _formatSignedAngle(angle) {
 }
 
 // src/segments-renderer.js
-var SVG_NS4 = "http://www.w3.org/2000/svg";
+var SVG_NS5 = "http://www.w3.org/2000/svg";
 var segmentDataMap = /* @__PURE__ */ new WeakMap();
 var DEFAULTS3 = {
   color: "#00ff00",
@@ -1510,7 +1889,7 @@ var SegmentsRenderer = class {
   draw(minutiae, segments, options = {}) {
     if (!segments || segments.length === 0) return [];
     const opts = { ...DEFAULTS3, ...options };
-    const g = document.createElementNS(SVG_NS4, "g");
+    const g = document.createElementNS(SVG_NS5, "g");
     g.classList.add("mntviz-segments");
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-linecap", "round");
@@ -1522,11 +1901,11 @@ var SegmentsRenderer = class {
         visibleLines.push(null);
         continue;
       }
-      const mg = document.createElementNS(SVG_NS4, "g");
+      const mg = document.createElementNS(SVG_NS5, "g");
       mg.classList.add("mntviz-segment-marker");
       mg.style.pointerEvents = "auto";
       mg.style.cursor = "crosshair";
-      const hit = document.createElementNS(SVG_NS4, "line");
+      const hit = document.createElementNS(SVG_NS5, "line");
       hit.setAttribute("x1", a.x);
       hit.setAttribute("y1", a.y);
       hit.setAttribute("x2", b.x);
@@ -1535,7 +1914,7 @@ var SegmentsRenderer = class {
       hit.setAttribute("stroke-width", opts.hitWidth);
       hit.setAttribute("fill", "none");
       mg.appendChild(hit);
-      const line = document.createElementNS(SVG_NS4, "line");
+      const line = document.createElementNS(SVG_NS5, "line");
       line.classList.add("mntviz-segment");
       line.setAttribute("x1", a.x);
       line.setAttribute("y1", a.y);
@@ -11837,17 +12216,34 @@ function applyColormap(gray, width, height, cmapName, opts = {}) {
   const lut = _LUTS[cmapName] || _LUTS.magma;
   const alphaMode = opts.alpha ?? "value";
   const alphaArr = opts.alphaData ?? null;
+  const fadeGamma = opts.fadeGamma ?? 1;
+  const invert = !!opts.invert;
+  const valueLUT = opts.valueLUT ?? null;
   const n = width * height;
   const rgba = new Uint8ClampedArray(n * 4);
+  let alphaLUT = null;
+  if (!alphaArr && alphaMode === "value" && fadeGamma !== 1) {
+    alphaLUT = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+      alphaLUT[v] = Math.round(255 * Math.pow(v / 255, fadeGamma));
+    }
+  }
   for (let i = 0; i < n; i++) {
-    const v = gray[i];
+    const stretched = valueLUT ? valueLUT[gray[i]] : gray[i];
+    const v = invert ? 255 - stretched : stretched;
     const a = alphaArr ? alphaArr[i] : v;
     if (a === 0 && v === 0) continue;
     const li = v * 4;
     rgba[i * 4] = lut[li];
     rgba[i * 4 + 1] = lut[li + 1];
     rgba[i * 4 + 2] = lut[li + 2];
-    rgba[i * 4 + 3] = alphaArr ? a : alphaMode === "value" ? v : 255;
+    if (alphaArr) {
+      rgba[i * 4 + 3] = a;
+    } else if (alphaMode === "value") {
+      rgba[i * 4 + 3] = alphaLUT ? alphaLUT[v] : v;
+    } else {
+      rgba[i * 4 + 3] = 255;
+    }
   }
   return new ImageData(rgba, width, height);
 }
@@ -11866,6 +12262,12 @@ var OverlayLayer = class {
     this._visible = false;
     this._colormap = options.colormap || null;
     this._alphaMode = options.alpha || "value";
+    this._fadeGamma = options.fadeGamma ?? 1;
+    this._invert = !!options.invert;
+    this._autoStretch = !!options.autoStretch;
+    this._stretchLow = options.stretchLow ?? 0.01;
+    this._stretchHigh = options.stretchHigh ?? 0.99;
+    this._stretchLUT = null;
     this._rawData = null;
     this._alphaData = null;
     this._rawWidth = 0;
@@ -11915,6 +12317,7 @@ var OverlayLayer = class {
           for (let i = 0; i < w * h; i++) {
             this._rawData[i] = imgData.data[i * 4];
           }
+          this._refreshStretchLUT();
           this._applyAndDraw();
         } else {
           this._rawData = null;
@@ -11953,6 +12356,87 @@ var OverlayLayer = class {
   setColormap(name) {
     this._colormap = name;
     if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * Change the fade gamma exponent applied to the value→alpha curve.
+   * Only meaningful when `alpha === 'value'`. Re-applies LUT immediately.
+   * @param {number} gamma - >=0. 1 is linear. >1 fades low values harder.
+   */
+  setFadeGamma(gamma) {
+    this._fadeGamma = gamma;
+    if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * Toggle whether the grayscale value is inverted (255 - v) before colormap
+   * lookup. Cheap — only triggers a redraw, no re-decoding.
+   * @param {boolean} invert
+   */
+  setInvert(invert) {
+    const next = !!invert;
+    if (next === this._invert) return;
+    this._invert = next;
+    if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * Toggle percentile-based auto-stretch of the input range.
+   * Useful for low-contrast inputs (e.g. FingerNet gabor, std≈18) where the
+   * raw byte range fills only a narrow band and the colormap looks flat.
+   * @param {boolean} on
+   */
+  setAutoStretch(on) {
+    const next = !!on;
+    if (next === this._autoStretch) return;
+    this._autoStretch = next;
+    this._refreshStretchLUT();
+    if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * @private Build a 256-entry remap LUT that stretches [p_lo, p_hi] to [0, 255].
+   * Called automatically after load and when auto-stretch is toggled.
+   */
+  _refreshStretchLUT() {
+    if (!this._autoStretch || !this._rawData) {
+      this._stretchLUT = null;
+      return;
+    }
+    const data = this._rawData;
+    const n = data.length;
+    if (n === 0) {
+      this._stretchLUT = null;
+      return;
+    }
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) hist[data[i]]++;
+    const lowCount = Math.floor(n * this._stretchLow);
+    const highCount = Math.floor(n * (1 - this._stretchHigh));
+    let cum = 0, pLo = 0, pHi = 255;
+    for (let v = 0; v < 256; v++) {
+      cum += hist[v];
+      if (cum >= lowCount) {
+        pLo = v;
+        break;
+      }
+    }
+    cum = 0;
+    for (let v = 255; v >= 0; v--) {
+      cum += hist[v];
+      if (cum >= highCount) {
+        pHi = v;
+        break;
+      }
+    }
+    if (pHi <= pLo) {
+      this._stretchLUT = null;
+      return;
+    }
+    const range = pHi - pLo;
+    const out = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+      if (v <= pLo) out[v] = 0;
+      else if (v >= pHi) out[v] = 255;
+      else out[v] = Math.round(255 * (v - pLo) / range);
+    }
+    this._stretchLUT = out;
   }
   /**
    * Set iso-contour levels and redraw.  Pass null or [] to clear.
@@ -12051,7 +12535,13 @@ var OverlayLayer = class {
       this._rawWidth,
       this._rawHeight,
       this._colormap,
-      { alpha: this._alphaMode, alphaData: this._alphaData || null }
+      {
+        alpha: this._alphaMode,
+        alphaData: this._alphaData || null,
+        fadeGamma: this._fadeGamma,
+        invert: this._invert,
+        valueLUT: this._stretchLUT
+      }
     );
     const ctx = this._canvas.getContext("2d");
     ctx.putImageData(imageData, 0, 0);
@@ -12109,7 +12599,7 @@ var OverlayLayer = class {
 };
 
 // src/uv-renderer.js
-var SVG_NS5 = "http://www.w3.org/2000/svg";
+var SVG_NS6 = "http://www.w3.org/2000/svg";
 var DEFAULTS4 = {
   /** Rendering style: 'arrow' (directed, with arrowhead) or 'segment' (centered, no arrowhead). */
   style: "arrow",
@@ -12173,12 +12663,12 @@ var UVFieldRenderer = class {
         lw *= modulationWidthMin + (1 - modulationWidthMin) * mod;
       }
       if (alpha < alphaThreshold) continue;
-      const g = document.createElementNS(SVG_NS5, "g");
+      const g = document.createElementNS(SVG_NS6, "g");
       g.setAttribute("opacity", alpha);
       g.setAttribute("stroke", color);
       g.setAttribute("fill", color);
       g.setAttribute("stroke-linecap", "round");
-      const line = document.createElementNS(SVG_NS5, "line");
+      const line = document.createElementNS(SVG_NS6, "line");
       line.setAttribute("stroke-width", lw);
       if (style === "segment") {
         const mag = Math.hypot(dx, dy);
@@ -12214,7 +12704,7 @@ var UVFieldRenderer = class {
           const ly = by + py * (headW / 2);
           const rx = bx - px * (headW / 2);
           const ry = by - py * (headW / 2);
-          const polygon = document.createElementNS(SVG_NS5, "polygon");
+          const polygon = document.createElementNS(SVG_NS6, "polygon");
           polygon.setAttribute("points", `${tipX},${tipY} ${lx},${ly} ${rx},${ry}`);
           polygon.setAttribute("stroke", "none");
           g.appendChild(polygon);
@@ -12230,7 +12720,7 @@ var UVFieldRenderer = class {
 };
 
 // src/match-viewer.js
-var SVG_NS6 = "http://www.w3.org/2000/svg";
+var SVG_NS7 = "http://www.w3.org/2000/svg";
 var PATCH_NEIGHBOR_ALPHA = 0.4;
 var WHEEL_ROTATION_DEG_PER_TICK = 2;
 var DEFAULTS5 = {
@@ -12297,7 +12787,7 @@ var MatchViewer = class {
     }
     this._rightHost = _el2("div", "mntviz-match-viewer-host");
     this._rightPanel.appendChild(this._rightHost);
-    this._overlaySvg = document.createElementNS(SVG_NS6, "svg");
+    this._overlaySvg = document.createElementNS(SVG_NS7, "svg");
     this._overlaySvg.classList.add("mntviz-match-overlay");
     this._overlaySvg.setAttribute("width", "100%");
     this._overlaySvg.setAttribute("height", "100%");
@@ -12338,13 +12828,13 @@ var MatchViewer = class {
     this._popupPatchesWrap = _el2("div", "mntviz-match-popup-patches");
     this._leftPatchWrap = _el2("div", "mntviz-match-popup-patch");
     this._leftPatchCanvas = document.createElement("canvas");
-    this._leftPatchSvg = document.createElementNS(SVG_NS6, "svg");
+    this._leftPatchSvg = document.createElementNS(SVG_NS7, "svg");
     const leftLabel = _el2("div", "mntviz-match-popup-patch-label");
     leftLabel.textContent = "L";
     this._leftPatchWrap.append(this._leftPatchCanvas, this._leftPatchSvg, leftLabel);
     this._rightPatchWrap = _el2("div", "mntviz-match-popup-patch");
     this._rightPatchCanvas = document.createElement("canvas");
-    this._rightPatchSvg = document.createElementNS(SVG_NS6, "svg");
+    this._rightPatchSvg = document.createElementNS(SVG_NS7, "svg");
     const rightLabel = _el2("div", "mntviz-match-popup-patch-label");
     rightLabel.textContent = "R";
     this._rightPatchWrap.append(this._rightPatchCanvas, this._rightPatchSvg, rightLabel);
@@ -12471,7 +12961,7 @@ var MatchViewer = class {
     this._segmentHitLines = [];
     for (let i = 0; i < opts.pairs.length; i++) {
       const p = opts.pairs[i];
-      const line = document.createElementNS(SVG_NS6, "line");
+      const line = document.createElementNS(SVG_NS7, "line");
       line.classList.add("mntviz-match-segment");
       line.setAttribute("stroke", p.color || opts.markerColor);
       line.setAttribute("stroke-opacity", p.alpha != null ? p.alpha : 0.6);
@@ -12479,7 +12969,7 @@ var MatchViewer = class {
       line.style.display = "none";
       this._overlaySvg.appendChild(line);
       this._segmentLines.push(line);
-      const hitLine = document.createElementNS(SVG_NS6, "line");
+      const hitLine = document.createElementNS(SVG_NS7, "line");
       hitLine.classList.add("mntviz-match-segment-hitbox");
       hitLine.dataset.pairIndex = String(i);
       hitLine.style.display = "none";
@@ -12502,14 +12992,14 @@ var MatchViewer = class {
     const rSize = this._rightViewer.imageSize;
     const totalW = lSize.width + gap + rSize.width;
     const totalH = Math.max(lSize.height, rSize.height);
-    const svg = document.createElementNS(SVG_NS6, "svg");
-    svg.setAttribute("xmlns", SVG_NS6);
+    const svg = document.createElementNS(SVG_NS7, "svg");
+    svg.setAttribute("xmlns", SVG_NS7);
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     svg.setAttribute("width", totalW);
     svg.setAttribute("height", totalH);
     svg.setAttribute("viewBox", `0 0 ${totalW} ${totalH}`);
     const embedPanel = (viewer, offsetX) => {
-      const g = document.createElementNS(SVG_NS6, "g");
+      const g = document.createElementNS(SVG_NS7, "g");
       if (offsetX) g.setAttribute("transform", `translate(${offsetX}, 0)`);
       const img = viewer.imageElement;
       if (img.src) {
@@ -12520,7 +13010,7 @@ var MatchViewer = class {
         canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0);
         const dataUri = canvas.toDataURL("image/png");
-        const svgImg = document.createElementNS(SVG_NS6, "image");
+        const svgImg = document.createElementNS(SVG_NS7, "image");
         svgImg.setAttribute("href", dataUri);
         svgImg.setAttribute("width", w);
         svgImg.setAttribute("height", h);
@@ -12535,14 +13025,14 @@ var MatchViewer = class {
     svg.appendChild(embedPanel(this._leftViewer, 0));
     svg.appendChild(embedPanel(this._rightViewer, lSize.width + gap));
     const opts = this._options;
-    const segG = document.createElementNS(SVG_NS6, "g");
+    const segG = document.createElementNS(SVG_NS7, "g");
     for (let i = 0; i < opts.pairs.length; i++) {
       const domLine = this._segmentLines[i];
       if (domLine.style.display === "none") continue;
       const p = opts.pairs[i];
       const lm = opts.leftMinutiae[p.leftIdx];
       const rm = opts.rightMinutiae[p.rightIdx];
-      const line = document.createElementNS(SVG_NS6, "line");
+      const line = document.createElementNS(SVG_NS7, "line");
       line.setAttribute("x1", lm.x);
       line.setAttribute("y1", lm.y);
       line.setAttribute("x2", rm.x + lSize.width + gap);
@@ -12582,14 +13072,14 @@ var MatchViewer = class {
     const rVpH = this._rightViewer.viewport.clientHeight;
     const totalW = lVpW + gap + rVpW;
     const totalH = Math.max(lVpH, rVpH);
-    const svg = document.createElementNS(SVG_NS6, "svg");
-    svg.setAttribute("xmlns", SVG_NS6);
+    const svg = document.createElementNS(SVG_NS7, "svg");
+    svg.setAttribute("xmlns", SVG_NS7);
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     svg.setAttribute("width", totalW);
     svg.setAttribute("height", totalH);
     svg.setAttribute("viewBox", `0 0 ${totalW} ${totalH}`);
     const embedView = (viewer, vpW, vpH, offsetX) => {
-      const nested = document.createElementNS(SVG_NS6, "svg");
+      const nested = document.createElementNS(SVG_NS7, "svg");
       nested.setAttribute("x", offsetX);
       nested.setAttribute("y", 0);
       nested.setAttribute("width", vpW);
@@ -12599,7 +13089,7 @@ var MatchViewer = class {
       const { width: iw, height: ih } = viewer.imageSize;
       const ox = iw / 2;
       const oy = ih / 2;
-      const g = document.createElementNS(SVG_NS6, "g");
+      const g = document.createElementNS(SVG_NS7, "g");
       g.setAttribute(
         "transform",
         `translate(${tx}, ${ty}) scale(${s}) translate(${ox}, ${oy}) rotate(${r}) translate(${-ox}, ${-oy})`
@@ -12610,7 +13100,7 @@ var MatchViewer = class {
         canvas.width = iw;
         canvas.height = ih;
         canvas.getContext("2d").drawImage(img, 0, 0);
-        const svgImg = document.createElementNS(SVG_NS6, "image");
+        const svgImg = document.createElementNS(SVG_NS7, "image");
         svgImg.setAttribute("href", canvas.toDataURL("image/png"));
         svgImg.setAttribute("width", iw);
         svgImg.setAttribute("height", ih);
@@ -12624,7 +13114,7 @@ var MatchViewer = class {
     svg.appendChild(embedView(this._leftViewer, lVpW, lVpH, 0));
     svg.appendChild(embedView(this._rightViewer, rVpW, rVpH, lVpW + gap));
     const opts = this._options;
-    const segG = document.createElementNS(SVG_NS6, "g");
+    const segG = document.createElementNS(SVG_NS7, "g");
     for (let i = 0; i < opts.pairs.length; i++) {
       const domLine = this._segmentLines[i];
       if (domLine.style.display === "none") continue;
@@ -12633,7 +13123,7 @@ var MatchViewer = class {
       const rm = opts.rightMinutiae[p.rightIdx];
       const lp = this._leftViewer.imageToElementCoords(lm.x, lm.y, this._leftViewer.viewport);
       const rp = this._rightViewer.imageToElementCoords(rm.x, rm.y, this._rightViewer.viewport);
-      const line = document.createElementNS(SVG_NS6, "line");
+      const line = document.createElementNS(SVG_NS7, "line");
       line.setAttribute("x1", lp.x);
       line.setAttribute("y1", lp.y);
       line.setAttribute("x2", lVpW + gap + rp.x);
@@ -12905,10 +13395,10 @@ var MatchViewer = class {
     return null;
   }
   _createGhostCursor(svgRoot) {
-    const g = document.createElementNS(SVG_NS6, "g");
+    const g = document.createElementNS(SVG_NS7, "g");
     g.classList.add("mntviz-ghost-cursor");
     g.style.display = "none";
-    const circle = document.createElementNS(SVG_NS6, "circle");
+    const circle = document.createElementNS(SVG_NS7, "circle");
     circle.setAttribute("r", "4");
     circle.setAttribute("cx", "0");
     circle.setAttribute("cy", "0");
@@ -13402,14 +13892,14 @@ var MatchViewer = class {
     const rad = angleDeg * (Math.PI / 180);
     const xEnd = x + segLen * Math.cos(rad);
     const yEnd = y - segLen * Math.sin(rad);
-    const g = document.createElementNS(SVG_NS6, "g");
+    const g = document.createElementNS(SVG_NS7, "g");
     g.setAttribute("opacity", opacity);
     g.setAttribute("stroke", color);
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-width", "1");
     const marker = createMarkerShape(shape, x, y, r);
     g.appendChild(marker);
-    const line = document.createElementNS(SVG_NS6, "line");
+    const line = document.createElementNS(SVG_NS7, "line");
     line.setAttribute("x1", x);
     line.setAttribute("y1", y);
     line.setAttribute("x2", xEnd);
@@ -13520,10 +14010,10 @@ function _indexMarkersByPair(svgLayer) {
 }
 
 // src/plots.js
-var SVG_NS7 = "http://www.w3.org/2000/svg";
+var SVG_NS8 = "http://www.w3.org/2000/svg";
 function _createShapeElement(shape) {
   if (shape.type === "polygon") {
-    const poly = document.createElementNS(SVG_NS7, "polygon");
+    const poly = document.createElementNS(SVG_NS8, "polygon");
     poly.setAttribute("points", shape.points.map((p) => p.join(",")).join(" "));
     poly.setAttribute("stroke", shape.stroke || "#ff0000");
     poly.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -13531,17 +14021,28 @@ function _createShapeElement(shape) {
     if (shape.opacity != null) poly.setAttribute("opacity", shape.opacity);
     return poly;
   }
+  if (shape.type === "circle") {
+    const c = document.createElementNS(SVG_NS8, "circle");
+    c.setAttribute("cx", shape.x);
+    c.setAttribute("cy", shape.y);
+    c.setAttribute("r", shape.r != null ? shape.r : 3);
+    c.setAttribute("fill", shape.fill != null ? shape.fill : "none");
+    if (shape.stroke != null) c.setAttribute("stroke", shape.stroke);
+    if (shape.strokeWidth != null) c.setAttribute("stroke-width", shape.strokeWidth);
+    if (shape.opacity != null) c.setAttribute("opacity", shape.opacity);
+    return c;
+  }
   if (shape.type === "cross") {
-    const g = document.createElementNS(SVG_NS7, "g");
+    const g = document.createElementNS(SVG_NS8, "g");
     g.setAttribute("stroke", shape.stroke || "#00ff00");
     g.setAttribute("stroke-width", shape.strokeWidth || 1);
     const s = shape.size || 10;
-    const h = document.createElementNS(SVG_NS7, "line");
+    const h = document.createElementNS(SVG_NS8, "line");
     h.setAttribute("x1", shape.x - s / 2);
     h.setAttribute("y1", shape.y);
     h.setAttribute("x2", shape.x + s / 2);
     h.setAttribute("y2", shape.y);
-    const v = document.createElementNS(SVG_NS7, "line");
+    const v = document.createElementNS(SVG_NS8, "line");
     v.setAttribute("x1", shape.x);
     v.setAttribute("y1", shape.y - s / 2);
     v.setAttribute("x2", shape.x);
@@ -13551,13 +14052,13 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "minutia") {
-    const g = document.createElementNS(SVG_NS7, "g");
+    const g = document.createElementNS(SVG_NS8, "g");
     const color = shape.stroke || "#00ff00";
     g.setAttribute("stroke", color);
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-width", shape.strokeWidth || 1.5);
     const r = shape.radius || 6;
-    const circle = document.createElementNS(SVG_NS7, "circle");
+    const circle = document.createElementNS(SVG_NS8, "circle");
     circle.setAttribute("cx", shape.x);
     circle.setAttribute("cy", shape.y);
     circle.setAttribute("r", r);
@@ -13566,7 +14067,7 @@ function _createShapeElement(shape) {
     const rad = (shape.angle || 0) * Math.PI / 180;
     const dx = Math.cos(rad) * segLen;
     const dy = Math.sin(rad) * segLen;
-    const line = document.createElementNS(SVG_NS7, "line");
+    const line = document.createElementNS(SVG_NS8, "line");
     line.setAttribute("x1", shape.x);
     line.setAttribute("y1", shape.y);
     line.setAttribute("x2", shape.x + dx);
@@ -13576,7 +14077,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "path") {
-    const path = document.createElementNS(SVG_NS7, "path");
+    const path = document.createElementNS(SVG_NS8, "path");
     path.setAttribute("d", shape.d);
     path.setAttribute("stroke", shape.stroke || "#ff0000");
     path.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -13584,11 +14085,122 @@ function _createShapeElement(shape) {
     if (shape.opacity != null) path.setAttribute("opacity", shape.opacity);
     return path;
   }
+  if (shape.type === "conic-ring") {
+    const g = document.createElementNS(SVG_NS8, "g");
+    if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
+    const cx = shape.x, cy = shape.y, r = shape.r;
+    const sw = shape.strokeWidth != null ? shape.strokeWidth : 2;
+    const pad = sw;
+    const bx = cx - r - pad, by = cy - r - pad;
+    const bs = (r + pad) * 2;
+    const maskId = "mntviz-conic-mask-" + Math.random().toString(36).slice(2, 10);
+    const defs = document.createElementNS(SVG_NS8, "defs");
+    const mask = document.createElementNS(SVG_NS8, "mask");
+    mask.setAttribute("id", maskId);
+    mask.setAttribute("maskUnits", "userSpaceOnUse");
+    mask.setAttribute("x", bx);
+    mask.setAttribute("y", by);
+    mask.setAttribute("width", bs);
+    mask.setAttribute("height", bs);
+    const bg = document.createElementNS(SVG_NS8, "rect");
+    bg.setAttribute("x", bx);
+    bg.setAttribute("y", by);
+    bg.setAttribute("width", bs);
+    bg.setAttribute("height", bs);
+    bg.setAttribute("fill", "black");
+    mask.appendChild(bg);
+    const ringCircle = document.createElementNS(SVG_NS8, "circle");
+    ringCircle.setAttribute("cx", cx);
+    ringCircle.setAttribute("cy", cy);
+    ringCircle.setAttribute("r", r);
+    ringCircle.setAttribute("fill", "none");
+    ringCircle.setAttribute("stroke", "white");
+    ringCircle.setAttribute("stroke-width", sw);
+    mask.appendChild(ringCircle);
+    defs.appendChild(mask);
+    g.appendChild(defs);
+    let stops;
+    if (Array.isArray(shape.gradient)) {
+      const arr = shape.gradient;
+      const n = arr.length;
+      if (n < 2) {
+        stops = (arr[0] || "#000") + " 0deg, " + (arr[0] || "#000") + " 360deg";
+      } else {
+        stops = arr.map((c, i) => `${c} ${(i / (n - 1) * 360).toFixed(3)}deg`).join(", ");
+      }
+    } else {
+      stops = String(shape.gradient || "red, yellow, lime, cyan, blue, magenta, red");
+    }
+    const fromDeg = shape.fromAngle != null ? shape.fromAngle : 0;
+    const fo = document.createElementNS(SVG_NS8, "foreignObject");
+    fo.setAttribute("x", bx);
+    fo.setAttribute("y", by);
+    fo.setAttribute("width", bs);
+    fo.setAttribute("height", bs);
+    fo.setAttribute("mask", `url(#${maskId})`);
+    const div = document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+    div.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    div.style.width = "100%";
+    div.style.height = "100%";
+    div.style.background = `conic-gradient(from ${fromDeg}deg at 50% 50%, ${stops})`;
+    fo.appendChild(div);
+    g.appendChild(fo);
+    return g;
+  }
+  if (shape.type === "lines") {
+    const g = document.createElementNS(SVG_NS8, "g");
+    if (shape.strokeWidth != null) g.setAttribute("stroke-width", shape.strokeWidth);
+    if (shape.stroke != null) g.setAttribute("stroke", shape.stroke);
+    if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
+    if (shape.linecap != null) g.setAttribute("stroke-linecap", shape.linecap);
+    let defs = null;
+    let gradPrefix = null;
+    const lineList = shape.lines || [];
+    for (let i = 0; i < lineList.length; i++) {
+      const l = lineList[i];
+      const ln = document.createElementNS(SVG_NS8, "line");
+      ln.setAttribute("x1", l.x1);
+      ln.setAttribute("y1", l.y1);
+      ln.setAttribute("x2", l.x2);
+      ln.setAttribute("y2", l.y2);
+      if (l.colorStart != null && l.colorEnd != null) {
+        if (defs == null) {
+          defs = document.createElementNS(SVG_NS8, "defs");
+          gradPrefix = "mntviz-grad-" + Math.random().toString(36).slice(2, 8);
+          g.insertBefore(defs, g.firstChild);
+        }
+        const id = `${gradPrefix}-${i}`;
+        const grad = document.createElementNS(SVG_NS8, "linearGradient");
+        grad.setAttribute("id", id);
+        grad.setAttribute("gradientUnits", "userSpaceOnUse");
+        grad.setAttribute("x1", l.x1);
+        grad.setAttribute("y1", l.y1);
+        grad.setAttribute("x2", l.x2);
+        grad.setAttribute("y2", l.y2);
+        const s0 = document.createElementNS(SVG_NS8, "stop");
+        s0.setAttribute("offset", "0%");
+        s0.setAttribute("stop-color", l.colorStart);
+        const s1 = document.createElementNS(SVG_NS8, "stop");
+        s1.setAttribute("offset", "100%");
+        s1.setAttribute("stop-color", l.colorEnd);
+        grad.append(s0, s1);
+        defs.appendChild(grad);
+        ln.setAttribute("stroke", `url(#${id})`);
+      } else if (l.stroke != null) {
+        ln.setAttribute("stroke", l.stroke);
+      }
+      if (l.strokeWidth != null) ln.setAttribute("stroke-width", l.strokeWidth);
+      if (l.opacity != null) ln.setAttribute("opacity", l.opacity);
+      g.appendChild(ln);
+    }
+    return g;
+  }
   return null;
 }
 function _renderShapes(svgTarget, shapes) {
   if (!shapes || shapes.length === 0) return;
-  const g = document.createElementNS(SVG_NS7, "g");
+  const g = document.createElementNS(SVG_NS8, "g");
+  g.setAttribute("class", "mntviz-shapes-layer");
   for (const shape of shapes) {
     const el = _createShapeElement(shape);
     if (el) g.appendChild(el);
@@ -13605,7 +14217,7 @@ function renderLegend(viewer, items) {
     row.classList.add("mntviz-legend-item");
     const size = 16;
     const r = 5;
-    const svg = document.createElementNS(SVG_NS7, "svg");
+    const svg = document.createElementNS(SVG_NS8, "svg");
     svg.setAttribute("width", size);
     svg.setAttribute("height", size);
     svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
@@ -13642,6 +14254,7 @@ async function plotMinutiae(host, config) {
   if (config.legend) {
     renderLegend(viewer, config.legend);
   }
+  _maybeEnablePicker(viewer, config);
   return viewer;
 }
 async function plotOverlay(host, config) {
@@ -13655,6 +14268,7 @@ async function plotOverlay(host, config) {
     await overlay.load(config.overlaySrc);
     overlay.show();
   }
+  _maybeEnablePicker(viewer, config);
   return viewer;
 }
 async function plotHuv(host, config) {
@@ -13673,7 +14287,17 @@ async function plotHuv(host, config) {
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
   }
   _renderShapes(viewer.svgLayer, config.shapes);
+  _maybeEnablePicker(viewer, config);
   return viewer;
+}
+function _maybeEnablePicker(viewer, config) {
+  if (!config.picker) return null;
+  const opts = config.picker === true ? {} : config.picker;
+  const picker = viewer.enablePointPicker(opts);
+  if (typeof config.onPickerChange === "function") {
+    picker.on("change", config.onPickerChange);
+  }
+  return picker;
 }
 function _loadImageDimensions(src) {
   return new Promise((resolve, reject) => {
@@ -13684,18 +14308,18 @@ function _loadImageDimensions(src) {
   });
 }
 function _createStaticHuvSvg(config, w, h) {
-  const svg = document.createElementNS(SVG_NS7, "svg");
+  const svg = document.createElementNS(SVG_NS8, "svg");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   if (config.pixelated) svg.style.imageRendering = "pixelated";
-  const bgImage = document.createElementNS(SVG_NS7, "image");
+  const bgImage = document.createElementNS(SVG_NS8, "image");
   bgImage.setAttribute("href", config.imageSrc);
   bgImage.setAttribute("width", w);
   bgImage.setAttribute("height", h);
   if (config.pixelated) bgImage.setAttribute("image-rendering", "pixelated");
   svg.appendChild(bgImage);
   if (config.overlaySrc) {
-    const ovImage = document.createElementNS(SVG_NS7, "image");
+    const ovImage = document.createElementNS(SVG_NS8, "image");
     ovImage.setAttribute("href", config.overlaySrc);
     ovImage.setAttribute("width", w);
     ovImage.setAttribute("height", h);
@@ -13704,7 +14328,7 @@ function _createStaticHuvSvg(config, w, h) {
     svg.appendChild(ovImage);
   }
   if (config.arrows && config.arrows.length > 0) {
-    const arrowGroup = document.createElementNS(SVG_NS7, "g");
+    const arrowGroup = document.createElementNS(SVG_NS8, "g");
     svg.appendChild(arrowGroup);
     const uvRenderer = new UVFieldRenderer(arrowGroup);
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});

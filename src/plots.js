@@ -39,6 +39,17 @@ function _createShapeElement(shape) {
         if (shape.opacity != null) poly.setAttribute('opacity', shape.opacity);
         return poly;
     }
+    if (shape.type === 'circle') {
+        const c = document.createElementNS(SVG_NS, 'circle');
+        c.setAttribute('cx', shape.x);
+        c.setAttribute('cy', shape.y);
+        c.setAttribute('r', shape.r != null ? shape.r : 3);
+        c.setAttribute('fill', shape.fill != null ? shape.fill : 'none');
+        if (shape.stroke != null) c.setAttribute('stroke', shape.stroke);
+        if (shape.strokeWidth != null) c.setAttribute('stroke-width', shape.strokeWidth);
+        if (shape.opacity != null) c.setAttribute('opacity', shape.opacity);
+        return c;
+    }
     if (shape.type === 'cross') {
         const g = document.createElementNS(SVG_NS, 'g');
         g.setAttribute('stroke', shape.stroke || '#00ff00');
@@ -90,6 +101,130 @@ function _createShapeElement(shape) {
         if (shape.opacity != null) path.setAttribute('opacity', shape.opacity);
         return path;
     }
+    if (shape.type === 'conic-ring') {
+        // Stroked ring with a smooth angular (conic) color gradient.
+        // Uses the canonical recipe: an SVG <mask> shaped like an annulus,
+        // applied to a <foreignObject> whose <div> background is a CSS
+        // conic-gradient. This is the only way to get a truly smooth conic
+        // sweep on a circle stroke (SVG's native gradients are linear/radial
+        // only; SVG2 conicGradient is not implemented in any browser).
+        //
+        // shape: { x, y, r, strokeWidth?, opacity?, fromAngle?, gradient }
+        //   gradient: array of CSS color strings (uniformly spaced 0..360°)
+        //             OR a raw CSS conic-gradient stops string.
+        const g = document.createElementNS(SVG_NS, 'g');
+        if (shape.opacity != null) g.setAttribute('opacity', shape.opacity);
+
+        const cx = shape.x, cy = shape.y, r = shape.r;
+        const sw = shape.strokeWidth != null ? shape.strokeWidth : 2;
+        const pad = sw;
+        const bx = cx - r - pad, by = cy - r - pad;
+        const bs = (r + pad) * 2;
+
+        const maskId = 'mntviz-conic-mask-' + Math.random().toString(36).slice(2, 10);
+        const defs = document.createElementNS(SVG_NS, 'defs');
+        const mask = document.createElementNS(SVG_NS, 'mask');
+        mask.setAttribute('id', maskId);
+        mask.setAttribute('maskUnits', 'userSpaceOnUse');
+        mask.setAttribute('x', bx); mask.setAttribute('y', by);
+        mask.setAttribute('width', bs); mask.setAttribute('height', bs);
+
+        const bg = document.createElementNS(SVG_NS, 'rect');
+        bg.setAttribute('x', bx); bg.setAttribute('y', by);
+        bg.setAttribute('width', bs); bg.setAttribute('height', bs);
+        bg.setAttribute('fill', 'black');
+        mask.appendChild(bg);
+
+        const ringCircle = document.createElementNS(SVG_NS, 'circle');
+        ringCircle.setAttribute('cx', cx); ringCircle.setAttribute('cy', cy);
+        ringCircle.setAttribute('r', r);
+        ringCircle.setAttribute('fill', 'none');
+        ringCircle.setAttribute('stroke', 'white');
+        ringCircle.setAttribute('stroke-width', sw);
+        mask.appendChild(ringCircle);
+
+        defs.appendChild(mask);
+        g.appendChild(defs);
+
+        // Build CSS conic-gradient stops.
+        let stops;
+        if (Array.isArray(shape.gradient)) {
+            const arr = shape.gradient;
+            const n = arr.length;
+            if (n < 2) {
+                stops = (arr[0] || '#000') + ' 0deg, ' + (arr[0] || '#000') + ' 360deg';
+            } else {
+                stops = arr.map((c, i) => `${c} ${(i / (n - 1) * 360).toFixed(3)}deg`).join(', ');
+            }
+        } else {
+            stops = String(shape.gradient || 'red, yellow, lime, cyan, blue, magenta, red');
+        }
+        const fromDeg = shape.fromAngle != null ? shape.fromAngle : 0;
+
+        const fo = document.createElementNS(SVG_NS, 'foreignObject');
+        fo.setAttribute('x', bx); fo.setAttribute('y', by);
+        fo.setAttribute('width', bs); fo.setAttribute('height', bs);
+        fo.setAttribute('mask', `url(#${maskId})`);
+
+        const div = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+        div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+        div.style.width = '100%';
+        div.style.height = '100%';
+        div.style.background = `conic-gradient(from ${fromDeg}deg at 50% 50%, ${stops})`;
+        fo.appendChild(div);
+        g.appendChild(fo);
+        return g;
+    }
+    if (shape.type === 'lines') {
+        // Group of <line> elements. Each line may either pick a uniform
+        // color via `stroke`, or a smooth gradient along its own length via
+        // `colorStart` + `colorEnd` (a per-segment <linearGradient> is
+        // generated and referenced — useful to render an angularly-graded
+        // ring without color discontinuities at segment joints).
+        // shape.lines: [{x1, y1, x2, y2, stroke?, colorStart?, colorEnd?, opacity?}, ...]
+        const g = document.createElementNS(SVG_NS, 'g');
+        if (shape.strokeWidth != null) g.setAttribute('stroke-width', shape.strokeWidth);
+        if (shape.stroke != null) g.setAttribute('stroke', shape.stroke);
+        if (shape.opacity != null) g.setAttribute('opacity', shape.opacity);
+        if (shape.linecap != null) g.setAttribute('stroke-linecap', shape.linecap);
+
+        let defs = null;
+        let gradPrefix = null;
+
+        const lineList = shape.lines || [];
+        for (let i = 0; i < lineList.length; i++) {
+            const l = lineList[i];
+            const ln = document.createElementNS(SVG_NS, 'line');
+            ln.setAttribute('x1', l.x1); ln.setAttribute('y1', l.y1);
+            ln.setAttribute('x2', l.x2); ln.setAttribute('y2', l.y2);
+            if (l.colorStart != null && l.colorEnd != null) {
+                if (defs == null) {
+                    defs = document.createElementNS(SVG_NS, 'defs');
+                    gradPrefix = 'mntviz-grad-' + Math.random().toString(36).slice(2, 8);
+                    g.insertBefore(defs, g.firstChild);
+                }
+                const id = `${gradPrefix}-${i}`;
+                const grad = document.createElementNS(SVG_NS, 'linearGradient');
+                grad.setAttribute('id', id);
+                grad.setAttribute('gradientUnits', 'userSpaceOnUse');
+                grad.setAttribute('x1', l.x1); grad.setAttribute('y1', l.y1);
+                grad.setAttribute('x2', l.x2); grad.setAttribute('y2', l.y2);
+                const s0 = document.createElementNS(SVG_NS, 'stop');
+                s0.setAttribute('offset', '0%');   s0.setAttribute('stop-color', l.colorStart);
+                const s1 = document.createElementNS(SVG_NS, 'stop');
+                s1.setAttribute('offset', '100%'); s1.setAttribute('stop-color', l.colorEnd);
+                grad.append(s0, s1);
+                defs.appendChild(grad);
+                ln.setAttribute('stroke', `url(#${id})`);
+            } else if (l.stroke != null) {
+                ln.setAttribute('stroke', l.stroke);
+            }
+            if (l.strokeWidth != null) ln.setAttribute('stroke-width', l.strokeWidth);
+            if (l.opacity != null) ln.setAttribute('opacity', l.opacity);
+            g.appendChild(ln);
+        }
+        return g;
+    }
     return null;
 }
 
@@ -101,6 +236,7 @@ function _createShapeElement(shape) {
 function _renderShapes(svgTarget, shapes) {
     if (!shapes || shapes.length === 0) return;
     const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'mntviz-shapes-layer');
     for (const shape of shapes) {
         const el = _createShapeElement(shape);
         if (el) g.appendChild(el);
@@ -189,6 +325,8 @@ export async function plotMinutiae(host, config) {
         renderLegend(viewer, config.legend);
     }
 
+    _maybeEnablePicker(viewer, config);
+
     return viewer;
 }
 
@@ -214,6 +352,8 @@ export async function plotOverlay(host, config) {
         await overlay.load(config.overlaySrc);
         overlay.show();
     }
+
+    _maybeEnablePicker(viewer, config);
 
     return viewer;
 }
@@ -251,7 +391,24 @@ export async function plotHuv(host, config) {
     // Shape overlays
     _renderShapes(viewer.svgLayer, config.shapes);
 
+    _maybeEnablePicker(viewer, config);
+
     return viewer;
+}
+
+/**
+ * If config.picker is truthy, enable the picker on the viewer and forward
+ * picker events to config.onPickerChange. Lets every top-level plot* share
+ * the integration without duplicating boilerplate.
+ */
+function _maybeEnablePicker(viewer, config) {
+    if (!config.picker) return null;
+    const opts = (config.picker === true) ? {} : config.picker;
+    const picker = viewer.enablePointPicker(opts);
+    if (typeof config.onPickerChange === 'function') {
+        picker.on('change', config.onPickerChange);
+    }
+    return picker;
 }
 
 /**

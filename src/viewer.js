@@ -10,6 +10,7 @@
 
 import { MinutiaeInspector } from './minutiae-inspector.js';
 import { FieldProbe } from './field-probe.js';
+import { PointPicker } from './point-picker.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -561,6 +562,7 @@ export class Viewer {
     destroy() {
         this.disableMinutiaeInspector();
         this.disableFieldProbe();
+        if (this._pointPicker) { this._pointPicker.destroy(); this._pointPicker = null; }
         for (const [, { overlay }] of this._overlays) overlay.destroy();
         this._overlays.clear();
         this._abortController.abort();
@@ -614,6 +616,73 @@ export class Viewer {
         this._fieldProbe = null;
     }
 
+    /**
+     * Enable the point picker (click adds, right-click removes nearest).
+     * Idempotent: re-calls update options on the existing picker.
+     * The toggle button on the HUD reflects the active state.
+     *
+     * @param {object} [options] - Forwarded to PointPicker.
+     * @returns {import('./point-picker.js').PointPicker}
+     */
+    enablePointPicker(options = {}) {
+        this._ensurePickerButton();
+        if (this._pointPicker) {
+            this._pointPicker.setOptions(options);
+            if (options.points) this._pointPicker.setPoints(options.points);
+            this._pointPicker.enable();
+            this._setPickerButtonState(true);
+            return this._pointPicker;
+        }
+        this._pointPicker = new PointPicker(this, options);
+        if (options.points && options.points.length) {
+            this._pointPicker.setPoints(options.points);
+        }
+        this._pointPicker.enable();
+        this._setPickerButtonState(true);
+        return this._pointPicker;
+    }
+
+    /** Disable the picker but keep the instance + state for re-enabling. */
+    disablePointPicker() {
+        if (!this._pointPicker) return;
+        this._pointPicker.disable();
+        this._setPickerButtonState(false);
+    }
+
+    /** Toggle picker on/off; creates the picker on first toggle if missing. */
+    togglePointPicker(options = {}) {
+        if (this._pointPicker && this._pointPicker.isEnabled()) {
+            this.disablePointPicker();
+        } else {
+            this.enablePointPicker(options);
+        }
+        return this._pointPicker;
+    }
+
+    /** Active picker instance (or null). */
+    get pointPicker() { return this._pointPicker || null; }
+
+    /** Lazily create the HUD toggle button — kept off the DOM until opt-in. */
+    _ensurePickerButton() {
+        if (this._pickerBtn) return;
+        this._pickerBtn = _el('button', 'mntviz-export-svg-btn mntviz-picker-btn');
+        this._pickerBtn.textContent = 'Pick';
+        this._pickerBtn.setAttribute('aria-pressed', 'false');
+        this._pickerBtn.title = 'Enable point picker';
+        this._pickerBtn.addEventListener('click', () => this.togglePointPicker());
+        // Insert before the SVG export buttons.
+        this._exportBtnWrap.insertBefore(this._pickerBtn, this._exportBtnWrap.firstChild);
+    }
+
+    _setPickerButtonState(active) {
+        if (!this._pickerBtn) return;
+        this._pickerBtn.classList.toggle('mntviz-active', active);
+        this._pickerBtn.setAttribute('aria-pressed', String(active));
+        this._pickerBtn.title = active
+            ? 'Picker on — double-click adds (drag for angle), right-click removes'
+            : 'Enable point picker';
+    }
+
     /* ── DOM construction ───────────────────────────────────── */
 
     _buildDOM() {
@@ -654,7 +723,7 @@ export class Viewer {
         this._zoomWrap.append(this._zoomField.wrap, this._rotationField.wrap);
         this._viewport.append(this._zoomWrap);
 
-        // SVG export buttons
+        // SVG export buttons (picker button added lazily on first enablePointPicker call)
         this._exportBtnWrap = _el('div', 'mntviz-export-btns');
 
         this._exportBtn = _el('button', 'mntviz-export-svg-btn');

@@ -338,6 +338,29 @@
     cursor: grabbing !important;
 }
 
+/* Point-picker active indicator */
+.mntviz-viewport.mntviz-picker-active {
+    cursor: crosshair !important;
+    box-shadow: inset 0 0 0 2px rgba(34, 197, 94, 0.35);
+}
+
+.mntviz-viewport.mntviz-picker-active:active {
+    cursor: grabbing !important;
+}
+
+/* Picker toggle button (HUD) — only shown when opt-in via enablePointPicker */
+.mntviz-picker-btn.mntviz-active {
+    background: rgba(34, 197, 94, 0.85);
+    color: #fff;
+    border-color: rgba(34, 197, 94, 1);
+}
+
+/* Ad-hoc shapes (passed via plot_huv shapes=...) — strokes stay screen-sized
+   regardless of zoom so circles/segments don't fatten/thin oddly. */
+.mntviz-shapes-layer * {
+    vector-effect: non-scaling-stroke;
+}
+
 /* ── Minutiae marker highlight (hover/selected) ───────── */
 
 .mntviz-mnt-marker,
