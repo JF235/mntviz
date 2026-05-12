@@ -433,6 +433,13 @@ export async function plotHuv(host, config) {
             insertBefore: viewer.svgLayer,
         });
         await overlay.load(config.overlaySrc);
+        // Match the dataloader thumbnails: when the caller asks for
+        // pixelated, propagate to the overlay canvas so zoomed view
+        // preserves NPZ-cell blockiness (the base image already gets
+        // `image-rendering: pixelated` from .mntviz-img-layer in mntviz.css).
+        if (config.pixelated && overlay.setRenderMode) {
+            overlay.setRenderMode('pixelated');
+        }
         overlay.show();
     }
 
