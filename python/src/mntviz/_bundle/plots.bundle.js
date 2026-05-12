@@ -657,6 +657,9 @@ var FieldProbe = class {
   /* ── Value reading ───────────────────────────────────────── */
   /**
    * Read the scalar value at (x, y) from an overlay.
+   * ``x``/``y`` come in image-space. When the overlay's raw resolution
+   * differs from the image (e.g. minutiae channels at grid res), we scale
+   * the coordinates before indexing rawData.
    * Returns a number (0-255 raw) for grayscale overlays, or null if out of bounds.
    */
   _readValue(overlay, opts, x, y) {
@@ -664,6 +667,11 @@ var FieldProbe = class {
     if (raw) {
       const w = overlay.rawWidth;
       const h = overlay.rawHeight;
+      const imgSize = this._viewer.imageSize;
+      if (imgSize.width && imgSize.height && (w !== imgSize.width || h !== imgSize.height)) {
+        x = Math.floor(x * w / imgSize.width);
+        y = Math.floor(y * h / imgSize.height);
+      }
       if (x < 0 || y < 0 || x >= w || y >= h) return null;
       return raw[y * w + x];
     }
@@ -12219,6 +12227,7 @@ function applyColormap(gray, width, height, cmapName, opts = {}) {
   const fadeGamma = opts.fadeGamma ?? 1;
   const invert = !!opts.invert;
   const valueLUT = opts.valueLUT ?? null;
+  const hideBg = opts.hideBg ?? true;
   const n = width * height;
   const rgba = new Uint8ClampedArray(n * 4);
   let alphaLUT = null;
@@ -12232,7 +12241,7 @@ function applyColormap(gray, width, height, cmapName, opts = {}) {
     const stretched = valueLUT ? valueLUT[gray[i]] : gray[i];
     const v = invert ? 255 - stretched : stretched;
     const a = alphaArr ? alphaArr[i] : v;
-    if (a === 0 && v === 0) continue;
+    if (hideBg && a === 0 && v === 0) continue;
     const li = v * 4;
     rgba[i * 4] = lut[li];
     rgba[i * 4 + 1] = lut[li + 1];
@@ -12264,6 +12273,7 @@ var OverlayLayer = class {
     this._alphaMode = options.alpha || "value";
     this._fadeGamma = options.fadeGamma ?? 1;
     this._invert = !!options.invert;
+    this._hideBg = options.hideBg ?? true;
     this._autoStretch = !!options.autoStretch;
     this._stretchLow = options.stretchLow ?? 0.01;
     this._stretchHigh = options.stretchHigh ?? 0.99;
@@ -12376,6 +12386,34 @@ var OverlayLayer = class {
     if (next === this._invert) return;
     this._invert = next;
     if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * Toggle whether the no-data sentinel (byte 0) is rendered transparent.
+   * Cheap — only triggers a redraw from cached rawData, no re-fetch.
+   * @param {boolean} hide
+   */
+  setHideBg(hide) {
+    const next = !!hide;
+    if (next === this._hideBg) return;
+    this._hideBg = next;
+    if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * Switch the display-time upsampling between NN (pixelated) and the
+   * browser's default smoothing (bilinear). The canvas backing stays at the
+   * source PNG resolution (grid res for minutiae layers); CSS scaling on
+   * the canvas element is what actually performs the upsample at draw time.
+   * Toggle is free — no fetch, no canvas re-render.
+   * @param {'pixelated'|'interp'} mode
+   */
+  setRenderMode(mode) {
+    if (mode === "pixelated") {
+      this._canvas.classList.add("mntviz-render-pixelated");
+      this._canvas.classList.remove("mntviz-render-interp");
+    } else {
+      this._canvas.classList.add("mntviz-render-interp");
+      this._canvas.classList.remove("mntviz-render-pixelated");
+    }
   }
   /**
    * Toggle percentile-based auto-stretch of the input range.
@@ -12540,7 +12578,8 @@ var OverlayLayer = class {
         alphaData: this._alphaData || null,
         fadeGamma: this._fadeGamma,
         invert: this._invert,
-        valueLUT: this._stretchLUT
+        valueLUT: this._stretchLUT,
+        hideBg: this._hideBg
       }
     );
     const ctx = this._canvas.getContext("2d");
@@ -14009,11 +14048,138 @@ function _indexMarkersByPair(svgLayer) {
   return map;
 }
 
-// src/plots.js
+// src/singularity-renderer.js
 var SVG_NS8 = "http://www.w3.org/2000/svg";
+var DEFAULTS6 = {
+  markerSize: 5,
+  lineWidth: 1.5,
+  segmentLength: 12,
+  baseOpacity: 1
+};
+var SingularityRenderer = class {
+  /**
+   * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer.
+   */
+  constructor(svgElement) {
+    this._svg = svgElement;
+    this._viewport = svgElement.closest(".mntviz-viewport") || svgElement.parentNode;
+    this._tooltip = null;
+    this._hideTimer = null;
+  }
+  _ensureTooltip() {
+    if (this._tooltip) return;
+    const tip = document.createElement("div");
+    tip.className = "mntviz-inspector-tooltip";
+    this._viewport.appendChild(tip);
+    this._tooltip = tip;
+  }
+  _showTooltip(html, markerEl) {
+    this._ensureTooltip();
+    clearTimeout(this._hideTimer);
+    this._tooltip.innerHTML = html;
+    this._tooltip.classList.add("mntviz-inspector-visible");
+    this._positionTooltip(markerEl);
+  }
+  _hideTooltipSoon() {
+    clearTimeout(this._hideTimer);
+    this._hideTimer = setTimeout(() => {
+      if (this._tooltip) {
+        this._tooltip.classList.remove("mntviz-inspector-visible");
+      }
+    }, 60);
+  }
+  _positionTooltip(markerEl) {
+    const mr = markerEl.getBoundingClientRect();
+    const vr = this._viewport.getBoundingClientRect();
+    const cx = mr.left + mr.width / 2 - vr.left;
+    const cy = mr.top + mr.height / 2 - vr.top;
+    const tw = this._tooltip.offsetWidth;
+    const th = this._tooltip.offsetHeight;
+    let left = cx + 15;
+    let top = cy - th / 2;
+    if (left + tw > vr.width) left = cx - tw - 15;
+    if (left < 5) left = 5;
+    if (top < 5) top = 5;
+    if (top + th > vr.height - 5) top = vr.height - th - 5;
+    this._tooltip.style.left = `${left}px`;
+    this._tooltip.style.top = `${top}px`;
+  }
+  /**
+   * Draw singularity points (core and delta).
+   *
+   * @param {Array<{type: string, x: number, y: number, angles: number[]}>} singularities
+   * @param {string} color - CSS color.
+   * @param {object} [options] - Override defaults.
+   */
+  draw(singularities, color, options = {}) {
+    const opts = { ...DEFAULTS6, ...options };
+    const { markerSize, lineWidth, segmentLength, baseOpacity } = opts;
+    const g = document.createElementNS(SVG_NS8, "g");
+    g.setAttribute("stroke", color);
+    g.setAttribute("fill", "none");
+    g.setAttribute("stroke-width", lineWidth);
+    g.setAttribute("stroke-linecap", "round");
+    g.setAttribute("stroke-linejoin", "round");
+    for (const s of singularities) {
+      const { type, x, y, angles } = s;
+      const conf = typeof s.confidence === "number" ? s.confidence : 1;
+      const sg = document.createElementNS(SVG_NS8, "g");
+      sg.setAttribute("opacity", baseOpacity * conf);
+      sg.classList.add("mntviz-sin-marker", "mntviz-mnt-marker");
+      sg.style.pointerEvents = "auto";
+      sg.style.cursor = "crosshair";
+      const hit = document.createElementNS(SVG_NS8, "circle");
+      hit.setAttribute("cx", x);
+      hit.setAttribute("cy", y);
+      hit.setAttribute("r", markerSize + 4);
+      hit.setAttribute("fill", "transparent");
+      hit.setAttribute("stroke", "none");
+      sg.appendChild(hit);
+      const visual = document.createElementNS(SVG_NS8, "g");
+      visual.classList.add("mntviz-mnt-visual");
+      const shape = type === "delta" ? "triangle" : "circle";
+      const marker = createMarkerShape(shape, x, y, markerSize);
+      visual.appendChild(marker);
+      for (const angle of angles) {
+        const rad = angle * (Math.PI / 180);
+        const xEnd = x + segmentLength * Math.cos(rad);
+        const yEnd = y - segmentLength * Math.sin(rad);
+        const line = document.createElementNS(SVG_NS8, "line");
+        line.setAttribute("x1", x);
+        line.setAttribute("y1", y);
+        line.setAttribute("x2", xEnd);
+        line.setAttribute("y2", yEnd);
+        visual.appendChild(line);
+      }
+      sg.appendChild(visual);
+      const angsStr = angles.map((a) => `${Math.round(a)}\xB0`).join(", ");
+      const html = `<span>${type.toUpperCase()}</span>  <span>x:</span> ${Math.round(x)}  <span>y:</span> ${Math.round(y)}<br><span>angle${angles.length > 1 ? "s" : ""}:</span> ${angsStr}<br><span>conf:</span> ${(conf * 100).toFixed(0)}`;
+      sg.addEventListener("mouseenter", () => {
+        sg.classList.add("mntviz-mnt-highlighted");
+        this._showTooltip(html, sg);
+      });
+      sg.addEventListener("mouseleave", () => {
+        sg.classList.remove("mntviz-mnt-highlighted");
+        this._hideTooltipSoon();
+      });
+      g.appendChild(sg);
+    }
+    this._svg.appendChild(g);
+  }
+  /** Remove all drawn singularities. */
+  clear() {
+    this._svg.innerHTML = "";
+    if (this._tooltip) {
+      this._tooltip.classList.remove("mntviz-inspector-visible");
+    }
+  }
+};
+
+// src/plots.js
+var SVG_NS9 = "http://www.w3.org/2000/svg";
 function _createShapeElement(shape) {
   if (shape.type === "polygon") {
-    const poly = document.createElementNS(SVG_NS8, "polygon");
+    const poly = document.createElementNS(SVG_NS9, "polygon");
     poly.setAttribute("points", shape.points.map((p) => p.join(",")).join(" "));
     poly.setAttribute("stroke", shape.stroke || "#ff0000");
     poly.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -14022,7 +14188,7 @@ function _createShapeElement(shape) {
     return poly;
   }
   if (shape.type === "circle") {
-    const c = document.createElementNS(SVG_NS8, "circle");
+    const c = document.createElementNS(SVG_NS9, "circle");
     c.setAttribute("cx", shape.x);
     c.setAttribute("cy", shape.y);
     c.setAttribute("r", shape.r != null ? shape.r : 3);
@@ -14033,16 +14199,16 @@ function _createShapeElement(shape) {
     return c;
   }
   if (shape.type === "cross") {
-    const g = document.createElementNS(SVG_NS8, "g");
+    const g = document.createElementNS(SVG_NS9, "g");
     g.setAttribute("stroke", shape.stroke || "#00ff00");
     g.setAttribute("stroke-width", shape.strokeWidth || 1);
     const s = shape.size || 10;
-    const h = document.createElementNS(SVG_NS8, "line");
+    const h = document.createElementNS(SVG_NS9, "line");
     h.setAttribute("x1", shape.x - s / 2);
     h.setAttribute("y1", shape.y);
     h.setAttribute("x2", shape.x + s / 2);
     h.setAttribute("y2", shape.y);
-    const v = document.createElementNS(SVG_NS8, "line");
+    const v = document.createElementNS(SVG_NS9, "line");
     v.setAttribute("x1", shape.x);
     v.setAttribute("y1", shape.y - s / 2);
     v.setAttribute("x2", shape.x);
@@ -14052,13 +14218,13 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "minutia") {
-    const g = document.createElementNS(SVG_NS8, "g");
+    const g = document.createElementNS(SVG_NS9, "g");
     const color = shape.stroke || "#00ff00";
     g.setAttribute("stroke", color);
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-width", shape.strokeWidth || 1.5);
     const r = shape.radius || 6;
-    const circle = document.createElementNS(SVG_NS8, "circle");
+    const circle = document.createElementNS(SVG_NS9, "circle");
     circle.setAttribute("cx", shape.x);
     circle.setAttribute("cy", shape.y);
     circle.setAttribute("r", r);
@@ -14067,7 +14233,7 @@ function _createShapeElement(shape) {
     const rad = (shape.angle || 0) * Math.PI / 180;
     const dx = Math.cos(rad) * segLen;
     const dy = Math.sin(rad) * segLen;
-    const line = document.createElementNS(SVG_NS8, "line");
+    const line = document.createElementNS(SVG_NS9, "line");
     line.setAttribute("x1", shape.x);
     line.setAttribute("y1", shape.y);
     line.setAttribute("x2", shape.x + dx);
@@ -14077,7 +14243,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "path") {
-    const path = document.createElementNS(SVG_NS8, "path");
+    const path = document.createElementNS(SVG_NS9, "path");
     path.setAttribute("d", shape.d);
     path.setAttribute("stroke", shape.stroke || "#ff0000");
     path.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -14086,7 +14252,7 @@ function _createShapeElement(shape) {
     return path;
   }
   if (shape.type === "conic-ring") {
-    const g = document.createElementNS(SVG_NS8, "g");
+    const g = document.createElementNS(SVG_NS9, "g");
     if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
     const cx = shape.x, cy = shape.y, r = shape.r;
     const sw = shape.strokeWidth != null ? shape.strokeWidth : 2;
@@ -14094,22 +14260,22 @@ function _createShapeElement(shape) {
     const bx = cx - r - pad, by = cy - r - pad;
     const bs = (r + pad) * 2;
     const maskId = "mntviz-conic-mask-" + Math.random().toString(36).slice(2, 10);
-    const defs = document.createElementNS(SVG_NS8, "defs");
-    const mask = document.createElementNS(SVG_NS8, "mask");
+    const defs = document.createElementNS(SVG_NS9, "defs");
+    const mask = document.createElementNS(SVG_NS9, "mask");
     mask.setAttribute("id", maskId);
     mask.setAttribute("maskUnits", "userSpaceOnUse");
     mask.setAttribute("x", bx);
     mask.setAttribute("y", by);
     mask.setAttribute("width", bs);
     mask.setAttribute("height", bs);
-    const bg = document.createElementNS(SVG_NS8, "rect");
+    const bg = document.createElementNS(SVG_NS9, "rect");
     bg.setAttribute("x", bx);
     bg.setAttribute("y", by);
     bg.setAttribute("width", bs);
     bg.setAttribute("height", bs);
     bg.setAttribute("fill", "black");
     mask.appendChild(bg);
-    const ringCircle = document.createElementNS(SVG_NS8, "circle");
+    const ringCircle = document.createElementNS(SVG_NS9, "circle");
     ringCircle.setAttribute("cx", cx);
     ringCircle.setAttribute("cy", cy);
     ringCircle.setAttribute("r", r);
@@ -14132,7 +14298,7 @@ function _createShapeElement(shape) {
       stops = String(shape.gradient || "red, yellow, lime, cyan, blue, magenta, red");
     }
     const fromDeg = shape.fromAngle != null ? shape.fromAngle : 0;
-    const fo = document.createElementNS(SVG_NS8, "foreignObject");
+    const fo = document.createElementNS(SVG_NS9, "foreignObject");
     fo.setAttribute("x", bx);
     fo.setAttribute("y", by);
     fo.setAttribute("width", bs);
@@ -14148,7 +14314,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "lines") {
-    const g = document.createElementNS(SVG_NS8, "g");
+    const g = document.createElementNS(SVG_NS9, "g");
     if (shape.strokeWidth != null) g.setAttribute("stroke-width", shape.strokeWidth);
     if (shape.stroke != null) g.setAttribute("stroke", shape.stroke);
     if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
@@ -14158,29 +14324,29 @@ function _createShapeElement(shape) {
     const lineList = shape.lines || [];
     for (let i = 0; i < lineList.length; i++) {
       const l = lineList[i];
-      const ln = document.createElementNS(SVG_NS8, "line");
+      const ln = document.createElementNS(SVG_NS9, "line");
       ln.setAttribute("x1", l.x1);
       ln.setAttribute("y1", l.y1);
       ln.setAttribute("x2", l.x2);
       ln.setAttribute("y2", l.y2);
       if (l.colorStart != null && l.colorEnd != null) {
         if (defs == null) {
-          defs = document.createElementNS(SVG_NS8, "defs");
+          defs = document.createElementNS(SVG_NS9, "defs");
           gradPrefix = "mntviz-grad-" + Math.random().toString(36).slice(2, 8);
           g.insertBefore(defs, g.firstChild);
         }
         const id = `${gradPrefix}-${i}`;
-        const grad = document.createElementNS(SVG_NS8, "linearGradient");
+        const grad = document.createElementNS(SVG_NS9, "linearGradient");
         grad.setAttribute("id", id);
         grad.setAttribute("gradientUnits", "userSpaceOnUse");
         grad.setAttribute("x1", l.x1);
         grad.setAttribute("y1", l.y1);
         grad.setAttribute("x2", l.x2);
         grad.setAttribute("y2", l.y2);
-        const s0 = document.createElementNS(SVG_NS8, "stop");
+        const s0 = document.createElementNS(SVG_NS9, "stop");
         s0.setAttribute("offset", "0%");
         s0.setAttribute("stop-color", l.colorStart);
-        const s1 = document.createElementNS(SVG_NS8, "stop");
+        const s1 = document.createElementNS(SVG_NS9, "stop");
         s1.setAttribute("offset", "100%");
         s1.setAttribute("stop-color", l.colorEnd);
         grad.append(s0, s1);
@@ -14199,7 +14365,7 @@ function _createShapeElement(shape) {
 }
 function _renderShapes(svgTarget, shapes) {
   if (!shapes || shapes.length === 0) return;
-  const g = document.createElementNS(SVG_NS8, "g");
+  const g = document.createElementNS(SVG_NS9, "g");
   g.setAttribute("class", "mntviz-shapes-layer");
   for (const shape of shapes) {
     const el = _createShapeElement(shape);
@@ -14217,7 +14383,7 @@ function renderLegend(viewer, items) {
     row.classList.add("mntviz-legend-item");
     const size = 16;
     const r = 5;
-    const svg = document.createElementNS(SVG_NS8, "svg");
+    const svg = document.createElementNS(SVG_NS9, "svg");
     svg.setAttribute("width", size);
     svg.setAttribute("height", size);
     svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
@@ -14250,6 +14416,29 @@ async function plotMinutiae(host, config) {
       patchMode: "visible",
       ...config.inspectorOptions ?? {}
     });
+  }
+  if (config.legend) {
+    renderLegend(viewer, config.legend);
+  }
+  _maybeEnablePicker(viewer, config);
+  return viewer;
+}
+async function plotSingularities(host, config) {
+  const viewer = new Viewer(host, { minimap: true });
+  await viewer.loadImage(config.imageSrc);
+  const renderer = new SingularityRenderer(viewer.svgLayer);
+  const baseOpts = config.rendererOptions ?? {};
+  const layers = Array.isArray(config.layers) && config.layers.length ? config.layers : Array.isArray(config.singularities) ? [{
+    singularities: config.singularities,
+    color: config.color ?? "#22c55e",
+    options: {}
+  }] : [];
+  for (const layer of layers) {
+    renderer.draw(
+      layer.singularities ?? [],
+      layer.color ?? "#22c55e",
+      { ...baseOpts, ...layer.options ?? {} }
+    );
   }
   if (config.legend) {
     renderLegend(viewer, config.legend);
@@ -14308,18 +14497,18 @@ function _loadImageDimensions(src) {
   });
 }
 function _createStaticHuvSvg(config, w, h) {
-  const svg = document.createElementNS(SVG_NS8, "svg");
+  const svg = document.createElementNS(SVG_NS9, "svg");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   if (config.pixelated) svg.style.imageRendering = "pixelated";
-  const bgImage = document.createElementNS(SVG_NS8, "image");
+  const bgImage = document.createElementNS(SVG_NS9, "image");
   bgImage.setAttribute("href", config.imageSrc);
   bgImage.setAttribute("width", w);
   bgImage.setAttribute("height", h);
   if (config.pixelated) bgImage.setAttribute("image-rendering", "pixelated");
   svg.appendChild(bgImage);
   if (config.overlaySrc) {
-    const ovImage = document.createElementNS(SVG_NS8, "image");
+    const ovImage = document.createElementNS(SVG_NS9, "image");
     ovImage.setAttribute("href", config.overlaySrc);
     ovImage.setAttribute("width", w);
     ovImage.setAttribute("height", h);
@@ -14328,7 +14517,7 @@ function _createStaticHuvSvg(config, w, h) {
     svg.appendChild(ovImage);
   }
   if (config.arrows && config.arrows.length > 0) {
-    const arrowGroup = document.createElementNS(SVG_NS8, "g");
+    const arrowGroup = document.createElementNS(SVG_NS9, "g");
     svg.appendChild(arrowGroup);
     const uvRenderer = new UVFieldRenderer(arrowGroup);
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
@@ -14403,5 +14592,6 @@ export {
   plotMatch,
   plotMinutiae,
   plotOverlay,
+  plotSingularities,
   renderLegend
 };

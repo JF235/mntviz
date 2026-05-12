@@ -15,6 +15,7 @@ import { SegmentsRenderer } from './segments-renderer.js';
 import { OverlayLayer } from './overlay.js';
 import { UVFieldRenderer } from './uv-renderer.js';
 import { MatchViewer } from './match-viewer.js';
+import { SingularityRenderer } from './singularity-renderer.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -319,6 +320,58 @@ export async function plotMinutiae(host, config) {
             patchMode: 'visible',
             ...(config.inspectorOptions ?? {}),
         });
+    }
+
+    if (config.legend) {
+        renderLegend(viewer, config.legend);
+    }
+
+    _maybeEnablePicker(viewer, config);
+
+    return viewer;
+}
+
+/**
+ * Render singularity (core/delta) markers over a background image.
+ *
+ * @param {HTMLElement} host
+ * @param {Object} config
+ * @param {string}  config.imageSrc                 - Background image data URI.
+ * @param {Array}   [config.layers]                 - Per-annotator layers:
+ *                  ``[{ singularities, color, options? }, ...]``. Each layer
+ *                  is drawn with its own color/options — used to overlay
+ *                  multiple annotators (verifinger vs poincare etc.).
+ * @param {Array}   [config.singularities]          - Single-layer shortcut:
+ *                  pass a flat array of singularities instead of ``layers``.
+ * @param {string}  [config.color]                  - Color when using
+ *                  ``singularities`` shortcut.
+ * @param {Object}  [config.rendererOptions]        - Defaults applied to every
+ *                  layer; per-layer ``options`` override these.
+ * @param {Array}   [config.legend]                 - Legend items
+ *                  ``[{ label, color, shape }]``. Drawn via renderLegend.
+ * @returns {Promise<Viewer>}
+ */
+export async function plotSingularities(host, config) {
+    const viewer = new Viewer(host, { minimap: true });
+    await viewer.loadImage(config.imageSrc);
+
+    const renderer = new SingularityRenderer(viewer.svgLayer);
+    const baseOpts = config.rendererOptions ?? {};
+
+    const layers = Array.isArray(config.layers) && config.layers.length
+        ? config.layers
+        : (Array.isArray(config.singularities)
+            ? [{ singularities: config.singularities,
+                 color: config.color ?? '#22c55e',
+                 options: {} }]
+            : []);
+
+    for (const layer of layers) {
+        renderer.draw(
+            layer.singularities ?? [],
+            layer.color ?? '#22c55e',
+            { ...baseOpts, ...(layer.options ?? {}) },
+        );
     }
 
     if (config.legend) {

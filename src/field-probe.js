@@ -146,14 +146,22 @@ export class FieldProbe {
 
     /**
      * Read the scalar value at (x, y) from an overlay.
+     * ``x``/``y`` come in image-space. When the overlay's raw resolution
+     * differs from the image (e.g. minutiae channels at grid res), we scale
+     * the coordinates before indexing rawData.
      * Returns a number (0-255 raw) for grayscale overlays, or null if out of bounds.
      */
     _readValue(overlay, opts, x, y) {
         const raw = overlay.rawData;
         if (raw) {
-            // Grayscale mode: direct array lookup
             const w = overlay.rawWidth;
             const h = overlay.rawHeight;
+            const imgSize = this._viewer.imageSize;
+            if (imgSize.width && imgSize.height &&
+                (w !== imgSize.width || h !== imgSize.height)) {
+                x = Math.floor(x * w / imgSize.width);
+                y = Math.floor(y * h / imgSize.height);
+            }
             if (x < 0 || y < 0 || x >= w || y >= h) return null;
             return raw[y * w + x];
         }

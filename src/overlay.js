@@ -32,6 +32,11 @@ export class OverlayLayer {
         this._alphaMode = options.alpha || 'value';  // 'value' | 'opaque'
         this._fadeGamma = options.fadeGamma ?? 1.0;
         this._invert = !!options.invert;
+        // When true (default), source bytes with value 0 are rendered transparent
+        // (no-data sentinel from the scalar renderer). When false, byte 0 is
+        // treated as value 0.0 and colored by the colormap — useful when the
+        // source 0 is meaningful data (quality/mask outside the print).
+        this._hideBg = options.hideBg ?? true;
         // Auto-stretch: percentile-based per-image dynamic-range expansion.
         // When on, a 256-entry LUT mapping [p_lo, p_hi] → [0, 255] is built from
         // the loaded raw bytes and used at draw time.
@@ -171,6 +176,36 @@ export class OverlayLayer {
         if (next === this._invert) return;
         this._invert = next;
         if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * Toggle whether the no-data sentinel (byte 0) is rendered transparent.
+     * Cheap — only triggers a redraw from cached rawData, no re-fetch.
+     * @param {boolean} hide
+     */
+    setHideBg(hide) {
+        const next = !!hide;
+        if (next === this._hideBg) return;
+        this._hideBg = next;
+        if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * Switch the display-time upsampling between NN (pixelated) and the
+     * browser's default smoothing (bilinear). The canvas backing stays at the
+     * source PNG resolution (grid res for minutiae layers); CSS scaling on
+     * the canvas element is what actually performs the upsample at draw time.
+     * Toggle is free — no fetch, no canvas re-render.
+     * @param {'pixelated'|'interp'} mode
+     */
+    setRenderMode(mode) {
+        if (mode === 'pixelated') {
+            this._canvas.classList.add('mntviz-render-pixelated');
+            this._canvas.classList.remove('mntviz-render-interp');
+        } else {
+            this._canvas.classList.add('mntviz-render-interp');
+            this._canvas.classList.remove('mntviz-render-pixelated');
+        }
     }
 
     /**
@@ -336,6 +371,7 @@ export class OverlayLayer {
                 fadeGamma: this._fadeGamma,
                 invert: this._invert,
                 valueLUT: this._stretchLUT,
+                hideBg: this._hideBg,
             },
         );
         const ctx = this._canvas.getContext('2d');

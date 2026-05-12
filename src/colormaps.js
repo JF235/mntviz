@@ -231,6 +231,10 @@ export const COLORMAP_NAMES = ["magma", "viridis", "RdYlGn", "Greens", "Reds", "
  *     before LUT and value→alpha lookup. Source bytes are not modified.
  * @param {Uint8ClampedArray|null} [opts.valueLUT=null] - Optional 256-entry remap
  *     applied to each input byte before invert/colormap (e.g. percentile auto-stretch).
+ * @param {boolean} [opts.hideBg=true] - If true, source bytes with value 0 stay
+ *     transparent (the renderer's no-data sentinel). If false, byte 0 is treated
+ *     as value 0.0 and rendered at colormap[0] with the alpha rule applied —
+ *     useful when the source value 0 is meaningful data the user wants to see.
  * @returns {ImageData} RGBA image data ready for putImageData.
  */
 export function applyColormap(gray, width, height, cmapName, opts = {}) {
@@ -240,6 +244,7 @@ export function applyColormap(gray, width, height, cmapName, opts = {}) {
     const fadeGamma = opts.fadeGamma ?? 1.0;
     const invert = !!opts.invert;
     const valueLUT = opts.valueLUT ?? null;
+    const hideBg = opts.hideBg ?? true;
     const n = width * height;
     const rgba = new Uint8ClampedArray(n * 4);
 
@@ -258,7 +263,7 @@ export function applyColormap(gray, width, height, cmapName, opts = {}) {
         const stretched = valueLUT ? valueLUT[gray[i]] : gray[i];
         const v = invert ? 255 - stretched : stretched;
         const a = alphaArr ? alphaArr[i] : v;
-        if (a === 0 && v === 0) continue;  // transparent
+        if (hideBg && a === 0 && v === 0) continue;  // transparent (no-data sentinel)
         const li = v * 4;
         rgba[i * 4]     = lut[li];
         rgba[i * 4 + 1] = lut[li + 1];

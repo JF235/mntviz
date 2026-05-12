@@ -1024,6 +1024,203 @@ def plot_mnt_match(
     )
 
 
+# ── Singularities ────────────────────────────────────────────
+
+
+def _normalize_singularities(data: Any) -> list[dict[str, Any]]:
+    """Normalize singularity input into the JS-side schema.
+
+    Accepts:
+      * iterable of dicts/Mappings with ``type``/``x``/``y``/``angles``
+        (and optional ``confidence``);
+      * iterable of objects with the same attributes (e.g. the
+        ``Singularity`` dataclass from ``extract_singularities``);
+      * iterable of sequences ``[type, x, y, angle, ...]`` — the trailing
+        slot may carry confidence when the angle count matches the type.
+
+    Always returns a list of plain dicts ready to be JSON-serialized.
+    """
+    if data is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(data):
+        if isinstance(item, Mapping):
+            t = item.get("type") or item.get("stype")
+            x = item.get("x")
+            y = item.get("y")
+            angles = item.get("angles")
+            conf = item.get("confidence")
+        elif hasattr(item, "stype") or hasattr(item, "type"):
+            t = getattr(item, "type", None) or getattr(item, "stype", None)
+            x = getattr(item, "x", None)
+            y = getattr(item, "y", None)
+            angles = getattr(item, "angles", None)
+            conf = getattr(item, "confidence", None)
+        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            if len(item) < 4:
+                raise ValueError(
+                    f"singularity at index {idx} needs at least [type, x, y, angle]"
+                )
+            t, x, y, *rest = item
+            angles = rest
+            conf = None
+        else:
+            raise TypeError(f"unsupported singularity at index {idx}: {type(item)}")
+
+        if t is None or x is None or y is None or angles is None:
+            raise ValueError(f"singularity at index {idx} is missing type/x/y/angles")
+
+        t = str(t).lower()
+        if isinstance(angles, (int, float)):
+            angles = [angles]
+        angles_list = [float(a) for a in angles]
+        expected = 3 if t == "delta" else 1
+        # Trailing field acts as confidence when the angle count overruns
+        # the expected count — same convention as parseSingularityText.
+        if len(angles_list) == expected + 1 and conf is None:
+            conf = angles_list.pop()
+        if len(angles_list) < expected:
+            raise ValueError(
+                f"singularity at index {idx} ({t}) needs {expected} angle(s),"
+                f" got {len(angles_list)}"
+            )
+        angles_list = angles_list[:expected]
+
+        rec: dict[str, Any] = {
+            "type": t, "x": float(x), "y": float(y),
+            "angles": angles_list,
+        }
+        if conf is not None:
+            rec["confidence"] = float(conf)
+        out.append(rec)
+    return out
+
+
+def plot_sing(
+    singularities: Any = None,
+    *,
+    layers: list[tuple[Any, str] | tuple[Any, str, dict]] | None = None,
+    layer_labels: list[str] | bool | None = None,
+    background_img: str | Path | None = None,
+    output_format: str = "html",
+    output_path: str | Path | None = None,
+    color: str = "#22c55e",
+    marker_size: float = 5.0,
+    segment_length: float = 12.0,
+    line_width: float = 1.5,
+    base_opacity: float = 1.0,
+    width: int | None = None,
+    height: int | None = None,
+    title: str | None = None,
+    picker: bool | dict | None = None,
+    initial_points: list[dict[str, Any]] | None = None,
+) -> str | MntVizFigure:
+    """Render fingerprint singularities (cores + deltas) over an image.
+
+    Mirrors :func:`plot_mnt` but uses ``SingularityRenderer`` on the JS side
+    so the convention matches the dashboard viewer exactly.
+
+    Pass ``singularities`` for a single layer, or ``layers`` for
+    side-by-side annotators::
+
+        plot_sing(layers=[(verifinger, '#22c55e'),
+                          (poincare,   '#f97316')],
+                  layer_labels=['verifinger', 'poincare'],
+                  background_img=image_path)
+    """
+    fmt = output_format.lower().strip()
+    if fmt not in {"html", "jupyter"}:
+        raise ValueError("output_format must be one of: html, jupyter")
+    if layers is not None and singularities is not None:
+        raise ValueError(
+            "singularities must be None when layers is provided"
+            " — include it in the layers list instead"
+        )
+    if layers is None and singularities is None:
+        raise TypeError("singularities is required when layers is not provided")
+
+    bg_uri, bg_w, bg_h = _image_to_data_uri(background_img)
+    w = width or bg_w or 1000
+    h = height or bg_h or 1000
+
+    layer_configs: list[dict[str, Any]] = []
+    if layers is not None:
+        if not layers:
+            raise ValueError("layers must not be empty")
+        for entry in layers:
+            if len(entry) == 3:
+                sings, layer_color, layer_opts = entry
+            elif len(entry) == 2:
+                sings, layer_color = entry
+                layer_opts = {}
+            else:
+                raise ValueError(
+                    "each layer must be (singularities, color) or"
+                    " (singularities, color, options)"
+                )
+            layer_configs.append({
+                "singularities": _normalize_singularities(sings),
+                "color": layer_color,
+                "options": layer_opts,
+            })
+    else:
+        layer_configs.append({
+            "singularities": _normalize_singularities(singularities),
+            "color": color,
+            "options": {},
+        })
+
+    legend_items: list[dict[str, str]] | None = None
+    if layer_labels is not None:
+        if isinstance(layer_labels, bool):
+            if layer_labels:
+                legend_names = [f"Layer {i}" for i in range(len(layer_configs))]
+            else:
+                legend_names = None
+        elif isinstance(layer_labels, list):
+            if len(layer_labels) != len(layer_configs):
+                raise ValueError(
+                    f"layer_labels length ({len(layer_labels)}) must match"
+                    f" layers count ({len(layer_configs)})"
+                )
+            legend_names = layer_labels
+        else:
+            raise TypeError("layer_labels must be a bool or list of strings")
+        if legend_names is not None:
+            legend_items = [
+                {"label": name, "color": lc["color"], "shape": "circle"}
+                for name, lc in zip(legend_names, layer_configs)
+            ]
+
+    config: dict[str, Any] = {
+        "imageSrc": bg_uri or _build_blank_background_data_uri(int(w), int(h)),
+        "layers": layer_configs,
+        "rendererOptions": {
+            "markerSize": marker_size,
+            "segmentLength": segment_length,
+            "lineWidth": line_width,
+            "baseOpacity": base_opacity,
+        },
+    }
+    if legend_items is not None:
+        config["legend"] = legend_items
+
+    if picker:
+        from .picker import build_picker_widget
+        return build_picker_widget(
+            "plotSingularities", config,
+            picker=picker, height=int(h), initial_points=initial_points,
+        )
+
+    html_inline, html_standalone = _build_runtime_html(
+        "plotSingularities", config, container_h=int(h), title=title,
+    )
+    return _emit_output(
+        html_inline=html_inline, html_standalone=html_standalone,
+        output_format=fmt, output_path=output_path,
+    )
+
+
 # ── Overlay & HUV ────────────────────────────────────────────
 
 

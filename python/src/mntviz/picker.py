@@ -32,7 +32,7 @@ _BUNDLE_CSS = _BUNDLE_DIR / "mntviz.css"
 _BRIDGE_TEMPLATE = r"""
 
 const __MNTVIZ_CSS__ = __CSS_JSON__;
-const __PLOT_FNS__ = { plotMinutiae, plotOverlay, plotHuv };
+const __PLOT_FNS__ = { plotMinutiae, plotOverlay, plotHuv, plotSingularities };
 
 function _ensureCss() {
     if (document.getElementById('mntviz-bundle-css')) return;
