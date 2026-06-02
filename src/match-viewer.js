@@ -34,6 +34,11 @@ const DEFAULTS = {
     patchSize: 128,
     patchDisplaySize: 192,
     showSegmentsOnLoad: false,
+    // Manual annotation hook. When set, called on every minutia-marker click as
+    // onMinutiaClick(side, index, minutia, event). Returning a truthy value
+    // suppresses the default paired-only popup behavior. Pairs can then be
+    // driven dynamically via setPairs() / getMarkerElement().
+    onMinutiaClick: null,
 };
 
 export class MatchViewer {
@@ -59,10 +64,11 @@ export class MatchViewer {
         this._xMatchLine = null;
         this._leftGhostCursor = null;
         this._rightGhostCursor = null;
-        this._ghostSourceSide = null;
+        this._ghostSources = { left: false, right: false };
         this._coupledActive = false;
         this._coupledAnchorSide = null;
         this._syncingCoupled = false;
+        this._warp = null;
         this._ac = new AbortController();
 
         this._buildDOM();
@@ -297,6 +303,11 @@ export class MatchViewer {
         this._leftMntByPair = _indexMarkersByPair(this._leftViewer.svgLayer);
         this._rightMntByPair = _indexMarkersByPair(this._rightViewer.svgLayer);
 
+        // Index markers by their minutia index (always present via _index) so
+        // manual-annotation code can highlight/recolor a marker by index.
+        this._leftMntByIndex = _indexMarkersByIndex(this._leftViewer.svgLayer);
+        this._rightMntByIndex = _indexMarkersByIndex(this._rightViewer.svgLayer);
+
         // Floating tooltip for segment hover info — anchored to the outer
         // container so it overlays both panels.
         this._segTooltip = _el('div', 'mntviz-seg-tooltip');
@@ -317,22 +328,7 @@ export class MatchViewer {
         this._segmentLines = [];
         this._segmentHitLines = [];
         for (let i = 0; i < opts.pairs.length; i++) {
-            const p = opts.pairs[i];
-            const line = document.createElementNS(SVG_NS, 'line');
-            line.classList.add('mntviz-match-segment');
-            line.setAttribute('stroke', p.color || opts.markerColor);
-            line.setAttribute('stroke-opacity', p.alpha != null ? p.alpha : 0.6);
-            line.setAttribute('stroke-width', p.width != null ? p.width : 1.0);
-            line.style.display = 'none';
-            this._overlaySvg.appendChild(line);
-            this._segmentLines.push(line);
-
-            const hitLine = document.createElementNS(SVG_NS, 'line');
-            hitLine.classList.add('mntviz-match-segment-hitbox');
-            hitLine.dataset.pairIndex = String(i);
-            hitLine.style.display = 'none';
-            this._overlaySvg.appendChild(hitLine);
-            this._segmentHitLines.push(hitLine);
+            this._buildPairSegment(opts.pairs[i], i);
         }
 
         this._bindEvents();
@@ -560,6 +556,229 @@ export class MatchViewer {
         this._el.innerHTML = '';
     }
 
+    /**
+     * Programmatically select a pair — same effect as clicking the matching
+     * minutia: highlights the connecting segment and opens the dual-patch
+     * popup. Unlike a direct click, the popup is centered on the midpoint
+     * of the connecting segment (between left and right minutiae).
+     * @param {number} pairIdx
+     */
+    selectPair(pairIdx) {
+        const pair = this._options.pairs[pairIdx];
+        if (!pair) return;
+        const leftM = this._options.leftMinutiae[pair.leftIdx];
+        const rightM = this._options.rightMinutiae[pair.rightIdx];
+        if (!leftM || !rightM) return;
+
+        // Midpoint between the two minutiae in container-relative coords.
+        let midX = 0, midY = 0, haveMid = false;
+        if (this._leftViewer && this._rightViewer && this._container) {
+            const lp = this._leftViewer.imageToElementCoords(leftM.x, leftM.y, this._container);
+            const rp = this._rightViewer.imageToElementCoords(rightM.x, rightM.y, this._container);
+            midX = (lp.x + rp.x) / 2;
+            midY = (lp.y + rp.y) / 2;
+            haveMid = true;
+        }
+
+        const cRect = this._container?.getBoundingClientRect();
+        const anchor = haveMid
+            ? { clientX: cRect.left + midX, clientY: cRect.top + midY }
+            : { clientX: 0, clientY: 0 };
+        this._showDualPatchPopup(leftM, rightM, pairIdx, anchor);
+
+        // _showDualPatchPopup queues its own rAF anchored to the event (click-style,
+        // offset to one side). Queue another to override with centered placement
+        // — this runs after layout has settled in the same frame.
+        if (haveMid) {
+            requestAnimationFrame(() => {
+                const tipW = this._popup.offsetWidth;
+                const tipH = this._popup.offsetHeight;
+                const cR = this._container.getBoundingClientRect();
+                let left = midX - tipW / 2;
+                let top  = midY - tipH / 2;
+                if (left < 5) left = 5;
+                if (left + tipW > cR.width - 5) left = cR.width - tipW - 5;
+                if (top < 5) top = 5;
+                if (top + tipH > cR.height - 5) top = cR.height - tipH - 5;
+                this._popup.style.left = `${left}px`;
+                this._popup.style.top  = `${top}px`;
+            });
+        }
+    }
+
+    /* ── Manual annotation API ────────────────────────────── */
+
+    /**
+     * Return the minutia marker <g> element for a given side + index, or null.
+     * Useful for applying a transient highlight class (e.g. "armed").
+     * @param {'left'|'right'} side
+     * @param {number} index
+     * @returns {SVGGElement|null}
+     */
+    getMarkerElement(side, index) {
+        const map = side === 'left' ? this._leftMntByIndex : this._rightMntByIndex;
+        return (map && map.get(index)) || null;
+    }
+
+    /**
+     * Update the right→left rigid transform used by ghost-cursor mapping and
+     * coupled panning. Pass {angle, tx, ty} (mntviz convention) or null to
+     * disable. If coupled mode is active, the follower panel is re-synced live
+     * — so callers can stream a freshly estimated transform as the user works.
+     * @param {{angle:number, tx:number, ty:number}|null} t
+     */
+    setMatchTransform(t) {
+        this._options.matchTransform = _isValidMatchTransform(t)
+            ? { angle: t.angle, tx: t.tx, ty: t.ty }
+            : null;
+        if (this._coupledActive && this._coupledAnchorSide) {
+            const follower = this._coupledAnchorSide === 'left' ? 'right' : 'left';
+            this._applyCoupledFollower(follower);
+        }
+    }
+
+    /**
+     * Set the dominant rotation (degrees) used by the "Align" context action.
+     * @param {number|null} angle
+     */
+    setDominantAngle(angle) {
+        this._options.dominantAngle = Number.isFinite(angle) ? angle : null;
+    }
+
+    /**
+     * Install an elastic point-warp used by the ghost cursor instead of the
+     * rigid `matchTransform`. This maps a point in one panel's image coords to
+     * the other panel's — and, unlike the rigid transform, can interpolate
+     * marked correspondences exactly (e.g. MLS / TPS).
+     *
+     * Coupled panning and Align still use the rigid `matchTransform` /
+     * `dominantAngle` (they move a whole panel, which must stay rigid).
+     *
+     * @param {{rightToLeft:(x:number,y:number)=>{x:number,y:number},
+     *          leftToRight:(x:number,y:number)=>{x:number,y:number}}|null} warp
+     */
+    setWarp(warp) {
+        this._warp = (warp && typeof warp.rightToLeft === 'function'
+            && typeof warp.leftToRight === 'function') ? warp : null;
+    }
+
+    /**
+     * Snapshot the pan/zoom/rotation of both panels. Pair with setView() to
+     * preserve the framing across a rebuild (e.g. swapping the background image).
+     * @returns {{left:object|null, right:object|null}}
+     */
+    getView() {
+        const snap = (vw) => (vw ? {
+            tx: vw.viewState.translateX,
+            ty: vw.viewState.translateY,
+            scale: vw.viewState.scale,
+            rotation: vw.viewState.rotation,
+        } : null);
+        return { left: snap(this._leftViewer), right: snap(this._rightViewer) };
+    }
+
+    /**
+     * Restore a snapshot from getView() onto both panels. Assumes the images
+     * share dimensions with the snapshot (true for original↔enhanced of the
+     * same capture).
+     * @param {{left:object|null, right:object|null}} view
+     */
+    setView(view) {
+        const apply = (vw, s) => {
+            if (!vw || !s) return;
+            vw.setRotation(s.rotation);
+            vw.setScale(s.scale);
+            vw.setTranslate(s.tx, s.ty);
+        };
+        apply(this._leftViewer, view && view.left);
+        apply(this._rightViewer, view && view.right);
+        this._updateSegments();
+    }
+
+    /**
+     * Replace the full set of correspondences and rebuild segments + marker
+     * colors from scratch. Robust against arbitrary add/remove (no index-shift
+     * bookkeeping). Cheap for the small pair counts of manual annotation.
+     *
+     * Each pair: { leftIdx, rightIdx, color?, alpha?, width?, similarity? }.
+     * @param {Array<object>} pairs
+     */
+    setPairs(pairs) {
+        if (!this._leftViewer || !this._rightViewer) {
+            // Not loaded yet — stash so loadImages picks them up.
+            this._options.pairs = pairs.slice();
+            return;
+        }
+
+        // 1. Tear down existing segment DOM.
+        for (const line of this._segmentLines) line.remove();
+        for (const hit of this._segmentHitLines) hit.remove();
+        this._segmentLines = [];
+        this._segmentHitLines = [];
+        this._activePopupPairIdx = -1;
+
+        // 2. Reset every marker that was previously colored back to neutral.
+        this._resetAllMarkers();
+
+        // 3. Adopt the new pairs and recolor + tag the involved markers.
+        this._options.pairs = pairs.slice();
+        for (let i = 0; i < pairs.length; i++) {
+            const p = pairs[i];
+            const color = p.color || this._options.markerColor;
+            this._applyMarkerPair('left', p.leftIdx, color, i);
+            this._applyMarkerPair('right', p.rightIdx, color, i);
+            this._buildPairSegment(p, i);
+        }
+
+        // 4. Rebuild the pair_id → marker maps used by cross-panel hover.
+        this._leftMntByPair = _indexMarkersByPair(this._leftViewer.svgLayer);
+        this._rightMntByPair = _indexMarkersByPair(this._rightViewer.svgLayer);
+
+        // 5. Show all segments (manual mode wants them all visible).
+        this._showAllSegments();
+    }
+
+    /** Reset marker color/opacity/_pairIndex to the unpaired neutral state. */
+    _resetAllMarkers() {
+        const reset = (map, viewerOpts) => {
+            if (!map) return;
+            for (const [, el] of map) {
+                const m = minutiaDataMap.get(el);
+                if (!m) continue;
+                const baseColor = m._baseColor || this._options.markerColor;
+                el.setAttribute('stroke', baseColor);
+                m._color = baseColor;
+                m._pairIndex = -1;
+            }
+        };
+        reset(this._leftMntByIndex);
+        reset(this._rightMntByIndex);
+        // Also clear _pairIndex on the source option arrays so the popup logic
+        // (which reads options.leftMinutiae[...]._pairIndex) stays consistent.
+        for (const m of this._options.leftMinutiae) m._pairIndex = -1;
+        for (const m of this._options.rightMinutiae) m._pairIndex = -1;
+    }
+
+    /** Color + tag a single marker (and its source minutia) for pair `pairIdx`. */
+    _applyMarkerPair(side, idx, color, pairIdx) {
+        const el = this.getMarkerElement(side, idx);
+        const srcArr = side === 'left' ? this._options.leftMinutiae : this._options.rightMinutiae;
+        if (el) {
+            const m = minutiaDataMap.get(el);
+            if (m) {
+                // Remember the original color once so resets are exact.
+                if (m._baseColor == null) m._baseColor = m._color || this._options.markerColor;
+                el.setAttribute('stroke', color);
+                m._color = color;
+                m._pairIndex = pairIdx;
+            }
+        }
+        if (srcArr[idx]) {
+            srcArr[idx]._color = color;
+            srcArr[idx]._pairIndex = pairIdx;
+        }
+    }
+
     /* ── Event binding ────────────────────────────────────── */
 
     _bindEvents() {
@@ -588,18 +807,8 @@ export class MatchViewer {
         this._container.addEventListener('mouseleave', () => {
             this._hideGhostCursor();
         }, sig);
-        for (const line of this._segmentHitLines) {
-            line.addEventListener('mouseover', (e) => this._onMatchLineHoverIn(e), sig);
-            line.addEventListener('mouseout', (e) => this._onMatchLineHoverOut(e), sig);
-            line.addEventListener('mousemove', (e) => this._onOverlayPointerMove(e), sig);
-            // Hitbox lines have `pointer-events: stroke` to catch hover, which
-            // otherwise swallows wheel/mousedown and breaks zoom/pan + lets the
-            // browser start text selection. Forward those to the viewport below.
-            line.addEventListener('wheel', (e) => this._forwardToViewport(e), { passive: false, ...sig });
-            line.addEventListener('mousedown', (e) => this._forwardToViewport(e), sig);
-            line.addEventListener('dblclick', (e) => this._forwardToViewport(e), sig);
-            line.addEventListener('contextmenu', (e) => this._forwardToViewport(e), sig);
-        }
+        // Per-hitline listeners are attached in _buildPairSegment so segments
+        // created dynamically via setPairs() get them too.
 
         // Ctrl + wheel rotates the panel instead of zooming.
         // Capture phase + stopImmediatePropagation preempts the Viewer's own wheel-zoom.
@@ -711,7 +920,7 @@ export class MatchViewer {
 
     _onViewportPointerMove(e, side) {
         this._onHoverMove(e);
-        if (side === this._ghostSourceSide) {
+        if (side && this._ghostSources[side]) {
             this._updateGhostCursor(side, e);
         } else {
             this._hideGhostCursor();
@@ -721,7 +930,7 @@ export class MatchViewer {
     _onOverlayPointerMove(e) {
         this._onHoverMove(e);
         const side = this._inferPointerSide(e.clientX, e.clientY);
-        if (side === this._ghostSourceSide) {
+        if (side && this._ghostSources[side]) {
             this._updateGhostCursor(side, e);
         } else {
             this._hideGhostCursor();
@@ -890,6 +1099,16 @@ export class MatchViewer {
     }
 
     _mapMatchPoint(side, x, y) {
+        // Elastic warp takes precedence when installed (e.g. MLS from manual
+        // correspondences) — it can interpolate the marked pairs exactly.
+        if (this._warp) {
+            const mapped = side === 'right'
+                ? this._warp.rightToLeft(x, y)
+                : this._warp.leftToRight(x, y);
+            if (mapped && Number.isFinite(mapped.x) && Number.isFinite(mapped.y)) return mapped;
+            return null;
+        }
+
         const t = this._options.matchTransform;
         if (!t) return null;
         const angle = Number(t.angle);
@@ -967,7 +1186,7 @@ export class MatchViewer {
 
     _updateContextMenuButtons(side) {
         if (this._contextMenuGhostBtn) {
-            const ghostOn = side != null && this._ghostSourceSide === side;
+            const ghostOn = side != null && this._ghostSources[side];
             this._contextMenuGhostBtn.textContent = `${ghostOn ? '\u2713 ' : ''}Ghost`;
         }
         if (this._contextMenuCoupledBtn) {
@@ -979,8 +1198,12 @@ export class MatchViewer {
 
     _toggleGhostSource(side) {
         if (side !== 'left' && side !== 'right') return;
-        this._ghostSourceSide = this._ghostSourceSide === side ? null : side;
-        this._hideGhostCursor();
+        // Each side is an independent ghost source — enabling one no longer
+        // disables the other (mouse on either panel ghosts onto the opposite).
+        this._ghostSources[side] = !this._ghostSources[side];
+        // Only clear the ghost this source draws (on the opposite panel); leave
+        // the other source's ghost alone.
+        this._hideGhostCursor(side === 'left' ? 'right' : 'left');
     }
 
     _toggleCoupled(side) {
@@ -1130,6 +1353,13 @@ export class MatchViewer {
                 viewer._minutiaeInspector._collapse();
             }
 
+            // Manual-annotation hook: fires for ANY minutia (paired or not).
+            // A truthy return suppresses the default paired-only popup.
+            if (this._options.onMinutiaClick) {
+                const handled = this._options.onMinutiaClick(side, m._index, m, e);
+                if (handled) return;
+            }
+
             this._onMarkerClick(side, m, e);
             return;
         }
@@ -1195,6 +1425,44 @@ export class MatchViewer {
     }
 
     /* ── Segment management ───────────────────────────────── */
+
+    /**
+     * Create the (hidden) segment line + hitbox for pair `i` and append them
+     * to the overlay, wiring the hover/forwarding listeners. Pushes both into
+     * the parallel `_segmentLines` / `_segmentHitLines` arrays at index `i`.
+     */
+    _buildPairSegment(p, i) {
+        const sig = { signal: this._ac.signal };
+
+        const line = document.createElementNS(SVG_NS, 'line');
+        line.classList.add('mntviz-match-segment');
+        line.setAttribute('stroke', p.color || this._options.markerColor);
+        line.setAttribute('stroke-opacity', p.alpha != null ? p.alpha : 0.6);
+        line.setAttribute('stroke-width', p.width != null ? p.width : 1.0);
+        line.style.display = 'none';
+        this._overlaySvg.appendChild(line);
+        this._segmentLines[i] = line;
+
+        const hitLine = document.createElementNS(SVG_NS, 'line');
+        hitLine.classList.add('mntviz-match-segment-hitbox');
+        hitLine.dataset.pairIndex = String(i);
+        hitLine.style.display = 'none';
+        this._overlaySvg.appendChild(hitLine);
+        this._segmentHitLines[i] = hitLine;
+
+        hitLine.addEventListener('mouseover', (e) => this._onMatchLineHoverIn(e), sig);
+        hitLine.addEventListener('mouseout', (e) => this._onMatchLineHoverOut(e), sig);
+        hitLine.addEventListener('mousemove', (e) => this._onOverlayPointerMove(e), sig);
+        // Hitbox lines have `pointer-events: stroke` to catch hover, which
+        // otherwise swallows wheel/mousedown and breaks zoom/pan + lets the
+        // browser start text selection. Forward those to the viewport below.
+        hitLine.addEventListener('wheel', (e) => this._forwardToViewport(e), { passive: false, ...sig });
+        hitLine.addEventListener('mousedown', (e) => this._forwardToViewport(e), sig);
+        hitLine.addEventListener('dblclick', (e) => this._forwardToViewport(e), sig);
+        hitLine.addEventListener('contextmenu', (e) => this._forwardToViewport(e), sig);
+
+        return line;
+    }
 
     _showSegment(idx) {
         if (this._segmentLines[idx]) {
@@ -1626,6 +1894,18 @@ function _indexMarkersByPair(svgLayer) {
         const m = minutiaDataMap.get(el);
         if (m && m._pairIndex != null && m._pairIndex >= 0) {
             map.set(m._pairIndex, el);
+        }
+    }
+    return map;
+}
+
+/** Walk an SVG layer and index minutia <g> markers by their minutia _index. */
+function _indexMarkersByIndex(svgLayer) {
+    const map = new Map();
+    for (const el of svgLayer.querySelectorAll('.mntviz-mnt-marker')) {
+        const m = minutiaDataMap.get(el);
+        if (m && m._index != null) {
+            map.set(m._index, el);
         }
     }
     return map;
