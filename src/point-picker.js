@@ -254,9 +254,10 @@ export class PointPicker {
 
         const meta = {};
         if (distSq >= thr * thr) {
-            // CW image convention: y grows downward, so atan2(dy, dx) where
-            // dy is image-row delta directly yields the CW image angle.
-            const ang = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+            // ISO/.min convention: angle is CCW from +x with 90° = image top
+            // (y grows downward, so negate dy). Matches MinutiaeRenderer /
+            // SingularityRenderer, which draw the segment as y2 = y − sin(angle).
+            const ang = (Math.atan2(-dy, dx) * 180 / Math.PI + 360) % 360;
             meta.angle = ang;
         }
         this.addPoint(start.x, start.y, meta);
@@ -308,11 +309,11 @@ export class PointPicker {
             dot.setAttribute('fill', color);
             g.appendChild(dot);
 
-            // Direction segment (CW image: +sin = +y_down).
+            // Direction segment (ISO: CCW from +x, y2 = y − sin so 90° points up).
             if (p.angle != null && Number.isFinite(p.angle)) {
                 const rad = p.angle * Math.PI / 180;
                 const x2 = p.x + Math.cos(rad) * segLen;
-                const y2 = p.y + Math.sin(rad) * segLen;
+                const y2 = p.y - Math.sin(rad) * segLen;
                 const seg = document.createElementNS(SVG_NS, 'line');
                 seg.setAttribute('x1', p.x);
                 seg.setAttribute('y1', p.y);
