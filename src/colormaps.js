@@ -235,6 +235,11 @@ export const COLORMAP_NAMES = ["magma", "viridis", "RdYlGn", "Greens", "Reds", "
  *     transparent (the renderer's no-data sentinel). If false, byte 0 is treated
  *     as value 0.0 and rendered at colormap[0] with the alpha rule applied —
  *     useful when the source value 0 is meaningful data the user wants to see.
+ * @param {number|null} [opts.bgThreshold=null] - Tunable background cutoff in
+ *     byte units [0, 255], applied AFTER invert/valueLUT. When set, pixels with
+ *     value <= bgThreshold are rendered transparent (supersedes `hideBg`).
+ *     `-1` shows everything (hide nothing). `null` keeps the legacy byte-0
+ *     no-data sentinel governed by `hideBg`.
  * @returns {ImageData} RGBA image data ready for putImageData.
  */
 export function applyColormap(gray, width, height, cmapName, opts = {}) {
@@ -245,6 +250,7 @@ export function applyColormap(gray, width, height, cmapName, opts = {}) {
     const invert = !!opts.invert;
     const valueLUT = opts.valueLUT ?? null;
     const hideBg = opts.hideBg ?? true;
+    const bgThreshold = opts.bgThreshold ?? null;  // tunable cutoff (byte units); -1 = show all
     const n = width * height;
     const rgba = new Uint8ClampedArray(n * 4);
 
@@ -263,7 +269,12 @@ export function applyColormap(gray, width, height, cmapName, opts = {}) {
         const stretched = valueLUT ? valueLUT[gray[i]] : gray[i];
         const v = invert ? 255 - stretched : stretched;
         const a = alphaArr ? alphaArr[i] : v;
-        if (hideBg && a === 0 && v === 0) continue;  // transparent (no-data sentinel)
+        if (bgThreshold !== null) {
+            // Tunable background cutoff: -1 shows everything, else hide v <= t.
+            if (bgThreshold >= 0 && v <= bgThreshold) continue;
+        } else if (hideBg && a === 0 && v === 0) {
+            continue;  // legacy no-data sentinel (byte 0)
+        }
         const li = v * 4;
         rgba[i * 4]     = lut[li];
         rgba[i * 4 + 1] = lut[li + 1];

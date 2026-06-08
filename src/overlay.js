@@ -37,6 +37,10 @@ export class OverlayLayer {
         // treated as value 0.0 and colored by the colormap — useful when the
         // source 0 is meaningful data (quality/mask outside the print).
         this._hideBg = options.hideBg ?? true;
+        // Tunable background cutoff in byte units [0, 255]. When non-null,
+        // pixels with value <= _bgThreshold render transparent (supersedes
+        // _hideBg). -1 shows everything; null keeps the legacy byte-0 sentinel.
+        this._bgThreshold = options.bgThreshold ?? null;
         // Auto-stretch: percentile-based per-image dynamic-range expansion.
         // When on, a 256-entry LUT mapping [p_lo, p_hi] → [0, 255] is built from
         // the loaded raw bytes and used at draw time.
@@ -187,6 +191,21 @@ export class OverlayLayer {
         const next = !!hide;
         if (next === this._hideBg) return;
         this._hideBg = next;
+        if (this._rawData) this._applyAndDraw();
+    }
+
+    /**
+     * Set the tunable background cutoff (byte units [0, 255]). Pixels with
+     * value <= threshold render transparent. Pass -1 to show everything, or
+     * null to fall back to the legacy byte-0 no-data sentinel (`hideBg`).
+     * Cheap — redraws from cached rawData, no re-fetch.
+     * @param {number|null} threshold
+     */
+    setBgThreshold(threshold) {
+        const next = (threshold === null || threshold === undefined)
+            ? null : Number(threshold);
+        if (next === this._bgThreshold) return;
+        this._bgThreshold = next;
         if (this._rawData) this._applyAndDraw();
     }
 
@@ -372,6 +391,7 @@ export class OverlayLayer {
                 invert: this._invert,
                 valueLUT: this._stretchLUT,
                 hideBg: this._hideBg,
+                bgThreshold: this._bgThreshold,
             },
         );
         const ctx = this._canvas.getContext('2d');
