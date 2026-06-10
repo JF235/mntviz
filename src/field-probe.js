@@ -22,8 +22,9 @@ export class FieldProbe {
     /**
      * @param {import('./viewer.js').Viewer} viewer
      */
-    constructor(viewer) {
+    constructor(viewer, options = {}) {
         this._viewer = viewer;
+        this._showCoords = !!options.showCoords;   // prepend the integer pixel coordinate under the cursor
         this._active = false;
         this._ac = null;
         this._rafPending = false;
@@ -113,6 +114,7 @@ export class FieldProbe {
         }
 
         const lines = [];
+        if (this._showCoords) lines.push(`<span class="mntviz-probe-label">xy:</span> (${coords.x}, ${coords.y})`);
         for (const { name, overlay, opts } of this._viewer.getVisibleOverlays()) {
             const value = this._readValue(overlay, opts, coords.x, coords.y);
             if (value === null) continue;
