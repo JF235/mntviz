@@ -1807,10 +1807,12 @@ var Viewer = class {
    */
   setView(state = {}) {
     const v = this._view;
-    if (Number.isFinite(Number(state.scale))) v.scale = Math.min(Math.max(Number(state.scale), 0.1), 20);
-    if (Number.isFinite(Number(state.translateX))) v.translateX = Number(state.translateX);
-    if (Number.isFinite(Number(state.translateY))) v.translateY = Number(state.translateY);
-    if (Number.isFinite(Number(state.rotation))) v.rotation = _normalizeAngle180(state.rotation);
+    const num = (x) => x === null || x === void 0 || x === "" ? NaN : Number(x);
+    const scale = num(state.scale), tx = num(state.translateX), ty = num(state.translateY), r = num(state.rotation);
+    if (Number.isFinite(scale)) v.scale = Math.min(Math.max(scale, 0.1), 20);
+    if (Number.isFinite(tx)) v.translateX = tx;
+    if (Number.isFinite(ty)) v.translateY = ty;
+    if (Number.isFinite(r)) v.rotation = _normalizeAngle180(r);
     if (state.flipX != null) v.flipX = !!state.flipX;
     this._applyTransform();
   }
