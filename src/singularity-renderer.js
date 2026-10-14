@@ -9,8 +9,12 @@
  */
 
 import { createMarkerShape } from './minutiae-renderer.js';
+import { resolveTarget, clearOwned } from './render-target.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** Liga cada <g> de singularidade ao seu dado ({type, x, y, angles, confidence?, _index}). */
+export const singularityDataMap = new WeakMap();
 
 const DEFAULTS = {
     markerSize: 5,
@@ -21,16 +25,18 @@ const DEFAULTS = {
 
 export class SingularityRenderer {
     /**
-     * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer.
+     * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+     *        Camada da LayerStack (recomendado), elemento SVG próprio ou Viewer (SVG comum).
      */
     constructor(svgElement) {
-        this._svg = svgElement;
+        this._svg = resolveTarget(svgElement);
+        this._nodes = [];
         // Anchor the tooltip on the nearest .mntviz-viewport ancestor — that
         // element is the un-transformed positioning context. Attaching it to
         // svgElement.parentNode directly would put the tooltip inside the
         // zoom/pan-transformed canvas container, throwing off pixel positions
         // at any zoom level other than 1.
-        this._viewport = svgElement.closest('.mntviz-viewport') || svgElement.parentNode;
+        this._viewport = this._svg.closest('.mntviz-viewport') || this._svg.parentNode;
         this._tooltip = null;
         this._hideTimer = null;
     }
@@ -95,7 +101,7 @@ export class SingularityRenderer {
         g.setAttribute('stroke-linecap', 'round');
         g.setAttribute('stroke-linejoin', 'round');
 
-        for (const s of singularities) {
+        for (const [index, s] of singularities.entries()) {
             const { type, x, y, angles } = s;
             // Confidence (when present in the .sin) modulates per-singularity
             // opacity so weak detections fade out without being filtered.
@@ -110,6 +116,7 @@ export class SingularityRenderer {
             sg.classList.add('mntviz-sin-marker', 'mntviz-mnt-marker');
             sg.style.pointerEvents = 'auto';
             sg.style.cursor = 'crosshair';
+            singularityDataMap.set(sg, { ...s, _index: s._index != null ? s._index : index });
 
             // Invisible larger hit-test circle so hover catches the marker
             // even at small marker sizes. Kept OUTSIDE the visual group so
@@ -170,11 +177,12 @@ export class SingularityRenderer {
         }
 
         this._svg.appendChild(g);
+        this._nodes.push(g);
     }
 
-    /** Remove all drawn singularities. */
+    /** Remove all drawn singularities (só as deste renderer, no SVG comum do viewer). */
     clear() {
-        this._svg.innerHTML = '';
+        clearOwned(this._svg, this._nodes);
         if (this._tooltip) {
             this._tooltip.classList.remove('mntviz-inspector-visible');
         }

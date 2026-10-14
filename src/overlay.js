@@ -78,8 +78,19 @@ export class OverlayLayer {
 
         // Sync size with sibling img layer
         this._resizeObserver = new ResizeObserver(() => this._syncSize());
-        const baseImg = this._container.querySelector('.mntviz-img-layer');
+        const baseImg = this._baseImage();
         if (baseImg) this._resizeObserver.observe(baseImg);
+    }
+
+    /**
+     * @private A imagem de base do viewer: irmã no container, ou a do container
+     * transformado quando o overlay mora numa camada 'html' da LayerStack.
+     */
+    _baseImage() {
+        const direct = this._container.querySelector('.mntviz-img-layer');
+        if (direct) return direct;
+        const host = this._container.closest ? this._container.closest('.mntviz-canvas-container') : null;
+        return host ? host.querySelector(':scope > .mntviz-img-layer') : null;
     }
 
     /**
@@ -448,7 +459,7 @@ export class OverlayLayer {
 
     /** @private */
     _syncSize() {
-        const base = this._container.querySelector('.mntviz-img-layer');
+        const base = this._baseImage();
         if (!base) return;
         const w = base.clientWidth + 'px';
         const h = base.clientHeight + 'px';

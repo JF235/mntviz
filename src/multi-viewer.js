@@ -107,12 +107,11 @@ export class MultiViewer {
         if (!this._coupled || this._syncing) return;
         this._syncing = true;
         try {
-            const { scale, rotation, translateX, translateY } = this._viewers[idx].viewState;
+            // Um setView por painel: escala, pan, rotação e espelho de uma vez.
+            const state = this._viewers[idx].viewState;
             for (let i = 0; i < this._viewers.length; i++) {
                 if (i === idx) continue;
-                this._viewers[i].setScale(scale);
-                this._viewers[i].setRotation(rotation);
-                this._viewers[i].setTranslate(translateX, translateY);
+                this._viewers[i].setView(state);
             }
         } finally {
             this._syncing = false;

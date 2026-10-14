@@ -179,12 +179,10 @@ export class FieldProbe {
     /* ── Coordinates ─────────────────────────────────────────── */
 
     _mouseToImageCoords(e) {
-        const vpRect = this._viewer.viewport.getBoundingClientRect();
-        const { scale, translateX, translateY } = this._viewer.viewState;
-        return {
-            x: Math.floor((e.clientX - vpRect.left - translateX) / scale),
-            y: Math.floor((e.clientY - vpRect.top - translateY) / scale),
-        };
+        // Pixel sob o cursor pela transformação viva do viewer (rotação e
+        // espelho incluídos); antes a conta usava só pan e zoom.
+        const p = this._viewer.screenToImageCoords(e.clientX, e.clientY);
+        return { x: Math.floor(p.x), y: Math.floor(p.y) };
     }
 
     /* ── Tooltip show/hide/position ──────────────────────────── */

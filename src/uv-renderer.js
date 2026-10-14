@@ -7,6 +7,8 @@
  *   uv.draw(arrows, { arrowSize: 3, opacity: 0.8 });
  */
 
+import { resolveTarget, clearOwned } from './render-target.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const DEFAULTS = {
@@ -31,10 +33,12 @@ const DEFAULTS = {
 
 export class UVFieldRenderer {
     /**
-     * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer or a dedicated SVG.
+     * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+     *        Camada da LayerStack (recomendado), SVG/<g> próprio ou Viewer (SVG comum).
      */
     constructor(svgElement) {
-        this._svg = svgElement;
+        this._svg = resolveTarget(svgElement);
+        this._nodes = [];
     }
 
     /**
@@ -52,7 +56,9 @@ export class UVFieldRenderer {
         const { style, arrowSize, lineWidth, segmentLength, opacity, color, alphaThreshold,
                 modulationTarget, modulationWidthMin, modulationAlphaMin } = opts;
 
-        this._svg.innerHTML = '';
+        // Cada draw substitui o anterior (num alvo próprio, esvazia o alvo; no
+        // SVG comum, tira só as setas deste renderer).
+        clearOwned(this._svg, this._nodes);
 
         for (const arrow of arrows) {
             const [x, y, dx, dy, conf] = arrow;
@@ -129,11 +135,12 @@ export class UVFieldRenderer {
             }
 
             this._svg.appendChild(g);
+            this._nodes.push(g);
         }
     }
 
-    /** Remove all drawn arrows. */
+    /** Remove all drawn arrows (só as deste renderer, no SVG comum do viewer). */
     clear() {
-        this._svg.innerHTML = '';
+        clearOwned(this._svg, this._nodes);
     }
 }

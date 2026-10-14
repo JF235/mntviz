@@ -7,6 +7,8 @@
  *   mr.draw(minutiae, '#FF0000', { markerSize: 5 });
  */
 
+import { resolveTarget, clearOwned } from './render-target.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** Maps each minutia SVG <g> element to its data object. */
@@ -84,10 +86,13 @@ export function createMarkerShape(shape, cx, cy, r) {
 
 export class MinutiaeRenderer {
     /**
-     * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer.
+     * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+     *        Camada da LayerStack (recomendado), elemento SVG próprio ou Viewer
+     *        (SVG comum, API antiga).
      */
     constructor(svgElement) {
-        this._svg = svgElement;
+        this._svg = resolveTarget(svgElement);
+        this._nodes = [];   // o que este renderer desenhou (para o clear no SVG comum)
     }
 
     /**
@@ -231,14 +236,19 @@ export class MinutiaeRenderer {
         }
 
         this._svg.appendChild(g);
+        this._nodes.push(g);
         if (showQuality || showAngles || showLabels) {
             this._svg.appendChild(textGroup);
+            this._nodes.push(textGroup);
         }
     }
 
-    /** Remove all drawn minutiae. */
+    /**
+     * Remove all drawn minutiae. Num alvo próprio (camada ou <g>), esvazia o
+     * alvo; no SVG comum do viewer, tira só o que este renderer desenhou.
+     */
     clear() {
-        this._svg.innerHTML = '';
+        clearOwned(this._svg, this._nodes);
     }
 }
 

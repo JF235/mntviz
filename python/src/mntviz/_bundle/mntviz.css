@@ -434,6 +434,16 @@
     transform: scale(1.06);
 }
 
+/* Marcador na seleção do viewer (viewer.selection). */
+.mntviz-mnt-marker.mntviz-selected {
+    filter: drop-shadow(0 0 1.5px #fff) var(--mntviz-highlight-soft);
+    stroke-width: 1.6 !important;
+}
+
+.mntviz-mnt-marker.mntviz-selected .mntviz-mnt-visual {
+    transform: scale(1.15);
+}
+
 /* ── Segment hover + cross-panel peer highlight ───────── */
 .mntviz-seg-highlighted line.mntviz-segment {
     stroke-width: 1.8 !important;

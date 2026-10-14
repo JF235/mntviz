@@ -1,3 +1,27 @@
+// src/render-target.js
+function resolveTarget(target) {
+  if (!target) throw new Error("mntviz: renderer target is required");
+  if (target.svgLayer && typeof target.loadImage === "function") return target.svgLayer;
+  if (target.el && typeof target.serialize === "function" && target.kind) {
+    if (target.kind !== "svg") throw new Error(`mntviz: layer '${target.name}' is not an svg layer`);
+    return target.el;
+  }
+  return target;
+}
+function isSharedRoot(el) {
+  return !!(el && el.classList && el.classList.contains("mntviz-mnt-layer"));
+}
+function clearOwned(target, nodes, selector = null) {
+  if (isSharedRoot(target)) {
+    for (const n of nodes) n.remove();
+  } else if (selector) {
+    for (const el of target.querySelectorAll(selector)) el.remove();
+  } else {
+    target.replaceChildren();
+  }
+  nodes.length = 0;
+}
+
 // src/minutiae-renderer.js
 var SVG_NS = "http://www.w3.org/2000/svg";
 var minutiaDataMap = /* @__PURE__ */ new WeakMap();
@@ -65,10 +89,13 @@ function createMarkerShape(shape, cx, cy, r) {
 }
 var MinutiaeRenderer = class {
   /**
-   * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer.
+   * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+   *        Camada da LayerStack (recomendado), elemento SVG próprio ou Viewer
+   *        (SVG comum, API antiga).
    */
   constructor(svgElement) {
-    this._svg = svgElement;
+    this._svg = resolveTarget(svgElement);
+    this._nodes = [];
   }
   /**
    * Draw a set of minutiae as circle + direction line.
@@ -190,15 +217,37 @@ var MinutiaeRenderer = class {
       }
     }
     this._svg.appendChild(g);
+    this._nodes.push(g);
     if (showQuality || showAngles || showLabels) {
       this._svg.appendChild(textGroup);
+      this._nodes.push(textGroup);
     }
   }
-  /** Remove all drawn minutiae. */
+  /**
+   * Remove all drawn minutiae. Num alvo próprio (camada ou <g>), esvazia o
+   * alvo; no SVG comum do viewer, tira só o que este renderer desenhou.
+   */
   clear() {
-    this._svg.innerHTML = "";
+    clearOwned(this._svg, this._nodes);
   }
 };
+function parseMinutiaeText(text) {
+  const result = [];
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.replace(/,/g, " ").split(/\s+/).map(Number);
+    if (parts.length >= 3) {
+      const [x, y, angle] = parts;
+      const quality = parts.length > 3 ? parts[3] : 100;
+      const type = parts.length > 4 ? parts[4] : 0;
+      const obj = { x, y, angle, quality, type };
+      if (parts.length > 5) obj.extra = parts.slice(5);
+      result.push(obj);
+    }
+  }
+  return result;
+}
 
 // src/minutiae-inspector.js
 var SVG_NS2 = "http://www.w3.org/2000/svg";
@@ -685,12 +734,8 @@ var FieldProbe = class {
   }
   /* ── Coordinates ─────────────────────────────────────────── */
   _mouseToImageCoords(e) {
-    const vpRect = this._viewer.viewport.getBoundingClientRect();
-    const { scale, translateX, translateY } = this._viewer.viewState;
-    return {
-      x: Math.floor((e.clientX - vpRect.left - translateX) / scale),
-      y: Math.floor((e.clientY - vpRect.top - translateY) / scale)
-    };
+    const p = this._viewer.screenToImageCoords(e.clientX, e.clientY);
+    return { x: Math.floor(p.x), y: Math.floor(p.y) };
   }
   /* ── Tooltip show/hide/position ──────────────────────────── */
   _showOwn() {
@@ -728,7 +773,7 @@ var DEFAULT_OPTIONS = {
   labelFontSize: 11,
   // Drag distance (image px) below which the release is treated as a
   // pure click — point recorded without an angle. Above the threshold,
-  // the angle is atan2(dy, dx) in CW image convention.
+  // the angle is ISO: degrees CCW from +x, 90° = image top (atan2(-dy, dx)).
   angleThreshold: 5,
   segmentLength: null,
   // defaults to markerRadius * 2 if null
@@ -753,10 +798,15 @@ var PointPicker = class {
     this._previewLine = null;
     this._lastClickTime = 0;
     this._lastClickPos = null;
+    this._layer = viewer.layers ? viewer.layers.ensure("picker", { kind: "svg", z: 1e3 }) : null;
     this._group = document.createElementNS(SVG_NS3, "g");
     this._group.setAttribute("class", "mntviz-picker-layer");
     this._group.setAttribute("pointer-events", "none");
-    this._viewer.svgLayer.appendChild(this._group);
+    this._parent().appendChild(this._group);
+  }
+  /** @private Onde o grupo do picker mora. */
+  _parent() {
+    return this._layer ? this._layer.el : this._viewer.svgLayer;
   }
   /* ── Public API ────────────────────────────────────────────── */
   enable() {
@@ -933,15 +983,12 @@ var PointPicker = class {
     e.preventDefault();
   }
   _mouseToImage(e) {
-    const vpRect = this._viewer.viewport.getBoundingClientRect();
-    const { scale, translateX, translateY } = this._viewer.viewState;
-    return {
-      x: Math.round((e.clientX - vpRect.left - translateX) / scale),
-      y: Math.round((e.clientY - vpRect.top - translateY) / scale)
-    };
+    const p = this._viewer.screenToImageCoords(e.clientX, e.clientY);
+    return { x: Math.round(p.x), y: Math.round(p.y) };
   }
   /* ── Rendering ─────────────────────────────────────────────── */
   _render() {
+    if (!this._group.isConnected) this._parent().appendChild(this._group);
     const preview = this._previewLine;
     while (this._group.firstChild) this._group.removeChild(this._group.firstChild);
     const { color, markerRadius: r, strokeWidth, showLabels, labelFontSize } = this._options;
@@ -1021,19 +1068,600 @@ var PointPicker = class {
   }
   _emit(event, payload) {
     const subs = this._listeners.get(event);
-    if (!subs) return;
-    for (const fn of subs) {
-      try {
-        fn(payload);
-      } catch (err) {
-        console.error("PointPicker listener error", err);
+    if (subs) {
+      for (const fn of subs) {
+        try {
+          fn(payload);
+        } catch (err) {
+          console.error("PointPicker listener error", err);
+        }
       }
+    }
+    if (event === "change" && typeof this._viewer._emit === "function") {
+      this._viewer._emit("change", { source: "picker", type: "points", points: payload });
     }
   }
 };
 
-// src/viewer.js
+// src/events.js
+var Emitter = class {
+  constructor() {
+    this._listeners = /* @__PURE__ */ new Map();
+  }
+  /** Registra `fn` para `event`. Devolve uma função que remove o registro. */
+  on(event, fn) {
+    if (typeof fn !== "function") throw new TypeError("mntviz: listener must be a function");
+    if (!this._listeners.has(event)) this._listeners.set(event, /* @__PURE__ */ new Set());
+    this._listeners.get(event).add(fn);
+    return () => this.off(event, fn);
+  }
+  /** Como `on`, mas o listener roda uma vez só. */
+  once(event, fn) {
+    const off = this.on(event, (payload) => {
+      off();
+      fn(payload);
+    });
+    return off;
+  }
+  off(event, fn) {
+    const subs = this._listeners.get(event);
+    if (!subs) return;
+    if (fn) subs.delete(fn);
+    else subs.clear();
+  }
+  /** Há algum listener para `event`? (permite pular trabalho caro.) */
+  hasListeners(event) {
+    const subs = this._listeners.get(event);
+    return !!(subs && subs.size);
+  }
+  emit(event, payload) {
+    const subs = this._listeners.get(event);
+    if (!subs || !subs.size) return;
+    for (const fn of [...subs]) {
+      try {
+        fn(payload);
+      } catch (err) {
+        console.error(`mntviz: listener de '${event}' falhou`, err);
+      }
+    }
+  }
+  removeAllListeners() {
+    this._listeners.clear();
+  }
+};
+var _defaultKey = (it) => {
+  if (it == null) return "null";
+  if (typeof it !== "object") return String(it);
+  if (it.key != null) return String(it.key);
+  return `${it.layer ?? ""}:${it.kind ?? ""}:${it.id ?? ""}`;
+};
+var Selection = class extends Emitter {
+  /**
+   * @param {object} [options]
+   * @param {(item:any) => string} [options.key] - Chave de identidade do item.
+   */
+  constructor({ key } = {}) {
+    super();
+    this._key = key || _defaultKey;
+    this._items = /* @__PURE__ */ new Map();
+  }
+  /** Chave de identidade de um item (a mesma usada internamente). */
+  keyOf(item) {
+    return this._key(item);
+  }
+  get items() {
+    return [...this._items.values()];
+  }
+  get size() {
+    return this._items.size;
+  }
+  get keys() {
+    return [...this._items.keys()];
+  }
+  has(item) {
+    return this._items.has(this._key(item));
+  }
+  /** Substitui a seleção. */
+  set(items, { source = null } = {}) {
+    const next = /* @__PURE__ */ new Map();
+    for (const it of _asArray(items)) next.set(this._key(it), it);
+    const removed = [...this._items].filter(([k]) => !next.has(k)).map(([, v]) => v);
+    const added = [...next].filter(([k]) => !this._items.has(k)).map(([, v]) => v);
+    this._items = next;
+    if (added.length || removed.length) this._changed(added, removed, source);
+  }
+  add(items, { source = null } = {}) {
+    const added = [];
+    for (const it of _asArray(items)) {
+      const k = this._key(it);
+      if (this._items.has(k)) continue;
+      this._items.set(k, it);
+      added.push(it);
+    }
+    if (added.length) this._changed(added, [], source);
+  }
+  remove(items, { source = null } = {}) {
+    const removed = [];
+    for (const it of _asArray(items)) {
+      const k = this._key(it);
+      if (!this._items.has(k)) continue;
+      removed.push(this._items.get(k));
+      this._items.delete(k);
+    }
+    if (removed.length) this._changed([], removed, source);
+  }
+  toggle(item, { source = null } = {}) {
+    if (this.has(item)) this.remove(item, { source });
+    else this.add(item, { source });
+  }
+  clear({ source = null } = {}) {
+    if (!this._items.size) return;
+    const removed = this.items;
+    this._items = /* @__PURE__ */ new Map();
+    this._changed([], removed, source);
+  }
+  _changed(added, removed, source) {
+    this.emit("change", { items: this.items, added, removed, source });
+  }
+};
+function _asArray(items) {
+  if (items == null) return [];
+  return Array.isArray(items) ? items : [items];
+}
+
+// src/layer-stack.js
 var SVG_NS4 = "http://www.w3.org/2000/svg";
+var KINDS = /* @__PURE__ */ new Set(["svg", "canvas", "html"]);
+var Layer = class {
+  /**
+   * Não instancie direto: use `viewer.layers.add(name, opts)`.
+   * @param {LayerStack} stack
+   * @param {string} name
+   * @param {object} opts
+   * @param {number} seq - ordem de criação (desempate do z)
+   */
+  constructor(stack, name, opts, seq) {
+    const { kind = "svg", z = 0, visible = true, opacity = 1, meta = null } = opts || {};
+    if (!KINDS.has(kind)) throw new Error(`mntviz: unknown layer kind '${kind}' (svg|canvas|html)`);
+    this._stack = stack;
+    this._name = String(name);
+    this._kind = kind;
+    this._z = Number.isFinite(Number(z)) ? Number(z) : 0;
+    this._seq = seq;
+    this._visible = true;
+    this._opacity = 1;
+    this.meta = meta;
+    this._el = this._createElement();
+    this._setOpacity(opacity);
+    this._setVisible(visible);
+  }
+  get name() {
+    return this._name;
+  }
+  get kind() {
+    return this._kind;
+  }
+  get z() {
+    return this._z;
+  }
+  get visible() {
+    return this._visible;
+  }
+  get opacity() {
+    return this._opacity;
+  }
+  /** Elemento da camada: <g> (svg), <canvas> (canvas) ou <div> (html). */
+  get el() {
+    return this._el;
+  }
+  /** Atalho para camadas svg. */
+  get g() {
+    return this._kind === "svg" ? this._el : null;
+  }
+  /** Atalho para camadas canvas. */
+  get canvas() {
+    return this._kind === "canvas" ? this._el : null;
+  }
+  /** Contexto 2D (só camadas canvas). */
+  get ctx() {
+    return this._kind === "canvas" ? this._el.getContext("2d") : null;
+  }
+  show() {
+    this.setVisible(true);
+    return this;
+  }
+  hide() {
+    this.setVisible(false);
+    return this;
+  }
+  toggle() {
+    this.setVisible(!this._visible);
+    return this;
+  }
+  setVisible(visible) {
+    const next = !!visible;
+    if (next === this._visible) return this;
+    this._setVisible(next);
+    this._stack._changed("visible", this);
+    return this;
+  }
+  /** @param {number} opacity - 0 a 1. */
+  setOpacity(opacity) {
+    const next = _clamp01(opacity);
+    if (next === this._opacity) return this;
+    this._setOpacity(next);
+    this._stack._changed("opacity", this);
+    return this;
+  }
+  setZ(z) {
+    const next = Number(z);
+    if (!Number.isFinite(next) || next === this._z) return this;
+    this._z = next;
+    this._stack._place(this);
+    this._stack._changed("z", this);
+    return this;
+  }
+  /** Esvazia a camada (svg/html: tira os filhos; canvas: apaga os pixels). */
+  clear() {
+    if (this._kind === "canvas") {
+      const c = this._el;
+      if (c.width && c.height) c.getContext("2d").clearRect(0, 0, c.width, c.height);
+    } else {
+      this._el.replaceChildren();
+    }
+    return this;
+  }
+  remove() {
+    this._stack.remove(this._name);
+  }
+  /** Estado serializável (sem o conteúdo desenhado). */
+  serialize() {
+    const out = { name: this._name, kind: this._kind, z: this._z, visible: this._visible, opacity: this._opacity };
+    if (this.meta != null) out.meta = this.meta;
+    return out;
+  }
+  /* ── interno ─────────────────────────────────────────────── */
+  _createElement() {
+    let el;
+    if (this._kind === "svg") {
+      el = document.createElementNS(SVG_NS4, "g");
+      el.setAttribute("class", "mntviz-layer");
+    } else {
+      el = document.createElement(this._kind === "canvas" ? "canvas" : "div");
+      el.className = `mntviz-layer mntviz-layer-${this._kind}`;
+      el.style.position = "absolute";
+      el.style.left = "0";
+      el.style.top = "0";
+      el.style.pointerEvents = "none";
+    }
+    el.setAttribute("data-layer", this._name);
+    return el;
+  }
+  _setVisible(visible) {
+    this._visible = !!visible;
+    if (this._kind === "svg") {
+      if (this._visible) this._el.removeAttribute("display");
+      else this._el.setAttribute("display", "none");
+    } else {
+      this._el.style.display = this._visible ? "" : "none";
+    }
+  }
+  _setOpacity(opacity) {
+    this._opacity = _clamp01(opacity);
+    if (this._kind === "svg") {
+      if (this._opacity === 1) this._el.removeAttribute("opacity");
+      else this._el.setAttribute("opacity", String(this._opacity));
+    } else {
+      this._el.style.opacity = this._opacity === 1 ? "" : String(this._opacity);
+    }
+  }
+};
+var LayerStack = class extends Emitter {
+  /** @param {import('./viewer.js').Viewer} viewer */
+  constructor(viewer) {
+    super();
+    this._viewer = viewer;
+    this._layers = /* @__PURE__ */ new Map();
+    this._seq = 0;
+  }
+  /**
+   * Cria uma camada. Nome repetido é erro (use `ensure` para obter ou criar).
+   * @param {string} name
+   * @param {{kind?: 'svg'|'canvas'|'html', z?: number, visible?: boolean, opacity?: number, meta?: any}} [opts]
+   * @returns {Layer}
+   */
+  add(name, opts = {}) {
+    const key = String(name);
+    if (this._layers.has(key)) throw new Error(`mntviz: layer '${key}' already exists`);
+    const layer = new Layer(this, key, opts, this._seq++);
+    this._layers.set(key, layer);
+    this._place(layer);
+    this._syncSize(layer);
+    this._changed("add", layer);
+    return layer;
+  }
+  /** Devolve a camada `name`, criando-a com `opts` se não existir. */
+  ensure(name, opts = {}) {
+    return this._layers.get(String(name)) || this.add(name, opts);
+  }
+  get(name) {
+    return this._layers.get(String(name)) || null;
+  }
+  has(name) {
+    return this._layers.has(String(name));
+  }
+  remove(name) {
+    const key = String(name);
+    const layer = this._layers.get(key);
+    if (!layer) return false;
+    layer._el.remove();
+    this._layers.delete(key);
+    this._changed("remove", layer);
+    return true;
+  }
+  /** Camadas em ordem de desenho (de baixo para cima): canvas/html, depois svg; z e criação. */
+  list() {
+    return [...this._layers.values()].sort(_compareDrawOrder);
+  }
+  names() {
+    return this.list().map((l) => l.name);
+  }
+  get size() {
+    return this._layers.size;
+  }
+  /** Esvazia o conteúdo de todas as camadas (mantém as camadas). */
+  clear({ kinds = ["svg", "canvas"] } = {}) {
+    for (const layer of this._layers.values()) {
+      if (kinds.includes(layer.kind)) layer.clear();
+    }
+    this._changed("clear", null);
+  }
+  /** Estado das camadas (nome, tipo, z, visível, opacidade, meta), sem o conteúdo. */
+  serialize() {
+    return { version: 1, layers: this.list().map((l) => l.serialize()) };
+  }
+  /**
+   * Aplica um estado salvo por `serialize()`. Camadas existentes recebem z,
+   * visibilidade e opacidade; as que faltam são criadas vazias (`create`).
+   * Camadas fora do estado não mudam.
+   */
+  restore(state, { create = true } = {}) {
+    const entries = Array.isArray(state) ? state : state && state.layers || [];
+    for (const s of entries) {
+      if (!s || s.name == null) continue;
+      let layer = this.get(s.name);
+      if (!layer) {
+        if (!create) continue;
+        layer = this.add(s.name, { kind: s.kind || "svg", z: s.z ?? 0, meta: s.meta ?? null });
+      } else {
+        if (s.z != null && s.z !== layer.z) {
+          layer._z = Number(s.z);
+          this._place(layer);
+        }
+        if (s.meta !== void 0) layer.meta = s.meta;
+      }
+      if (s.visible != null) layer._setVisible(s.visible);
+      if (s.opacity != null) layer._setOpacity(s.opacity);
+    }
+    this._changed("restore", null);
+    return this;
+  }
+  destroy() {
+    for (const layer of this._layers.values()) layer._el.remove();
+    this._layers.clear();
+    this.removeAllListeners();
+  }
+  /* ── interno (usado pelo Viewer e pela Layer) ────────────── */
+  /** Põe (ou repõe) o elemento da camada na posição dada pelo z. */
+  _place(layer) {
+    const v = this._viewer;
+    const isSvg = layer.kind === "svg";
+    const parent = isSvg ? v.svgLayer : v.canvasContainer;
+    let next = null;
+    for (const other of this._layers.values()) {
+      if (other === layer || other.kind === "svg" !== isSvg) continue;
+      if (other._el.parentNode !== parent) continue;
+      if (_compareZ(other, layer) > 0 && (!next || _compareZ(other, next) < 0)) next = other;
+    }
+    if (next) parent.insertBefore(layer._el, next._el);
+    else if (isSvg) parent.appendChild(layer._el);
+    else parent.insertBefore(layer._el, v.svgLayer);
+  }
+  /** Ajusta canvas/div ao tamanho natural (ou virtual) da imagem. */
+  _syncSize(only = null) {
+    const { width, height } = this._viewer.imageSize;
+    if (!width || !height) return;
+    const targets = only ? [only] : [...this._layers.values()];
+    for (const layer of targets) {
+      if (layer.kind === "svg") continue;
+      const el = layer._el;
+      if (layer.kind === "canvas" && (el.width !== width || el.height !== height)) {
+        el.width = width;
+        el.height = height;
+      }
+      el.style.width = `${width}px`;
+      el.style.height = `${height}px`;
+    }
+  }
+  _changed(type, layer) {
+    const payload = { type, layer: layer ? layer.name : null };
+    this.emit("change", payload);
+    if (this._viewer && typeof this._viewer._emit === "function") {
+      this._viewer._emit("change", { source: "layers", ...payload });
+    }
+  }
+};
+function _clamp01(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(1, Math.max(0, n));
+}
+function _compareZ(a, b) {
+  return a._z - b._z || a._seq - b._seq;
+}
+function _compareDrawOrder(a, b) {
+  const sa = a.kind === "svg" ? 1 : 0;
+  const sb = b.kind === "svg" ? 1 : 0;
+  return sa - sb || _compareZ(a, b);
+}
+
+// src/singularity-renderer.js
+var SVG_NS5 = "http://www.w3.org/2000/svg";
+var singularityDataMap = /* @__PURE__ */ new WeakMap();
+var DEFAULTS3 = {
+  markerSize: 5,
+  lineWidth: 1.5,
+  segmentLength: 12,
+  baseOpacity: 1
+};
+var SingularityRenderer = class {
+  /**
+   * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+   *        Camada da LayerStack (recomendado), elemento SVG próprio ou Viewer (SVG comum).
+   */
+  constructor(svgElement) {
+    this._svg = resolveTarget(svgElement);
+    this._nodes = [];
+    this._viewport = this._svg.closest(".mntviz-viewport") || this._svg.parentNode;
+    this._tooltip = null;
+    this._hideTimer = null;
+  }
+  _ensureTooltip() {
+    if (this._tooltip) return;
+    const tip = document.createElement("div");
+    tip.className = "mntviz-inspector-tooltip";
+    this._viewport.appendChild(tip);
+    this._tooltip = tip;
+  }
+  _showTooltip(html, markerEl) {
+    this._ensureTooltip();
+    clearTimeout(this._hideTimer);
+    this._tooltip.innerHTML = html;
+    this._tooltip.classList.add("mntviz-inspector-visible");
+    this._positionTooltip(markerEl);
+  }
+  _hideTooltipSoon() {
+    clearTimeout(this._hideTimer);
+    this._hideTimer = setTimeout(() => {
+      if (this._tooltip) {
+        this._tooltip.classList.remove("mntviz-inspector-visible");
+      }
+    }, 60);
+  }
+  _positionTooltip(markerEl) {
+    const mr = markerEl.getBoundingClientRect();
+    const vr = this._viewport.getBoundingClientRect();
+    const cx = mr.left + mr.width / 2 - vr.left;
+    const cy = mr.top + mr.height / 2 - vr.top;
+    const tw = this._tooltip.offsetWidth;
+    const th = this._tooltip.offsetHeight;
+    let left = cx + 15;
+    let top = cy - th / 2;
+    if (left + tw > vr.width) left = cx - tw - 15;
+    if (left < 5) left = 5;
+    if (top < 5) top = 5;
+    if (top + th > vr.height - 5) top = vr.height - th - 5;
+    this._tooltip.style.left = `${left}px`;
+    this._tooltip.style.top = `${top}px`;
+  }
+  /**
+   * Draw singularity points (core and delta).
+   *
+   * @param {Array<{type: string, x: number, y: number, angles: number[]}>} singularities
+   * @param {string} color - CSS color.
+   * @param {object} [options] - Override defaults.
+   */
+  draw(singularities, color, options = {}) {
+    const opts = { ...DEFAULTS3, ...options };
+    const { markerSize, lineWidth, segmentLength, baseOpacity } = opts;
+    const g = document.createElementNS(SVG_NS5, "g");
+    g.setAttribute("stroke", color);
+    g.setAttribute("fill", "none");
+    g.setAttribute("stroke-width", lineWidth);
+    g.setAttribute("stroke-linecap", "round");
+    g.setAttribute("stroke-linejoin", "round");
+    for (const [index, s] of singularities.entries()) {
+      const { type, x, y, angles } = s;
+      const conf = typeof s.confidence === "number" ? s.confidence : 1;
+      const sg = document.createElementNS(SVG_NS5, "g");
+      sg.setAttribute("opacity", baseOpacity * conf);
+      sg.classList.add("mntviz-sin-marker", "mntviz-mnt-marker");
+      sg.style.pointerEvents = "auto";
+      sg.style.cursor = "crosshair";
+      singularityDataMap.set(sg, { ...s, _index: s._index != null ? s._index : index });
+      const hit = document.createElementNS(SVG_NS5, "circle");
+      hit.setAttribute("cx", x);
+      hit.setAttribute("cy", y);
+      hit.setAttribute("r", markerSize + 4);
+      hit.setAttribute("fill", "transparent");
+      hit.setAttribute("stroke", "none");
+      sg.appendChild(hit);
+      const visual = document.createElementNS(SVG_NS5, "g");
+      visual.classList.add("mntviz-mnt-visual");
+      const shape = type === "delta" ? "triangle" : "circle";
+      const marker = createMarkerShape(shape, x, y, markerSize);
+      visual.appendChild(marker);
+      for (const angle of angles) {
+        const rad = angle * (Math.PI / 180);
+        const xEnd = x + segmentLength * Math.cos(rad);
+        const yEnd = y - segmentLength * Math.sin(rad);
+        const line = document.createElementNS(SVG_NS5, "line");
+        line.setAttribute("x1", x);
+        line.setAttribute("y1", y);
+        line.setAttribute("x2", xEnd);
+        line.setAttribute("y2", yEnd);
+        visual.appendChild(line);
+      }
+      sg.appendChild(visual);
+      const angsStr = angles.map((a) => `${Math.round(a)}\xB0`).join(", ");
+      const html = `<span>${type.toUpperCase()}</span>  <span>x:</span> ${Math.round(x)}  <span>y:</span> ${Math.round(y)}<br><span>angle${angles.length > 1 ? "s" : ""}:</span> ${angsStr}<br><span>conf:</span> ${(conf * 100).toFixed(0)}`;
+      sg.addEventListener("mouseenter", () => {
+        sg.classList.add("mntviz-mnt-highlighted");
+        this._showTooltip(html, sg);
+      });
+      sg.addEventListener("mouseleave", () => {
+        sg.classList.remove("mntviz-mnt-highlighted");
+        this._hideTooltipSoon();
+      });
+      g.appendChild(sg);
+    }
+    this._svg.appendChild(g);
+    this._nodes.push(g);
+  }
+  /** Remove all drawn singularities (só as deste renderer, no SVG comum do viewer). */
+  clear() {
+    clearOwned(this._svg, this._nodes);
+    if (this._tooltip) {
+      this._tooltip.classList.remove("mntviz-inspector-visible");
+    }
+  }
+};
+function parseSingularityText(text) {
+  const result = [];
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.replace(/,/g, " ").split(/\s+/);
+    if (parts.length < 4) continue;
+    const type = parts[0].toLowerCase();
+    const x = Number(parts[1]);
+    const y = Number(parts[2]);
+    const expectedAngles = type === "delta" ? 3 : 1;
+    const angleEnd = 3 + expectedAngles;
+    if (parts.length < angleEnd) continue;
+    const angles = parts.slice(3, angleEnd).map(Number);
+    const out = { type, x, y, angles };
+    if (parts.length > angleEnd) {
+      const conf = Number(parts[angleEnd]);
+      if (Number.isFinite(conf)) out.confidence = conf;
+    }
+    result.push(out);
+  }
+  return result;
+}
+
+// src/viewer.js
+var SVG_NS6 = "http://www.w3.org/2000/svg";
 var Viewer = class {
   /**
    * @param {string|HTMLElement} container - CSS selector or element.
@@ -1041,6 +1669,8 @@ var Viewer = class {
    * @param {boolean} [options.minimap=true]  - Show minimap.
    * @param {Function} [options.onResize]     - Called after internal resize.
    * @param {Function} [options.onTransform]  - Called after every pan/zoom transform.
+   * @param {import('./events.js').Selection} [options.selection] - Seleção compartilhada
+   *        (padrão: uma Selection própria).
    */
   constructor(container, options = {}) {
     this._el = typeof container === "string" ? document.querySelector(container) : container;
@@ -1051,17 +1681,90 @@ var Viewer = class {
       translateX: 0,
       translateY: 0,
       rotation: 0,
+      flipX: false,
       isDragging: false,
       lastX: 0,
       lastY: 0
     };
     this._abortController = new AbortController();
+    this._events = new Emitter();
     this._minutiaeInspector = null;
     this._fieldProbe = null;
     this._virtualSize = null;
     this._overlays = /* @__PURE__ */ new Map();
+    this._pointerDown = null;
+    this._clickSelect = null;
     this._buildDOM();
+    this.layers = new LayerStack(this);
+    this._selection = null;
+    this._selectionOff = null;
+    this.setSelection(options.selection || new Selection());
     this._bindEvents();
+  }
+  /* ── Eventos ────────────────────────────────────────────── */
+  /**
+   * Assina um evento do viewer. Devolve a função que cancela a assinatura.
+   *  - 'pointer' {type: 'move'|'down'|'up'|'click'|'leave', x, y (imagem, float), px, py (pixel),
+   *               inside, clientX, clientY, button, buttons, shiftKey, ctrlKey, altKey, metaKey,
+   *               target: {layer, kind, id, data, element} | null, event}
+   *  - 'select'  {items, added, removed, source}   (mudança na `selection`)
+   *  - 'change'  {source: 'layers'|'picker'|..., type, ...}
+   *  - 'view'    {scale, translateX, translateY, rotation, flipX}
+   */
+  on(event, fn) {
+    return this._events.on(event, fn);
+  }
+  once(event, fn) {
+    return this._events.once(event, fn);
+  }
+  off(event, fn) {
+    this._events.off(event, fn);
+  }
+  /** Emite um evento (usado por componentes acoplados ao viewer, como o picker e os editores). */
+  _emit(event, payload) {
+    this._events.emit(event, payload);
+  }
+  /* ── Seleção ────────────────────────────────────────────── */
+  /** Seleção atual (compartilhável entre viewers e tabelas). */
+  get selection() {
+    return this._selection;
+  }
+  /** Troca a seleção (por exemplo, uma Selection comum a vários viewers). */
+  setSelection(selection) {
+    if (this._selectionOff) this._selectionOff();
+    this._selection = selection;
+    this._selectionOff = selection.on("change", (ev) => {
+      this._renderSelection();
+      this._emit("select", ev);
+    });
+    this._renderSelection();
+    return selection;
+  }
+  /**
+   * Liga a seleção por clique nos marcadores (minúcias e singularidades):
+   * clique seleciona; com a tecla `multiKey` alterna; clique no vazio limpa.
+   */
+  enableClickSelect({ multiKey = "shiftKey" } = {}) {
+    this._clickSelect = { multiKey };
+    return this;
+  }
+  disableClickSelect() {
+    this._clickSelect = null;
+    return this;
+  }
+  /** Reaplica o destaque da seleção (chame depois de redesenhar marcadores). */
+  refreshSelection() {
+    this._renderSelection();
+  }
+  /**
+   * Item de seleção de um elemento desenhado (ou null): {layer, kind, id, data}.
+   * `layer` é o nome da camada (null fora da LayerStack); `id` é o índice do marcador.
+   */
+  itemFromElement(el) {
+    const it = this._targetFromElement(el);
+    if (!it) return null;
+    const { element, ...item } = it;
+    return item;
   }
   /* ── Public API ─────────────────────────────────────────── */
   /** The SVG overlay element. Pass this to MinutiaeRenderer / UVFieldRenderer. */
@@ -1086,8 +1789,30 @@ var Viewer = class {
       scale: this._view.scale,
       translateX: this._view.translateX,
       translateY: this._view.translateY,
-      rotation: this._view.rotation
+      rotation: this._view.rotation,
+      flipX: this._view.flipX
     };
+  }
+  /** Espelho horizontal ligado? (aplicado antes da rotação, em torno do centro da imagem) */
+  get flipX() {
+    return this._view.flipX;
+  }
+  /** Estado da vista para layouts (o mesmo que `viewState`). */
+  getView() {
+    return this.viewState;
+  }
+  /**
+   * Aplica um estado de vista de uma vez (um só redesenho). Campos ausentes
+   * não mudam: {scale, translateX, translateY, rotation, flipX}.
+   */
+  setView(state = {}) {
+    const v = this._view;
+    if (Number.isFinite(Number(state.scale))) v.scale = Math.min(Math.max(Number(state.scale), 0.1), 20);
+    if (Number.isFinite(Number(state.translateX))) v.translateX = Number(state.translateX);
+    if (Number.isFinite(Number(state.translateY))) v.translateY = Number(state.translateY);
+    if (Number.isFinite(Number(state.rotation))) v.rotation = _normalizeAngle180(state.rotation);
+    if (state.flipX != null) v.flipX = !!state.flipX;
+    this._applyTransform();
   }
   /** Natural dimensions of the loaded image (or virtual size). */
   get imageSize() {
@@ -1122,9 +1847,9 @@ var Viewer = class {
   getOverlays() {
     return [...this._overlays].map(([name, { overlay, opts }]) => ({ name, overlay, opts }));
   }
-  /** Return only visible + loaded overlays. */
+  /** Return only visible + loaded overlays (an overlay inside a hidden layer counts as hidden). */
   getVisibleOverlays() {
-    return this.getOverlays().filter((e) => e.overlay.visible && e.overlay.loaded);
+    return this.getOverlays().filter((e) => e.overlay.visible && e.overlay.loaded && this._layerFactor(e.overlay.imageElement) !== null);
   }
   /* ── Image loading ─────────────────────────────────────────── */
   /**
@@ -1150,10 +1875,18 @@ var Viewer = class {
       probe.src = src;
     });
   }
-  /** Clear the image and SVG layer. */
+  /**
+   * Clear the image and SVG layer. Os nós soltos no SVG raiz (API antiga) saem;
+   * as camadas da LayerStack ficam, vazias (svg e canvas; as html hospedam
+   * componentes, como OverlayLayer, e não são esvaziadas).
+   */
   clear() {
     this._img.removeAttribute("src");
-    this._svg.innerHTML = "";
+    for (const node of [...this._svg.childNodes]) {
+      if (node.nodeType === 1 && node.classList && node.classList.contains("mntviz-layer")) continue;
+      node.remove();
+    }
+    this.layers.clear({ kinds: ["svg", "canvas"] });
     this._virtualSize = null;
     if (this._minimapWrap) this._minimapWrap.style.display = "none";
   }
@@ -1183,7 +1916,47 @@ var Viewer = class {
     this._view.translateX = (vw - iw * scale) / 2;
     this._view.translateY = (vh - ih * scale) / 2;
     this._view.rotation = 0;
+    this._view.flipX = false;
     this._applyTransform();
+  }
+  /**
+   * Ajusta a imagem ao viewport mantendo a rotação e o espelho (o `resetView`
+   * zera os dois). Com rotação, usa a caixa da imagem girada.
+   */
+  fit() {
+    const vw = this._viewport.clientWidth;
+    const vh = this._viewport.clientHeight;
+    const vs = this._virtualSize;
+    const iw = vs ? vs.width : this._img.naturalWidth || 500;
+    const ih = vs ? vs.height : this._img.naturalHeight || 500;
+    const rad = this._view.rotation * Math.PI / 180;
+    const c = Math.abs(Math.cos(rad));
+    const s = Math.abs(Math.sin(rad));
+    const bw = iw * c + ih * s;
+    const bh = iw * s + ih * c;
+    const scale = Math.min(Math.max(Math.min(vw / bw, vh / bh), 0.1), 20);
+    this._view.scale = scale;
+    this._view.translateX = vw / 2 - scale * iw / 2;
+    this._view.translateY = vh / 2 - scale * ih / 2;
+    this._applyTransform();
+  }
+  /**
+   * Gira 90° em torno do centro da imagem: `dir` > 0 no sentido horário da
+   * tela, `dir` < 0 no anti-horário.
+   */
+  rotate90(dir = 1) {
+    this.setRotation(this._view.rotation + (dir < 0 ? -90 : 90));
+  }
+  /** Liga ou desliga o espelho horizontal (antes da rotação, em torno do centro). */
+  setFlip(flipX) {
+    const next = !!flipX;
+    if (next === this._view.flipX) return;
+    this._view.flipX = next;
+    this._applyTransform();
+  }
+  /** Alterna o espelho horizontal. */
+  toggleFlip() {
+    this.setFlip(!this._view.flipX);
   }
   /**
    * Set absolute image scale.
@@ -1260,6 +2033,39 @@ var Viewer = class {
     return { x: p.x - rect.left, y: p.y - rect.top };
   }
   /**
+   * Map image coordinates to screen/client coordinates (inverse of
+   * screenToImageCoords). Works with pan, zoom, rotation and mirror.
+   * @returns {{x:number, y:number}}
+   */
+  imageToScreenCoords(imgX, imgY) {
+    const ctm = this._svg.getScreenCTM();
+    if (!ctm) return { x: NaN, y: NaN };
+    const p = new DOMPoint(imgX, imgY).matrixTransform(ctm);
+    return { x: p.x, y: p.y };
+  }
+  /**
+   * Transformação viva imagem → viewport (px CSS do viewport), a mesma do CSS
+   * do container: translate · scale · [rotação e espelho em torno do centro].
+   * @returns {DOMMatrix}
+   */
+  viewMatrix() {
+    const { translateX: tx, translateY: ty, scale: s, rotation: r, flipX } = this._view;
+    const { width, height } = this.imageSize;
+    const cx = width / 2;
+    const cy = height / 2;
+    const m = new DOMMatrix().translateSelf(tx, ty).scaleSelf(s, s).translateSelf(cx, cy).rotateSelf(r);
+    if (flipX) m.scaleSelf(-1, 1);
+    return m.translateSelf(-cx, -cy);
+  }
+  /** @private A transformação viva como atributo `transform` de SVG (sem unidades). */
+  _transformAttr() {
+    const { translateX: tx, translateY: ty, scale: s, rotation: r, flipX } = this._view;
+    const { width, height } = this.imageSize;
+    const cx = width / 2;
+    const cy = height / 2;
+    return `translate(${tx}, ${ty}) scale(${s}) translate(${cx}, ${cy}) rotate(${r})` + (flipX ? " scale(-1, 1)" : "") + ` translate(${-cx}, ${-cy})`;
+  }
+  /**
    * Serialize the SVG layer (with background image embedded) as a standalone SVG string.
    * @returns {string} SVG markup.
    */
@@ -1312,9 +2118,9 @@ var Viewer = class {
         originY = y + margin;
         break;
     }
-    const g = document.createElementNS(SVG_NS4, "g");
+    const g = document.createElementNS(SVG_NS6, "g");
     g.setAttribute("transform", `translate(${originX}, ${originY})`);
-    const bg = document.createElementNS(SVG_NS4, "rect");
+    const bg = document.createElementNS(SVG_NS6, "rect");
     bg.setAttribute("x", 0);
     bg.setAttribute("y", 0);
     bg.setAttribute("width", boxW);
@@ -1332,13 +2138,13 @@ var Viewer = class {
       const cy = rowY + swSize / 2;
       let marker;
       if (shape === "square") {
-        marker = document.createElementNS(SVG_NS4, "rect");
+        marker = document.createElementNS(SVG_NS6, "rect");
         marker.setAttribute("x", cx - swR);
         marker.setAttribute("y", cy - swR);
         marker.setAttribute("width", 2 * swR);
         marker.setAttribute("height", 2 * swR);
       } else {
-        marker = document.createElementNS(SVG_NS4, "circle");
+        marker = document.createElementNS(SVG_NS6, "circle");
         marker.setAttribute("cx", cx);
         marker.setAttribute("cy", cy);
         marker.setAttribute("r", swR);
@@ -1347,7 +2153,7 @@ var Viewer = class {
       marker.setAttribute("fill", "none");
       marker.setAttribute("stroke-width", 1.5 * scale);
       g.appendChild(marker);
-      const text = document.createElementNS(SVG_NS4, "text");
+      const text = document.createElementNS(SVG_NS6, "text");
       text.setAttribute("x", pad + swSize + gapSw);
       text.setAttribute("y", cy + fontSz * 0.35);
       text.setAttribute("fill", "#fff");
@@ -1372,10 +2178,11 @@ var Viewer = class {
   }
   exportSVG() {
     const clone = this._svg.cloneNode(true);
-    clone.setAttribute("xmlns", SVG_NS4);
+    clone.setAttribute("xmlns", SVG_NS6);
     clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     clone.classList.remove("mntviz-mnt-layer");
     clone.removeAttribute("style");
+    _flattenLayersForExport(clone);
     const layers = [];
     if (this._img.src) {
       const canvas = document.createElement("canvas");
@@ -1384,26 +2191,13 @@ var Viewer = class {
       canvas.width = w;
       canvas.height = h;
       canvas.getContext("2d").drawImage(this._img, 0, 0);
-      const bg = document.createElementNS(SVG_NS4, "image");
+      const bg = document.createElementNS(SVG_NS6, "image");
       bg.setAttribute("href", canvas.toDataURL("image/png"));
       bg.setAttribute("width", w);
       bg.setAttribute("height", h);
       layers.push(bg);
     }
-    for (const { overlay } of this.getVisibleOverlays()) {
-      const cvs = overlay.imageElement;
-      if (!cvs || !cvs.width || !cvs.height) continue;
-      const w = this._img.naturalWidth || cvs.width;
-      const h = this._img.naturalHeight || cvs.height;
-      const el = document.createElementNS(SVG_NS4, "image");
-      el.setAttribute("href", cvs.toDataURL("image/png"));
-      el.setAttribute("width", w);
-      el.setAttribute("height", h);
-      el.setAttribute("image-rendering", "pixelated");
-      const op = cvs.style.opacity;
-      if (op) el.setAttribute("opacity", op);
-      layers.push(el);
-    }
+    layers.push(...this._rasterImagesForExport());
     for (let i = layers.length - 1; i >= 0; i--) {
       clone.insertBefore(layers[i], clone.firstChild);
     }
@@ -1438,24 +2232,37 @@ var Viewer = class {
   }
   /**
    * Return the visible image region based on current zoom/pan.
+   * Com rotação ou espelho, é a caixa (alinhada aos eixos da imagem) do
+   * viewport levado para a imagem pela transformação viva.
    * @returns {{ x: number, y: number, w: number, h: number }}
    */
   visibleRegion() {
-    const { scale: s, translateX: tx, translateY: ty } = this._view;
+    const { scale: s, translateX: tx, translateY: ty, rotation: r, flipX } = this._view;
     const vpW = this._viewport.clientWidth;
     const vpH = this._viewport.clientHeight;
-    return { x: -tx / s, y: -ty / s, w: vpW / s, h: vpH / s };
+    if (!r && !flipX) return { x: -tx / s, y: -ty / s, w: vpW / s, h: vpH / s };
+    const inv = this.viewMatrix().inverse();
+    const pts = [[0, 0], [vpW, 0], [0, vpH], [vpW, vpH]].map(([px, py]) => new DOMPoint(px, py).matrixTransform(inv));
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    const x0 = Math.min(...xs);
+    const y0 = Math.min(...ys);
+    return { x: x0, y: y0, w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
   }
   /**
    * Serialize only the currently visible viewport region as SVG.
+   * Sem rotação nem espelho: viewBox na região visível (coordenadas da imagem).
+   * Com rotação ou espelho: SVG do tamanho do viewport com a transformação viva
+   * num <g>, como o MatchViewer faz; a legenda fica em coordenadas da tela.
    * @returns {string} SVG markup.
    */
   exportSVGView() {
+    if (this._view.rotation || this._view.flipX) return this._exportSVGViewLive();
     const { x, y, w, h } = this.visibleRegion();
     const vpW = this._viewport.clientWidth;
     const vpH = this._viewport.clientHeight;
-    const svg = document.createElementNS(SVG_NS4, "svg");
-    svg.setAttribute("xmlns", SVG_NS4);
+    const svg = document.createElementNS(SVG_NS6, "svg");
+    svg.setAttribute("xmlns", SVG_NS6);
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     svg.setAttribute("width", vpW);
     svg.setAttribute("height", vpH);
@@ -1467,29 +2274,17 @@ var Viewer = class {
       canvas.width = nw;
       canvas.height = nh;
       canvas.getContext("2d").drawImage(this._img, 0, 0);
-      const img = document.createElementNS(SVG_NS4, "image");
+      const img = document.createElementNS(SVG_NS6, "image");
       img.setAttribute("href", canvas.toDataURL("image/png"));
       img.setAttribute("width", nw);
       img.setAttribute("height", nh);
       svg.appendChild(img);
     }
-    for (const { overlay } of this.getVisibleOverlays()) {
-      const cvs = overlay.imageElement;
-      if (!cvs || !cvs.width || !cvs.height) continue;
-      const nw = this._img.naturalWidth || cvs.width;
-      const nh = this._img.naturalHeight || cvs.height;
-      const el = document.createElementNS(SVG_NS4, "image");
-      el.setAttribute("href", cvs.toDataURL("image/png"));
-      el.setAttribute("width", nw);
-      el.setAttribute("height", nh);
-      el.setAttribute("image-rendering", "pixelated");
-      const op = cvs.style.opacity;
-      if (op) el.setAttribute("opacity", op);
-      svg.appendChild(el);
-    }
+    for (const el of this._rasterImagesForExport()) svg.appendChild(el);
     const mntClone = this._svg.cloneNode(true);
     mntClone.removeAttribute("class");
     mntClone.removeAttribute("style");
+    _flattenLayersForExport(mntClone);
     while (mntClone.firstChild) svg.appendChild(mntClone.firstChild);
     const lm = this._getLegendMeta();
     if (lm) {
@@ -1501,6 +2296,92 @@ var Viewer = class {
       svg.appendChild(legendG);
     }
     return new XMLSerializer().serializeToString(svg);
+  }
+  /** @private exportSVGView com rotação/espelho: transformação viva num <g>. */
+  _exportSVGViewLive() {
+    const vpW = this._viewport.clientWidth;
+    const vpH = this._viewport.clientHeight;
+    const { width: iw, height: ih } = this.imageSize;
+    const svg = document.createElementNS(SVG_NS6, "svg");
+    svg.setAttribute("xmlns", SVG_NS6);
+    svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+    svg.setAttribute("width", vpW);
+    svg.setAttribute("height", vpH);
+    svg.setAttribute("viewBox", `0 0 ${vpW} ${vpH}`);
+    const g = document.createElementNS(SVG_NS6, "g");
+    g.setAttribute("transform", this._transformAttr());
+    if (this._img.src) {
+      const canvas = document.createElement("canvas");
+      canvas.width = iw;
+      canvas.height = ih;
+      canvas.getContext("2d").drawImage(this._img, 0, 0);
+      const img = document.createElementNS(SVG_NS6, "image");
+      img.setAttribute("href", canvas.toDataURL("image/png"));
+      img.setAttribute("width", iw);
+      img.setAttribute("height", ih);
+      g.appendChild(img);
+    }
+    for (const el of this._rasterImagesForExport()) g.appendChild(el);
+    const mntClone = this._svg.cloneNode(true);
+    _flattenLayersForExport(mntClone);
+    while (mntClone.firstChild) g.appendChild(mntClone.firstChild);
+    svg.appendChild(g);
+    const lm = this._getLegendMeta();
+    if (lm) {
+      svg.appendChild(this._buildLegendSVG(lm.items, { x: 0, y: 0, w: vpW, h: vpH }, {
+        position: lm.position,
+        scale: lm.scale
+      }));
+    }
+    return new XMLSerializer().serializeToString(svg);
+  }
+  /**
+   * @private Imagens rasterizadas para a exportação: overlays registrados e
+   * visíveis (o fator de opacidade da camada que os contém entra junto) e
+   * camadas canvas visíveis, na ordem do DOM (= ordem de desenho).
+   */
+  _rasterImagesForExport() {
+    const srcs = [];
+    for (const { overlay } of this.getVisibleOverlays()) {
+      const cvs = overlay.imageElement;
+      if (!cvs || !cvs.width || !cvs.height) continue;
+      srcs.push({ cvs, own: cvs.style.opacity, factor: this._layerFactor(cvs) ?? 0 });
+    }
+    for (const layer of this.layers.list()) {
+      if (layer.kind !== "canvas" || !layer.visible) continue;
+      const cvs = layer.el;
+      if (!cvs.width || !cvs.height) continue;
+      srcs.push({ cvs, own: layer.opacity === 1 ? "" : String(layer.opacity), factor: 1 });
+    }
+    srcs.sort((a, b) => a.cvs === b.cvs ? 0 : a.cvs.compareDocumentPosition(b.cvs) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    return srcs.map(({ cvs, own, factor }) => {
+      const w = this._img.naturalWidth || cvs.width;
+      const h = this._img.naturalHeight || cvs.height;
+      const el = document.createElementNS(SVG_NS6, "image");
+      el.setAttribute("href", cvs.toDataURL("image/png"));
+      el.setAttribute("width", w);
+      el.setAttribute("height", h);
+      el.setAttribute("image-rendering", "pixelated");
+      let op = own;
+      if (factor !== 1) op = String((own === "" ? 1 : Number(own)) * factor);
+      if (op) el.setAttribute("opacity", op);
+      return el;
+    });
+  }
+  /**
+   * @private Produto das opacidades das camadas que contêm `el` (dentro do
+   * container transformado); null se alguma delas estiver oculta.
+   */
+  _layerFactor(el) {
+    let f = 1;
+    for (let n = el ? el.parentElement : null; n && n !== this._canvas; n = n.parentElement) {
+      if (!n.classList || !n.classList.contains("mntviz-layer")) continue;
+      const layer = this.layers.get(n.getAttribute("data-layer"));
+      if (!layer) continue;
+      if (!layer.visible) return null;
+      f *= layer.opacity;
+    }
+    return f;
   }
   /**
    * Download the visible viewport region as an SVG file.
@@ -1528,6 +2409,12 @@ var Viewer = class {
     this._overlays.clear();
     this._abortController.abort();
     if (this._resizeObserver) this._resizeObserver.disconnect();
+    if (this._selectionOff) {
+      this._selectionOff();
+      this._selectionOff = null;
+    }
+    this.layers.destroy();
+    this._events.removeAllListeners();
     this._el.innerHTML = "";
   }
   /**
@@ -1638,7 +2525,7 @@ var Viewer = class {
     this._canvas = _el("div", "mntviz-canvas-container");
     this._img = _el("img", "mntviz-img-layer");
     this._img.draggable = false;
-    this._svg = document.createElementNS(SVG_NS4, "svg");
+    this._svg = document.createElementNS(SVG_NS6, "svg");
     this._svg.classList.add("mntviz-mnt-layer");
     this._canvas.append(this._img, this._svg);
     this._viewport.append(this._canvas);
@@ -1678,6 +2565,11 @@ var Viewer = class {
     window.addEventListener("mouseup", () => this._onMouseUp(), sig);
     this._bindHudField(this._zoomField.input, () => this._applyZoomInput());
     this._bindHudField(this._rotationField.input, () => this._applyRotationInput());
+    const cap = { capture: true, ...sig };
+    this._viewport.addEventListener("mousemove", (e) => this._onPointerEvent("move", e), cap);
+    this._viewport.addEventListener("mousedown", (e) => this._onPointerEvent("down", e), cap);
+    this._viewport.addEventListener("mouseup", (e) => this._onPointerEvent("up", e), cap);
+    this._viewport.addEventListener("mouseleave", (e) => this._onPointerEvent("leave", e), sig);
     this._resizeObserver = new ResizeObserver(() => {
       this._syncLayers();
       this._updateMinimap();
@@ -1722,17 +2614,97 @@ var Viewer = class {
     this._view.isDragging = false;
     this._viewport.style.cursor = "grab";
   }
+  /** @private Converte um evento de mouse em 'pointer' (e 'click'); seleção por clique. */
+  _onPointerEvent(type, e) {
+    const wantPointer = this._events.hasListeners("pointer");
+    if (!wantPointer && !this._clickSelect) return;
+    if (type === "down") {
+      this._pointerDown = { x: e.clientX, y: e.clientY, button: e.button };
+    }
+    const payload = wantPointer || type === "up" ? this._pointerPayload(type, e) : null;
+    if (wantPointer) this._emit("pointer", payload);
+    if (type !== "up") return;
+    const d = this._pointerDown;
+    this._pointerDown = null;
+    if (!d || d.button !== e.button || Math.abs(e.clientX - d.x) > 3 || Math.abs(e.clientY - d.y) > 3) return;
+    const click = { ...payload, type: "click" };
+    if (wantPointer) this._emit("pointer", click);
+    if (this._clickSelect && e.button === 0) this._applyClickSelect(click);
+  }
+  /** @private */
+  _pointerPayload(type, e) {
+    const p = this.screenToImageCoords(e.clientX, e.clientY);
+    const { width, height } = this.imageSize;
+    return {
+      type,
+      x: p.x,
+      y: p.y,
+      px: Math.floor(p.x),
+      py: Math.floor(p.y),
+      inside: p.x >= 0 && p.y >= 0 && p.x < width && p.y < height,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      button: e.button,
+      buttons: e.buttons,
+      shiftKey: e.shiftKey,
+      ctrlKey: e.ctrlKey,
+      altKey: e.altKey,
+      metaKey: e.metaKey,
+      target: this._targetFromElement(e.target),
+      event: e
+    };
+  }
+  /** @private */
+  _applyClickSelect(click) {
+    const multi = !!click[this._clickSelect.multiKey];
+    const t = click.target;
+    if (!t || t.id == null) {
+      if (!multi) this._selection.clear({ source: "click" });
+      return;
+    }
+    const { element, ...item } = t;
+    if (multi) this._selection.toggle(item, { source: "click" });
+    else this._selection.set([item], { source: "click" });
+  }
+  /** @private Marcador sob `el` como {layer, kind, id, data, element}, ou null. */
+  _targetFromElement(el) {
+    const marker = el && el.closest ? el.closest(".mntviz-mnt-marker") : null;
+    if (!marker || !this._svg.contains(marker)) return null;
+    const layerEl = marker.closest("g.mntviz-layer");
+    const layer = layerEl ? layerEl.getAttribute("data-layer") : null;
+    let kind = "minutia";
+    let data = minutiaDataMap.get(marker);
+    if (!data) {
+      data = singularityDataMap.get(marker);
+      kind = data ? "singularity" : "marker";
+    }
+    const id = data && data._index != null ? data._index : null;
+    return { layer, kind, id, data: data || null, element: marker };
+  }
+  /** @private Liga a classe `mntviz-selected` nos marcadores selecionados. */
+  _renderSelection() {
+    if (!this._svg || !this._selection) return;
+    const keys = new Set(this._selection.keys);
+    if (!keys.size && !this._svg.querySelector(".mntviz-selected")) return;
+    for (const m of this._svg.querySelectorAll(".mntviz-mnt-marker")) {
+      const t = this._targetFromElement(m);
+      const on = !!(t && t.id != null && keys.has(this._selection.keyOf(t)));
+      m.classList.toggle("mntviz-selected", on);
+    }
+  }
   /* ── Internal rendering ─────────────────────────────────── */
   _applyTransform() {
-    const { translateX: tx, translateY: ty, scale: s, rotation: r } = this._view;
+    const { translateX: tx, translateY: ty, scale: s, rotation: r, flipX } = this._view;
     const { width, height } = this.imageSize;
     const cx = width / 2;
     const cy = height / 2;
-    this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s}) translate(${cx}px, ${cy}px) rotate(${r}deg) translate(${-cx}px, ${-cy}px)`;
+    const flip = flipX ? " scale(-1, 1)" : "";
+    this._canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${s}) translate(${cx}px, ${cy}px) rotate(${r}deg)${flip} translate(${-cx}px, ${-cy}px)`;
     this._setHudInputValue(this._zoomField.input, `${Math.round(s * 100)}`);
     this._setHudInputValue(this._rotationField.input, _formatSignedAngle(r));
     this._updateMinimap();
     if (this._options.onTransform) this._options.onTransform();
+    this._emit("view", this.viewState);
   }
   _syncLayers() {
     const vs = this._virtualSize;
@@ -1748,6 +2720,7 @@ var Viewer = class {
     this._svg.style.width = cw + "px";
     this._svg.style.height = ch + "px";
     this._svg.setAttribute("viewBox", `0 0 ${nw} ${nh}`);
+    if (this.layers) this.layers._syncSize();
   }
   _updateMinimap() {
     if (!this._minimapRect || !this._minimapImg) return;
@@ -1774,10 +2747,7 @@ var Viewer = class {
       ox = (cw - rw) / 2;
       oy = 0;
     }
-    const visX = -this._view.translateX / this._view.scale;
-    const visY = -this._view.translateY / this._view.scale;
-    const visW = vw / this._view.scale;
-    const visH = vh / this._view.scale;
+    const { x: visX, y: visY, w: visW, h: visH } = this.visibleRegion();
     const rx = rw / nw;
     const ry = rh / nh;
     const left = Math.max(ox, Math.min(ox + visX * rx, ox + rw));
@@ -1848,6 +2818,21 @@ function _el(tag, className) {
   el.className = className;
   return el;
 }
+function _flattenLayersForExport(root) {
+  for (const g of [...root.children]) {
+    if (g.localName !== "g" || !g.classList.contains("mntviz-layer")) continue;
+    if (g.getAttribute("display") === "none") {
+      g.remove();
+      continue;
+    }
+    if (g.hasAttribute("opacity")) {
+      g.removeAttribute("class");
+      continue;
+    }
+    while (g.firstChild) root.insertBefore(g.firstChild, g);
+    g.remove();
+  }
+}
 function _normalizeAngle180(angle) {
   return ((Number(angle) + 180) % 360 + 360) % 360 - 180;
 }
@@ -1871,9 +2856,9 @@ function _formatSignedAngle(angle) {
 }
 
 // src/segments-renderer.js
-var SVG_NS5 = "http://www.w3.org/2000/svg";
+var SVG_NS7 = "http://www.w3.org/2000/svg";
 var segmentDataMap = /* @__PURE__ */ new WeakMap();
-var DEFAULTS3 = {
+var DEFAULTS4 = {
   color: "#00ff00",
   width: 1,
   alpha: 0.7,
@@ -1882,10 +2867,12 @@ var DEFAULTS3 = {
 };
 var SegmentsRenderer = class {
   /**
-   * @param {SVGElement} svgElement - Target SVG layer (e.g. Viewer.svgLayer).
+   * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+   *        Camada da LayerStack (recomendado), elemento SVG próprio ou Viewer (SVG comum).
    */
   constructor(svgElement) {
-    this._svg = svgElement;
+    this._svg = resolveTarget(svgElement);
+    this._nodes = [];
   }
   /**
    * Draw segments as straight lines between minutiae endpoints.
@@ -1898,8 +2885,8 @@ var SegmentsRenderer = class {
    */
   draw(minutiae, segments, options = {}) {
     if (!segments || segments.length === 0) return [];
-    const opts = { ...DEFAULTS3, ...options };
-    const g = document.createElementNS(SVG_NS5, "g");
+    const opts = { ...DEFAULTS4, ...options };
+    const g = document.createElementNS(SVG_NS7, "g");
     g.classList.add("mntviz-segments");
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-linecap", "round");
@@ -1911,11 +2898,11 @@ var SegmentsRenderer = class {
         visibleLines.push(null);
         continue;
       }
-      const mg = document.createElementNS(SVG_NS5, "g");
+      const mg = document.createElementNS(SVG_NS7, "g");
       mg.classList.add("mntviz-segment-marker");
       mg.style.pointerEvents = "auto";
       mg.style.cursor = "crosshair";
-      const hit = document.createElementNS(SVG_NS5, "line");
+      const hit = document.createElementNS(SVG_NS7, "line");
       hit.setAttribute("x1", a.x);
       hit.setAttribute("y1", a.y);
       hit.setAttribute("x2", b.x);
@@ -1924,7 +2911,7 @@ var SegmentsRenderer = class {
       hit.setAttribute("stroke-width", opts.hitWidth);
       hit.setAttribute("fill", "none");
       mg.appendChild(hit);
-      const line = document.createElementNS(SVG_NS5, "line");
+      const line = document.createElementNS(SVG_NS7, "line");
       line.classList.add("mntviz-segment");
       line.setAttribute("x1", a.x);
       line.setAttribute("y1", a.y);
@@ -1939,13 +2926,15 @@ var SegmentsRenderer = class {
       g.appendChild(mg);
     }
     this._svg.appendChild(g);
+    this._nodes.push(g);
     return visibleLines;
   }
-  /** Remove any previously-drawn segment group from this layer. */
+  /**
+   * Remove any previously-drawn segment group from this layer (no SVG comum
+   * do viewer, só os grupos deste renderer).
+   */
   clear() {
-    for (const el of this._svg.querySelectorAll("g.mntviz-segments")) {
-      el.remove();
-    }
+    clearOwned(this._svg, this._nodes, "g.mntviz-segments");
   }
 };
 
@@ -12222,6 +13211,7 @@ var _LUTS = {
   "hot": _HOT,
   "coolwarm": _COOLWARM
 };
+var COLORMAP_NAMES = ["magma", "viridis", "RdYlGn", "Greens", "Reds", "PiYG", "inferno", "plasma", "hot", "coolwarm"];
 function applyColormap(gray, width, height, cmapName, opts = {}) {
   const lut = _LUTS[cmapName] || _LUTS.magma;
   const alphaMode = opts.alpha ?? "value";
@@ -12306,8 +13296,18 @@ var OverlayLayer = class {
       this._container.appendChild(this._contourCanvas);
     }
     this._resizeObserver = new ResizeObserver(() => this._syncSize());
-    const baseImg = this._container.querySelector(".mntviz-img-layer");
+    const baseImg = this._baseImage();
     if (baseImg) this._resizeObserver.observe(baseImg);
+  }
+  /**
+   * @private A imagem de base do viewer: irmã no container, ou a do container
+   * transformado quando o overlay mora numa camada 'html' da LayerStack.
+   */
+  _baseImage() {
+    const direct = this._container.querySelector(".mntviz-img-layer");
+    if (direct) return direct;
+    const host = this._container.closest ? this._container.closest(".mntviz-canvas-container") : null;
+    return host ? host.querySelector(":scope > .mntviz-img-layer") : null;
   }
   /**
    * Load an overlay image.
@@ -12648,7 +13648,7 @@ var OverlayLayer = class {
   }
   /** @private */
   _syncSize() {
-    const base = this._container.querySelector(".mntviz-img-layer");
+    const base = this._baseImage();
     if (!base) return;
     const w = base.clientWidth + "px";
     const h = base.clientHeight + "px";
@@ -12660,8 +13660,8 @@ var OverlayLayer = class {
 };
 
 // src/uv-renderer.js
-var SVG_NS6 = "http://www.w3.org/2000/svg";
-var DEFAULTS4 = {
+var SVG_NS8 = "http://www.w3.org/2000/svg";
+var DEFAULTS5 = {
   /** Rendering style: 'arrow' (directed, with arrowhead) or 'segment' (centered, no arrowhead). */
   style: "arrow",
   arrowSize: 3,
@@ -12682,10 +13682,12 @@ var DEFAULTS4 = {
 };
 var UVFieldRenderer = class {
   /**
-   * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer or a dedicated SVG.
+   * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+   *        Camada da LayerStack (recomendado), SVG/<g> próprio ou Viewer (SVG comum).
    */
   constructor(svgElement) {
-    this._svg = svgElement;
+    this._svg = resolveTarget(svgElement);
+    this._nodes = [];
   }
   /**
    * Draw a UV vector field as arrows with confidence-modulated size and opacity.
@@ -12698,7 +13700,7 @@ var UVFieldRenderer = class {
    * @param {object} [options] - Override defaults.
    */
   draw(arrows, options = {}) {
-    const opts = { ...DEFAULTS4, ...options };
+    const opts = { ...DEFAULTS5, ...options };
     const {
       style,
       arrowSize,
@@ -12711,7 +13713,7 @@ var UVFieldRenderer = class {
       modulationWidthMin,
       modulationAlphaMin
     } = opts;
-    this._svg.innerHTML = "";
+    clearOwned(this._svg, this._nodes);
     for (const arrow of arrows) {
       const [x, y, dx, dy, conf] = arrow;
       const mod = arrow.length > 5 ? arrow[5] : 1;
@@ -12724,12 +13726,12 @@ var UVFieldRenderer = class {
         lw *= modulationWidthMin + (1 - modulationWidthMin) * mod;
       }
       if (alpha < alphaThreshold) continue;
-      const g = document.createElementNS(SVG_NS6, "g");
+      const g = document.createElementNS(SVG_NS8, "g");
       g.setAttribute("opacity", alpha);
       g.setAttribute("stroke", color);
       g.setAttribute("fill", color);
       g.setAttribute("stroke-linecap", "round");
-      const line = document.createElementNS(SVG_NS6, "line");
+      const line = document.createElementNS(SVG_NS8, "line");
       line.setAttribute("stroke-width", lw);
       if (style === "segment") {
         const mag = Math.hypot(dx, dy);
@@ -12765,27 +13767,28 @@ var UVFieldRenderer = class {
           const ly = by + py * (headW / 2);
           const rx = bx - px * (headW / 2);
           const ry = by - py * (headW / 2);
-          const polygon = document.createElementNS(SVG_NS6, "polygon");
+          const polygon = document.createElementNS(SVG_NS8, "polygon");
           polygon.setAttribute("points", `${tipX},${tipY} ${lx},${ly} ${rx},${ry}`);
           polygon.setAttribute("stroke", "none");
           g.appendChild(polygon);
         }
       }
       this._svg.appendChild(g);
+      this._nodes.push(g);
     }
   }
-  /** Remove all drawn arrows. */
+  /** Remove all drawn arrows (só as deste renderer, no SVG comum do viewer). */
   clear() {
-    this._svg.innerHTML = "";
+    clearOwned(this._svg, this._nodes);
   }
 };
 
 // src/match-viewer.js
-var SVG_NS7 = "http://www.w3.org/2000/svg";
+var SVG_NS9 = "http://www.w3.org/2000/svg";
 var PATCH_NEIGHBOR_ALPHA = 0.4;
 var WHEEL_ROTATION_DEG_PER_TICK = 2;
 var MARKER_VISIBILITY = ["all", "paired", "none"];
-var DEFAULTS5 = {
+var DEFAULTS6 = {
   leftMinutiae: [],
   rightMinutiae: [],
   pairs: [],
@@ -12819,7 +13822,7 @@ var MatchViewer = class {
   constructor(container, options = {}) {
     this._el = typeof container === "string" ? document.querySelector(container) : container;
     if (!this._el) throw new Error("mntviz MatchViewer: container not found");
-    this._options = { ...DEFAULTS5, ...options };
+    this._options = { ...DEFAULTS6, ...options };
     this._leftViewer = null;
     this._rightViewer = null;
     this._allSegmentsVisible = this._options.showSegmentsOnLoad;
@@ -12860,7 +13863,7 @@ var MatchViewer = class {
     }
     this._rightHost = _el2("div", "mntviz-match-viewer-host");
     this._rightPanel.appendChild(this._rightHost);
-    this._overlaySvg = document.createElementNS(SVG_NS7, "svg");
+    this._overlaySvg = document.createElementNS(SVG_NS9, "svg");
     this._overlaySvg.classList.add("mntviz-match-overlay");
     this._overlaySvg.setAttribute("width", "100%");
     this._overlaySvg.setAttribute("height", "100%");
@@ -12901,13 +13904,13 @@ var MatchViewer = class {
     this._popupPatchesWrap = _el2("div", "mntviz-match-popup-patches");
     this._leftPatchWrap = _el2("div", "mntviz-match-popup-patch");
     this._leftPatchCanvas = document.createElement("canvas");
-    this._leftPatchSvg = document.createElementNS(SVG_NS7, "svg");
+    this._leftPatchSvg = document.createElementNS(SVG_NS9, "svg");
     const leftLabel = _el2("div", "mntviz-match-popup-patch-label");
     leftLabel.textContent = "L";
     this._leftPatchWrap.append(this._leftPatchCanvas, this._leftPatchSvg, leftLabel);
     this._rightPatchWrap = _el2("div", "mntviz-match-popup-patch");
     this._rightPatchCanvas = document.createElement("canvas");
-    this._rightPatchSvg = document.createElementNS(SVG_NS7, "svg");
+    this._rightPatchSvg = document.createElementNS(SVG_NS9, "svg");
     const rightLabel = _el2("div", "mntviz-match-popup-patch-label");
     rightLabel.textContent = "R";
     this._rightPatchWrap.append(this._rightPatchCanvas, this._rightPatchSvg, rightLabel);
@@ -13063,14 +14066,14 @@ var MatchViewer = class {
     const rSize = this._rightViewer.imageSize;
     const totalW = lSize.width + gap + rSize.width;
     const totalH = Math.max(lSize.height, rSize.height);
-    const svg = document.createElementNS(SVG_NS7, "svg");
-    svg.setAttribute("xmlns", SVG_NS7);
+    const svg = document.createElementNS(SVG_NS9, "svg");
+    svg.setAttribute("xmlns", SVG_NS9);
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     svg.setAttribute("width", totalW);
     svg.setAttribute("height", totalH);
     svg.setAttribute("viewBox", `0 0 ${totalW} ${totalH}`);
     const embedPanel = (viewer, offsetX) => {
-      const g = document.createElementNS(SVG_NS7, "g");
+      const g = document.createElementNS(SVG_NS9, "g");
       if (offsetX) g.setAttribute("transform", `translate(${offsetX}, 0)`);
       const img = viewer.imageElement;
       if (img.src) {
@@ -13081,7 +14084,7 @@ var MatchViewer = class {
         canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0);
         const dataUri = canvas.toDataURL("image/png");
-        const svgImg = document.createElementNS(SVG_NS7, "image");
+        const svgImg = document.createElementNS(SVG_NS9, "image");
         svgImg.setAttribute("href", dataUri);
         svgImg.setAttribute("width", w);
         svgImg.setAttribute("height", h);
@@ -13096,14 +14099,14 @@ var MatchViewer = class {
     svg.appendChild(embedPanel(this._leftViewer, 0));
     svg.appendChild(embedPanel(this._rightViewer, lSize.width + gap));
     const opts = this._options;
-    const segG = document.createElementNS(SVG_NS7, "g");
+    const segG = document.createElementNS(SVG_NS9, "g");
     for (let i = 0; i < opts.pairs.length; i++) {
       const domLine = this._segmentLines[i];
       if (domLine.style.display === "none") continue;
       const p = opts.pairs[i];
       const lm = opts.leftMinutiae[p.leftIdx];
       const rm = opts.rightMinutiae[p.rightIdx];
-      const line = document.createElementNS(SVG_NS7, "line");
+      const line = document.createElementNS(SVG_NS9, "line");
       line.setAttribute("x1", lm.x);
       line.setAttribute("y1", lm.y);
       line.setAttribute("x2", rm.x + lSize.width + gap);
@@ -13143,14 +14146,14 @@ var MatchViewer = class {
     const rVpH = this._rightViewer.viewport.clientHeight;
     const totalW = lVpW + gap + rVpW;
     const totalH = Math.max(lVpH, rVpH);
-    const svg = document.createElementNS(SVG_NS7, "svg");
-    svg.setAttribute("xmlns", SVG_NS7);
+    const svg = document.createElementNS(SVG_NS9, "svg");
+    svg.setAttribute("xmlns", SVG_NS9);
     svg.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
     svg.setAttribute("width", totalW);
     svg.setAttribute("height", totalH);
     svg.setAttribute("viewBox", `0 0 ${totalW} ${totalH}`);
     const embedView = (viewer, vpW, vpH, offsetX) => {
-      const nested = document.createElementNS(SVG_NS7, "svg");
+      const nested = document.createElementNS(SVG_NS9, "svg");
       nested.setAttribute("x", offsetX);
       nested.setAttribute("y", 0);
       nested.setAttribute("width", vpW);
@@ -13160,7 +14163,7 @@ var MatchViewer = class {
       const { width: iw, height: ih } = viewer.imageSize;
       const ox = iw / 2;
       const oy = ih / 2;
-      const g = document.createElementNS(SVG_NS7, "g");
+      const g = document.createElementNS(SVG_NS9, "g");
       g.setAttribute(
         "transform",
         `translate(${tx}, ${ty}) scale(${s}) translate(${ox}, ${oy}) rotate(${r}) translate(${-ox}, ${-oy})`
@@ -13171,7 +14174,7 @@ var MatchViewer = class {
         canvas.width = iw;
         canvas.height = ih;
         canvas.getContext("2d").drawImage(img, 0, 0);
-        const svgImg = document.createElementNS(SVG_NS7, "image");
+        const svgImg = document.createElementNS(SVG_NS9, "image");
         svgImg.setAttribute("href", canvas.toDataURL("image/png"));
         svgImg.setAttribute("width", iw);
         svgImg.setAttribute("height", ih);
@@ -13185,7 +14188,7 @@ var MatchViewer = class {
     svg.appendChild(embedView(this._leftViewer, lVpW, lVpH, 0));
     svg.appendChild(embedView(this._rightViewer, rVpW, rVpH, lVpW + gap));
     const opts = this._options;
-    const segG = document.createElementNS(SVG_NS7, "g");
+    const segG = document.createElementNS(SVG_NS9, "g");
     for (let i = 0; i < opts.pairs.length; i++) {
       const domLine = this._segmentLines[i];
       if (domLine.style.display === "none") continue;
@@ -13194,7 +14197,7 @@ var MatchViewer = class {
       const rm = opts.rightMinutiae[p.rightIdx];
       const lp = this._leftViewer.imageToElementCoords(lm.x, lm.y, this._leftViewer.viewport);
       const rp = this._rightViewer.imageToElementCoords(rm.x, rm.y, this._rightViewer.viewport);
-      const line = document.createElementNS(SVG_NS7, "line");
+      const line = document.createElementNS(SVG_NS9, "line");
       line.setAttribute("x1", lp.x);
       line.setAttribute("y1", lp.y);
       line.setAttribute("x2", lVpW + gap + rp.x);
@@ -13710,10 +14713,10 @@ var MatchViewer = class {
     return null;
   }
   _createGhostCursor(svgRoot) {
-    const g = document.createElementNS(SVG_NS7, "g");
+    const g = document.createElementNS(SVG_NS9, "g");
     g.classList.add("mntviz-ghost-cursor");
     g.style.display = "none";
-    const circle = document.createElementNS(SVG_NS7, "circle");
+    const circle = document.createElementNS(SVG_NS9, "circle");
     circle.setAttribute("r", "4");
     circle.setAttribute("cx", "0");
     circle.setAttribute("cy", "0");
@@ -14020,7 +15023,7 @@ var MatchViewer = class {
    */
   _buildPairSegment(p, i) {
     const sig = { signal: this._ac.signal };
-    const line = document.createElementNS(SVG_NS7, "line");
+    const line = document.createElementNS(SVG_NS9, "line");
     line.classList.add("mntviz-match-segment");
     line.setAttribute("stroke", p.color || this._options.markerColor);
     line.setAttribute("stroke-opacity", p.alpha != null ? p.alpha : 0.6);
@@ -14028,7 +15031,7 @@ var MatchViewer = class {
     line.style.display = "none";
     this._overlaySvg.appendChild(line);
     this._segmentLines[i] = line;
-    const hitLine = document.createElementNS(SVG_NS7, "line");
+    const hitLine = document.createElementNS(SVG_NS9, "line");
     hitLine.classList.add("mntviz-match-segment-hitbox");
     hitLine.dataset.pairIndex = String(i);
     hitLine.style.display = "none";
@@ -14253,14 +15256,14 @@ var MatchViewer = class {
     const rad = angleDeg * (Math.PI / 180);
     const xEnd = x + segLen * Math.cos(rad);
     const yEnd = y - segLen * Math.sin(rad);
-    const g = document.createElementNS(SVG_NS7, "g");
+    const g = document.createElementNS(SVG_NS9, "g");
     g.setAttribute("opacity", opacity);
     g.setAttribute("stroke", color);
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-width", "1");
     const marker = createMarkerShape(shape, x, y, r);
     g.appendChild(marker);
-    const line = document.createElementNS(SVG_NS7, "line");
+    const line = document.createElementNS(SVG_NS9, "line");
     line.setAttribute("x1", x);
     line.setAttribute("y1", y);
     line.setAttribute("x2", xEnd);
@@ -14384,138 +15387,103 @@ function _indexMarkersByIndex(svgLayer) {
   return map;
 }
 
-// src/singularity-renderer.js
-var SVG_NS8 = "http://www.w3.org/2000/svg";
-var DEFAULTS6 = {
-  markerSize: 5,
-  lineWidth: 1.5,
-  segmentLength: 12,
-  baseOpacity: 1
+// src/multi-viewer.js
+var _el3 = (tag, cls) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  return e;
 };
-var SingularityRenderer = class {
+var MultiViewer = class {
   /**
-   * @param {SVGElement} svgElement - The SVG layer from Viewer.svgLayer.
+   * @param {string|HTMLElement} hostOrSelector
+   * @param {object} [options]
+   * @param {Array<{title?: string}>} [options.panels=[]]
+   * @param {boolean} [options.coupled=true]
    */
-  constructor(svgElement) {
-    this._svg = svgElement;
-    this._viewport = svgElement.closest(".mntviz-viewport") || svgElement.parentNode;
-    this._tooltip = null;
-    this._hideTimer = null;
+  constructor(hostOrSelector, { panels = [], coupled = true } = {}) {
+    this._host = typeof hostOrSelector === "string" ? document.querySelector(hostOrSelector) : hostOrSelector;
+    if (!this._host) throw new Error(`MultiViewer: host not found: ${hostOrSelector}`);
+    this._coupled = coupled;
+    this._syncing = false;
+    this._viewers = [];
+    this._buildDOM(panels);
   }
-  _ensureTooltip() {
-    if (this._tooltip) return;
-    const tip = document.createElement("div");
-    tip.className = "mntviz-inspector-tooltip";
-    this._viewport.appendChild(tip);
-    this._tooltip = tip;
+  /* ── Public API ──────────────────────────────────────────── */
+  /** Returns the Viewer at the given panel index. */
+  getViewer(idx) {
+    return this._viewers[idx];
   }
-  _showTooltip(html, markerEl) {
-    this._ensureTooltip();
-    clearTimeout(this._hideTimer);
-    this._tooltip.innerHTML = html;
-    this._tooltip.classList.add("mntviz-inspector-visible");
-    this._positionTooltip(markerEl);
+  /** All Viewer instances (read-only copy). */
+  get viewers() {
+    return [...this._viewers];
   }
-  _hideTooltipSoon() {
-    clearTimeout(this._hideTimer);
-    this._hideTimer = setTimeout(() => {
-      if (this._tooltip) {
-        this._tooltip.classList.remove("mntviz-inspector-visible");
-      }
-    }, 60);
+  /** Number of panels. */
+  get length() {
+    return this._viewers.length;
   }
-  _positionTooltip(markerEl) {
-    const mr = markerEl.getBoundingClientRect();
-    const vr = this._viewport.getBoundingClientRect();
-    const cx = mr.left + mr.width / 2 - vr.left;
-    const cy = mr.top + mr.height / 2 - vr.top;
-    const tw = this._tooltip.offsetWidth;
-    const th = this._tooltip.offsetHeight;
-    let left = cx + 15;
-    let top = cy - th / 2;
-    if (left + tw > vr.width) left = cx - tw - 15;
-    if (left < 5) left = 5;
-    if (top < 5) top = 5;
-    if (top + th > vr.height - 5) top = vr.height - th - 5;
-    this._tooltip.style.left = `${left}px`;
-    this._tooltip.style.top = `${top}px`;
+  /** Enable or disable coupled navigation. */
+  setCoupled(active) {
+    this._coupled = !!active;
+  }
+  /** Whether coupled navigation is currently active. */
+  get coupled() {
+    return this._coupled;
   }
   /**
-   * Draw singularity points (core and delta).
-   *
-   * @param {Array<{type: string, x: number, y: number, angles: number[]}>} singularities
-   * @param {string} color - CSS color.
-   * @param {object} [options] - Override defaults.
+   * Load images into all panels simultaneously.
+   * @param {string[]} srcs - One URL per panel; extra entries are ignored.
    */
-  draw(singularities, color, options = {}) {
-    const opts = { ...DEFAULTS6, ...options };
-    const { markerSize, lineWidth, segmentLength, baseOpacity } = opts;
-    const g = document.createElementNS(SVG_NS8, "g");
-    g.setAttribute("stroke", color);
-    g.setAttribute("fill", "none");
-    g.setAttribute("stroke-width", lineWidth);
-    g.setAttribute("stroke-linecap", "round");
-    g.setAttribute("stroke-linejoin", "round");
-    for (const s of singularities) {
-      const { type, x, y, angles } = s;
-      const conf = typeof s.confidence === "number" ? s.confidence : 1;
-      const sg = document.createElementNS(SVG_NS8, "g");
-      sg.setAttribute("opacity", baseOpacity * conf);
-      sg.classList.add("mntviz-sin-marker", "mntviz-mnt-marker");
-      sg.style.pointerEvents = "auto";
-      sg.style.cursor = "crosshair";
-      const hit = document.createElementNS(SVG_NS8, "circle");
-      hit.setAttribute("cx", x);
-      hit.setAttribute("cy", y);
-      hit.setAttribute("r", markerSize + 4);
-      hit.setAttribute("fill", "transparent");
-      hit.setAttribute("stroke", "none");
-      sg.appendChild(hit);
-      const visual = document.createElementNS(SVG_NS8, "g");
-      visual.classList.add("mntviz-mnt-visual");
-      const shape = type === "delta" ? "triangle" : "circle";
-      const marker = createMarkerShape(shape, x, y, markerSize);
-      visual.appendChild(marker);
-      for (const angle of angles) {
-        const rad = angle * (Math.PI / 180);
-        const xEnd = x + segmentLength * Math.cos(rad);
-        const yEnd = y - segmentLength * Math.sin(rad);
-        const line = document.createElementNS(SVG_NS8, "line");
-        line.setAttribute("x1", x);
-        line.setAttribute("y1", y);
-        line.setAttribute("x2", xEnd);
-        line.setAttribute("y2", yEnd);
-        visual.appendChild(line);
+  async loadImages(srcs) {
+    const promises = srcs.map((src, i) => {
+      if (i < this._viewers.length) return this._viewers[i].loadImage(src);
+      return Promise.resolve();
+    });
+    await Promise.all(promises);
+  }
+  /* ── Internal ────────────────────────────────────────────── */
+  _buildDOM(panels) {
+    this._host.innerHTML = "";
+    const container = _el3("div", "mntviz-multi-container");
+    for (let i = 0; i < panels.length; i++) {
+      const panel = _el3("div", "mntviz-multi-panel");
+      if (panels[i].title) {
+        const title = _el3("div", "mntviz-multi-title");
+        title.textContent = panels[i].title;
+        panel.appendChild(title);
       }
-      sg.appendChild(visual);
-      const angsStr = angles.map((a) => `${Math.round(a)}\xB0`).join(", ");
-      const html = `<span>${type.toUpperCase()}</span>  <span>x:</span> ${Math.round(x)}  <span>y:</span> ${Math.round(y)}<br><span>angle${angles.length > 1 ? "s" : ""}:</span> ${angsStr}<br><span>conf:</span> ${(conf * 100).toFixed(0)}`;
-      sg.addEventListener("mouseenter", () => {
-        sg.classList.add("mntviz-mnt-highlighted");
-        this._showTooltip(html, sg);
+      const viewerHost = _el3("div", "mntviz-multi-viewer-host");
+      panel.appendChild(viewerHost);
+      container.appendChild(panel);
+      const idx = i;
+      const viewer = new Viewer(viewerHost, {
+        minimap: false,
+        onTransform: () => this._onViewerTransform(idx)
       });
-      sg.addEventListener("mouseleave", () => {
-        sg.classList.remove("mntviz-mnt-highlighted");
-        this._hideTooltipSoon();
-      });
-      g.appendChild(sg);
+      this._viewers.push(viewer);
     }
-    this._svg.appendChild(g);
+    this._host.appendChild(container);
   }
-  /** Remove all drawn singularities. */
-  clear() {
-    this._svg.innerHTML = "";
-    if (this._tooltip) {
-      this._tooltip.classList.remove("mntviz-inspector-visible");
+  _onViewerTransform(idx) {
+    if (!this._coupled || this._syncing) return;
+    this._syncing = true;
+    try {
+      const state = this._viewers[idx].viewState;
+      for (let i = 0; i < this._viewers.length; i++) {
+        if (i === idx) continue;
+        this._viewers[i].setView(state);
+      }
+    } finally {
+      this._syncing = false;
     }
   }
 };
 
 // src/plots.js
-var SVG_NS9 = "http://www.w3.org/2000/svg";
+var SVG_NS10 = "http://www.w3.org/2000/svg";
+var Z = { segments: 10, uv: 10, minutiae: 20, singularities: 30, shapes: 40 };
 function _createShapeElement(shape) {
   if (shape.type === "polygon") {
-    const poly = document.createElementNS(SVG_NS9, "polygon");
+    const poly = document.createElementNS(SVG_NS10, "polygon");
     poly.setAttribute("points", shape.points.map((p) => p.join(",")).join(" "));
     poly.setAttribute("stroke", shape.stroke || "#ff0000");
     poly.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -14524,7 +15492,7 @@ function _createShapeElement(shape) {
     return poly;
   }
   if (shape.type === "circle") {
-    const c = document.createElementNS(SVG_NS9, "circle");
+    const c = document.createElementNS(SVG_NS10, "circle");
     c.setAttribute("cx", shape.x);
     c.setAttribute("cy", shape.y);
     c.setAttribute("r", shape.r != null ? shape.r : 3);
@@ -14535,16 +15503,16 @@ function _createShapeElement(shape) {
     return c;
   }
   if (shape.type === "cross") {
-    const g = document.createElementNS(SVG_NS9, "g");
+    const g = document.createElementNS(SVG_NS10, "g");
     g.setAttribute("stroke", shape.stroke || "#00ff00");
     g.setAttribute("stroke-width", shape.strokeWidth || 1);
     const s = shape.size || 10;
-    const h = document.createElementNS(SVG_NS9, "line");
+    const h = document.createElementNS(SVG_NS10, "line");
     h.setAttribute("x1", shape.x - s / 2);
     h.setAttribute("y1", shape.y);
     h.setAttribute("x2", shape.x + s / 2);
     h.setAttribute("y2", shape.y);
-    const v = document.createElementNS(SVG_NS9, "line");
+    const v = document.createElementNS(SVG_NS10, "line");
     v.setAttribute("x1", shape.x);
     v.setAttribute("y1", shape.y - s / 2);
     v.setAttribute("x2", shape.x);
@@ -14554,13 +15522,13 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "minutia") {
-    const g = document.createElementNS(SVG_NS9, "g");
+    const g = document.createElementNS(SVG_NS10, "g");
     const color = shape.stroke || "#00ff00";
     g.setAttribute("stroke", color);
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-width", shape.strokeWidth || 1.5);
     const r = shape.radius || 6;
-    const circle = document.createElementNS(SVG_NS9, "circle");
+    const circle = document.createElementNS(SVG_NS10, "circle");
     circle.setAttribute("cx", shape.x);
     circle.setAttribute("cy", shape.y);
     circle.setAttribute("r", r);
@@ -14569,7 +15537,7 @@ function _createShapeElement(shape) {
     const rad = (shape.angle || 0) * Math.PI / 180;
     const dx = Math.cos(rad) * segLen;
     const dy = Math.sin(rad) * segLen;
-    const line = document.createElementNS(SVG_NS9, "line");
+    const line = document.createElementNS(SVG_NS10, "line");
     line.setAttribute("x1", shape.x);
     line.setAttribute("y1", shape.y);
     line.setAttribute("x2", shape.x + dx);
@@ -14579,7 +15547,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "path") {
-    const path = document.createElementNS(SVG_NS9, "path");
+    const path = document.createElementNS(SVG_NS10, "path");
     path.setAttribute("d", shape.d);
     path.setAttribute("stroke", shape.stroke || "#ff0000");
     path.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -14588,7 +15556,7 @@ function _createShapeElement(shape) {
     return path;
   }
   if (shape.type === "conic-ring") {
-    const g = document.createElementNS(SVG_NS9, "g");
+    const g = document.createElementNS(SVG_NS10, "g");
     if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
     const cx = shape.x, cy = shape.y, r = shape.r;
     const sw = shape.strokeWidth != null ? shape.strokeWidth : 2;
@@ -14596,22 +15564,22 @@ function _createShapeElement(shape) {
     const bx = cx - r - pad, by = cy - r - pad;
     const bs = (r + pad) * 2;
     const maskId = "mntviz-conic-mask-" + Math.random().toString(36).slice(2, 10);
-    const defs = document.createElementNS(SVG_NS9, "defs");
-    const mask = document.createElementNS(SVG_NS9, "mask");
+    const defs = document.createElementNS(SVG_NS10, "defs");
+    const mask = document.createElementNS(SVG_NS10, "mask");
     mask.setAttribute("id", maskId);
     mask.setAttribute("maskUnits", "userSpaceOnUse");
     mask.setAttribute("x", bx);
     mask.setAttribute("y", by);
     mask.setAttribute("width", bs);
     mask.setAttribute("height", bs);
-    const bg = document.createElementNS(SVG_NS9, "rect");
+    const bg = document.createElementNS(SVG_NS10, "rect");
     bg.setAttribute("x", bx);
     bg.setAttribute("y", by);
     bg.setAttribute("width", bs);
     bg.setAttribute("height", bs);
     bg.setAttribute("fill", "black");
     mask.appendChild(bg);
-    const ringCircle = document.createElementNS(SVG_NS9, "circle");
+    const ringCircle = document.createElementNS(SVG_NS10, "circle");
     ringCircle.setAttribute("cx", cx);
     ringCircle.setAttribute("cy", cy);
     ringCircle.setAttribute("r", r);
@@ -14634,7 +15602,7 @@ function _createShapeElement(shape) {
       stops = String(shape.gradient || "red, yellow, lime, cyan, blue, magenta, red");
     }
     const fromDeg = shape.fromAngle != null ? shape.fromAngle : 0;
-    const fo = document.createElementNS(SVG_NS9, "foreignObject");
+    const fo = document.createElementNS(SVG_NS10, "foreignObject");
     fo.setAttribute("x", bx);
     fo.setAttribute("y", by);
     fo.setAttribute("width", bs);
@@ -14650,7 +15618,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "lines") {
-    const g = document.createElementNS(SVG_NS9, "g");
+    const g = document.createElementNS(SVG_NS10, "g");
     if (shape.strokeWidth != null) g.setAttribute("stroke-width", shape.strokeWidth);
     if (shape.stroke != null) g.setAttribute("stroke", shape.stroke);
     if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
@@ -14660,29 +15628,29 @@ function _createShapeElement(shape) {
     const lineList = shape.lines || [];
     for (let i = 0; i < lineList.length; i++) {
       const l = lineList[i];
-      const ln = document.createElementNS(SVG_NS9, "line");
+      const ln = document.createElementNS(SVG_NS10, "line");
       ln.setAttribute("x1", l.x1);
       ln.setAttribute("y1", l.y1);
       ln.setAttribute("x2", l.x2);
       ln.setAttribute("y2", l.y2);
       if (l.colorStart != null && l.colorEnd != null) {
         if (defs == null) {
-          defs = document.createElementNS(SVG_NS9, "defs");
+          defs = document.createElementNS(SVG_NS10, "defs");
           gradPrefix = "mntviz-grad-" + Math.random().toString(36).slice(2, 8);
           g.insertBefore(defs, g.firstChild);
         }
         const id = `${gradPrefix}-${i}`;
-        const grad = document.createElementNS(SVG_NS9, "linearGradient");
+        const grad = document.createElementNS(SVG_NS10, "linearGradient");
         grad.setAttribute("id", id);
         grad.setAttribute("gradientUnits", "userSpaceOnUse");
         grad.setAttribute("x1", l.x1);
         grad.setAttribute("y1", l.y1);
         grad.setAttribute("x2", l.x2);
         grad.setAttribute("y2", l.y2);
-        const s0 = document.createElementNS(SVG_NS9, "stop");
+        const s0 = document.createElementNS(SVG_NS10, "stop");
         s0.setAttribute("offset", "0%");
         s0.setAttribute("stop-color", l.colorStart);
-        const s1 = document.createElementNS(SVG_NS9, "stop");
+        const s1 = document.createElementNS(SVG_NS10, "stop");
         s1.setAttribute("offset", "100%");
         s1.setAttribute("stop-color", l.colorEnd);
         grad.append(s0, s1);
@@ -14701,7 +15669,7 @@ function _createShapeElement(shape) {
 }
 function _renderShapes(svgTarget, shapes) {
   if (!shapes || shapes.length === 0) return;
-  const g = document.createElementNS(SVG_NS9, "g");
+  const g = document.createElementNS(SVG_NS10, "g");
   g.setAttribute("class", "mntviz-shapes-layer");
   for (const shape of shapes) {
     const el = _createShapeElement(shape);
@@ -14719,7 +15687,7 @@ function renderLegend(viewer, items) {
     row.classList.add("mntviz-legend-item");
     const size = 16;
     const r = 5;
-    const svg = document.createElementNS(SVG_NS9, "svg");
+    const svg = document.createElementNS(SVG_NS10, "svg");
     svg.setAttribute("width", size);
     svg.setAttribute("height", size);
     svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
@@ -14741,10 +15709,10 @@ async function plotMinutiae(host, config) {
   const viewer = new Viewer(host, { minimap: true });
   await viewer.loadImage(config.imageSrc);
   if (config.segments && config.segments.length) {
-    const sr = new SegmentsRenderer(viewer.svgLayer);
+    const sr = new SegmentsRenderer(viewer.layers.add("segments", { z: Z.segments }));
     sr.draw(config.minutiae, config.segments, config.segmentOptions ?? {});
   }
-  const renderer = new MinutiaeRenderer(viewer.svgLayer);
+  const renderer = new MinutiaeRenderer(viewer.layers.add("minutiae", { z: Z.minutiae }));
   renderer.draw(config.minutiae, config.color ?? "#00ff00", config.rendererOptions ?? {});
   if (config.inspectorOptions !== false) {
     viewer.enableMinutiaeInspector({
@@ -14762,7 +15730,7 @@ async function plotMinutiae(host, config) {
 async function plotSingularities(host, config) {
   const viewer = new Viewer(host, { minimap: true });
   await viewer.loadImage(config.imageSrc);
-  const renderer = new SingularityRenderer(viewer.svgLayer);
+  const renderer = new SingularityRenderer(viewer.layers.add("singularities", { z: Z.singularities }));
   const baseOpts = config.rendererOptions ?? {};
   const layers = Array.isArray(config.layers) && config.layers.length ? config.layers : Array.isArray(config.singularities) ? [{
     singularities: config.singularities,
@@ -14811,10 +15779,12 @@ async function plotHuv(host, config) {
     overlay.show();
   }
   if (config.arrows && config.arrows.length > 0) {
-    const uvRenderer = new UVFieldRenderer(viewer.svgLayer);
+    const uvRenderer = new UVFieldRenderer(viewer.layers.add("uv", { z: Z.uv }));
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
   }
-  _renderShapes(viewer.svgLayer, config.shapes);
+  if (config.shapes && config.shapes.length) {
+    _renderShapes(viewer.layers.add("shapes", { z: Z.shapes }).el, config.shapes);
+  }
   _maybeEnablePicker(viewer, config);
   return viewer;
 }
@@ -14836,18 +15806,18 @@ function _loadImageDimensions(src) {
   });
 }
 function _createStaticHuvSvg(config, w, h) {
-  const svg = document.createElementNS(SVG_NS9, "svg");
+  const svg = document.createElementNS(SVG_NS10, "svg");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   if (config.pixelated) svg.style.imageRendering = "pixelated";
-  const bgImage = document.createElementNS(SVG_NS9, "image");
+  const bgImage = document.createElementNS(SVG_NS10, "image");
   bgImage.setAttribute("href", config.imageSrc);
   bgImage.setAttribute("width", w);
   bgImage.setAttribute("height", h);
   if (config.pixelated) bgImage.setAttribute("image-rendering", "pixelated");
   svg.appendChild(bgImage);
   if (config.overlaySrc) {
-    const ovImage = document.createElementNS(SVG_NS9, "image");
+    const ovImage = document.createElementNS(SVG_NS10, "image");
     ovImage.setAttribute("href", config.overlaySrc);
     ovImage.setAttribute("width", w);
     ovImage.setAttribute("height", h);
@@ -14856,7 +15826,7 @@ function _createStaticHuvSvg(config, w, h) {
     svg.appendChild(ovImage);
   }
   if (config.arrows && config.arrows.length > 0) {
-    const arrowGroup = document.createElementNS(SVG_NS9, "g");
+    const arrowGroup = document.createElementNS(SVG_NS10, "g");
     svg.appendChild(arrowGroup);
     const uvRenderer = new UVFieldRenderer(arrowGroup);
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
@@ -14927,11 +15897,34 @@ async function plotMatch(host, config) {
   return mv;
 }
 export {
+  COLORMAP_NAMES,
+  Emitter,
+  FieldProbe,
+  Layer,
+  LayerStack,
+  MatchViewer,
+  MinutiaeInspector,
+  MinutiaeRenderer,
+  MultiViewer,
+  OverlayLayer,
+  PointPicker,
+  SegmentsRenderer,
+  Selection,
+  SingularityRenderer,
+  UVFieldRenderer,
+  Viewer,
+  applyColormap,
+  createMarkerShape,
+  minutiaDataMap,
+  parseMinutiaeText,
+  parseSingularityText,
   plotHuv,
   plotHuvThumbnail,
   plotMatch,
   plotMinutiae,
   plotOverlay,
   plotSingularities,
-  renderLegend
+  renderLegend,
+  segmentDataMap,
+  singularityDataMap
 };

@@ -17,6 +17,11 @@
  * Events:
  *   'change' (points)  — fired after any add/remove/set/clear
  *   'add'    (point)   — fired when a click adds a point
+ * O viewer também recebe 'change' {source: 'picker', type, points}.
+ *
+ * Coordenadas: o clique vira coordenada da imagem por viewer.screenToImageCoords,
+ * que segue a transformação viva (pan, zoom, rotação e espelho). Os pontos
+ * moram numa camada própria da LayerStack ('picker', z = 1000).
  */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -29,7 +34,7 @@ const DEFAULT_OPTIONS = {
     labelFontSize: 11,
     // Drag distance (image px) below which the release is treated as a
     // pure click — point recorded without an angle. Above the threshold,
-    // the angle is atan2(dy, dx) in CW image convention.
+    // the angle is ISO: degrees CCW from +x, 90° = image top (atan2(-dy, dx)).
     angleThreshold: 5,
     segmentLength: null,    // defaults to markerRadius * 2 if null
     // Double-click detection (window — first click is left to the Viewer
@@ -55,11 +60,18 @@ export class PointPicker {
         this._lastClickTime = 0;             // for manual double-click detection
         this._lastClickPos = null;
 
-        // Persistent SVG group above other renderers.
+        // Persistent SVG group above other renderers (camada 'picker' da
+        // LayerStack quando o viewer tem uma; senão, o SVG comum).
+        this._layer = viewer.layers ? viewer.layers.ensure('picker', { kind: 'svg', z: 1000 }) : null;
         this._group = document.createElementNS(SVG_NS, 'g');
         this._group.setAttribute('class', 'mntviz-picker-layer');
         this._group.setAttribute('pointer-events', 'none');
-        this._viewer.svgLayer.appendChild(this._group);
+        this._parent().appendChild(this._group);
+    }
+
+    /** @private Onde o grupo do picker mora. */
+    _parent() {
+        return this._layer ? this._layer.el : this._viewer.svgLayer;
     }
 
     /* ── Public API ────────────────────────────────────────────── */
@@ -269,17 +281,17 @@ export class PointPicker {
     }
 
     _mouseToImage(e) {
-        const vpRect = this._viewer.viewport.getBoundingClientRect();
-        const { scale, translateX, translateY } = this._viewer.viewState;
-        return {
-            x: Math.round((e.clientX - vpRect.left - translateX) / scale),
-            y: Math.round((e.clientY - vpRect.top  - translateY) / scale),
-        };
+        // Transformação viva do viewer (rotação e espelho incluídos); antes a
+        // conta usava só pan e zoom e errava com a imagem girada.
+        const p = this._viewer.screenToImageCoords(e.clientX, e.clientY);
+        return { x: Math.round(p.x), y: Math.round(p.y) };
     }
 
     /* ── Rendering ─────────────────────────────────────────────── */
 
     _render() {
+        // O viewer.clear() esvazia as camadas: repõe o grupo se ele saiu do DOM.
+        if (!this._group.isConnected) this._parent().appendChild(this._group);
         // Preserve the preview line across re-renders.
         const preview = this._previewLine;
         while (this._group.firstChild) this._group.removeChild(this._group.firstChild);
@@ -375,9 +387,13 @@ export class PointPicker {
 
     _emit(event, payload) {
         const subs = this._listeners.get(event);
-        if (!subs) return;
-        for (const fn of subs) {
-            try { fn(payload); } catch (err) { console.error('PointPicker listener error', err); }
+        if (subs) {
+            for (const fn of subs) {
+                try { fn(payload); } catch (err) { console.error('PointPicker listener error', err); }
+            }
+        }
+        if (event === 'change' && typeof this._viewer._emit === 'function') {
+            this._viewer._emit('change', { source: 'picker', type: 'points', points: payload });
         }
     }
 }

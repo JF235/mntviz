@@ -17,7 +17,28 @@ import { UVFieldRenderer } from './uv-renderer.js';
 import { MatchViewer } from './match-viewer.js';
 import { SingularityRenderer } from './singularity-renderer.js';
 
+// O bundle (python/src/mntviz/_bundle/plots.bundle.js) sai deste arquivo: além
+// das fachadas plot*, ele exporta as peças do kernel, para quem usa o bundle
+// fora do wrapper Python (notebooks, páginas HTML).
+export { Viewer } from './viewer.js';
+export { MinutiaeRenderer, createMarkerShape, parseMinutiaeText, minutiaDataMap } from './minutiae-renderer.js';
+export { SegmentsRenderer, segmentDataMap } from './segments-renderer.js';
+export { UVFieldRenderer } from './uv-renderer.js';
+export { OverlayLayer } from './overlay.js';
+export { MinutiaeInspector } from './minutiae-inspector.js';
+export { FieldProbe } from './field-probe.js';
+export { MatchViewer } from './match-viewer.js';
+export { SingularityRenderer, parseSingularityText, singularityDataMap } from './singularity-renderer.js';
+export { PointPicker } from './point-picker.js';
+export { MultiViewer } from './multi-viewer.js';
+export { LayerStack, Layer } from './layer-stack.js';
+export { Emitter, Selection } from './events.js';
+export { applyColormap, COLORMAP_NAMES } from './colormaps.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// z das camadas criadas pelas fachadas (de baixo para cima).
+const Z = { segments: 10, uv: 10, minutiae: 20, singularities: 30, shapes: 40 };
 
 /**
  * Create an SVG element from a shape descriptor.
@@ -305,13 +326,14 @@ export async function plotMinutiae(host, config) {
     const viewer = new Viewer(host, { minimap: true });
     await viewer.loadImage(config.imageSrc);
 
-    // Segments are drawn first so they sit under the minutiae markers.
+    // Segments are drawn first so they sit under the minutiae markers
+    // (cada renderer na sua camada; o z mantém a ordem).
     if (config.segments && config.segments.length) {
-        const sr = new SegmentsRenderer(viewer.svgLayer);
+        const sr = new SegmentsRenderer(viewer.layers.add('segments', { z: Z.segments }));
         sr.draw(config.minutiae, config.segments, config.segmentOptions ?? {});
     }
 
-    const renderer = new MinutiaeRenderer(viewer.svgLayer);
+    const renderer = new MinutiaeRenderer(viewer.layers.add('minutiae', { z: Z.minutiae }));
     renderer.draw(config.minutiae, config.color ?? '#00ff00', config.rendererOptions ?? {});
 
     if (config.inspectorOptions !== false) {
@@ -355,7 +377,7 @@ export async function plotSingularities(host, config) {
     const viewer = new Viewer(host, { minimap: true });
     await viewer.loadImage(config.imageSrc);
 
-    const renderer = new SingularityRenderer(viewer.svgLayer);
+    const renderer = new SingularityRenderer(viewer.layers.add('singularities', { z: Z.singularities }));
     const baseOpts = config.rendererOptions ?? {};
 
     const layers = Array.isArray(config.layers) && config.layers.length
@@ -444,12 +466,14 @@ export async function plotHuv(host, config) {
     }
 
     if (config.arrows && config.arrows.length > 0) {
-        const uvRenderer = new UVFieldRenderer(viewer.svgLayer);
+        const uvRenderer = new UVFieldRenderer(viewer.layers.add('uv', { z: Z.uv }));
         uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
     }
 
     // Shape overlays
-    _renderShapes(viewer.svgLayer, config.shapes);
+    if (config.shapes && config.shapes.length) {
+        _renderShapes(viewer.layers.add('shapes', { z: Z.shapes }).el, config.shapes);
+    }
 
     _maybeEnablePicker(viewer, config);
 

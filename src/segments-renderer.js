@@ -14,6 +14,8 @@
  *   sr.draw(minutiae, [{ m1: 0, m2: 5, pair_id: 0 }]);
  */
 
+import { resolveTarget, clearOwned } from './render-target.js';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** Maps each visible segment `<line>` to its data object. */
@@ -28,10 +30,12 @@ const DEFAULTS = {
 
 export class SegmentsRenderer {
     /**
-     * @param {SVGElement} svgElement - Target SVG layer (e.g. Viewer.svgLayer).
+     * @param {SVGElement|import('./layer-stack.js').Layer|import('./viewer.js').Viewer} svgElement -
+     *        Camada da LayerStack (recomendado), elemento SVG próprio ou Viewer (SVG comum).
      */
     constructor(svgElement) {
-        this._svg = svgElement;
+        this._svg = resolveTarget(svgElement);
+        this._nodes = [];
     }
 
     /**
@@ -93,13 +97,15 @@ export class SegmentsRenderer {
         }
 
         this._svg.appendChild(g);
+        this._nodes.push(g);
         return visibleLines;
     }
 
-    /** Remove any previously-drawn segment group from this layer. */
+    /**
+     * Remove any previously-drawn segment group from this layer (no SVG comum
+     * do viewer, só os grupos deste renderer).
+     */
     clear() {
-        for (const el of this._svg.querySelectorAll('g.mntviz-segments')) {
-            el.remove();
-        }
+        clearOwned(this._svg, this._nodes, 'g.mntviz-segments');
     }
 }

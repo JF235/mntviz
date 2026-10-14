@@ -6,11 +6,24 @@
  *   const v = new Viewer('#my-container');
  *   await v.loadImage('/path/to/image.png');
  *   v.svgLayer; // SVG element for renderers
+ *
+ * Camadas, eventos e seleção (G2a):
+ *   const mnt = v.layers.add('minutiae', { kind: 'svg', z: 20 });   // grupo próprio
+ *   new MinutiaeRenderer(mnt.el).draw(minutiae, '#0f0');             // clear() limpa só o grupo
+ *   v.on('pointer', (p) => status(p.x, p.y));   // coordenadas da imagem, certas com rotação e espelho
+ *   v.on('select', ({ items }) => ...);          // v.selection (Selection), clique com enableClickSelect()
+ *   v.on('change', (c) => ...);                  // camadas, picker, editores
+ *   v.on('view', (s) => ...);                    // pan, zoom, rotação, espelho
+ *   v.rotate90(); v.setFlip(true); v.fit();
  */
 
 import { MinutiaeInspector } from './minutiae-inspector.js';
 import { FieldProbe } from './field-probe.js';
 import { PointPicker } from './point-picker.js';
+import { LayerStack } from './layer-stack.js';
+import { Emitter, Selection } from './events.js';
+import { minutiaDataMap } from './minutiae-renderer.js';
+import { singularityDataMap } from './singularity-renderer.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -21,6 +34,8 @@ export class Viewer {
      * @param {boolean} [options.minimap=true]  - Show minimap.
      * @param {Function} [options.onResize]     - Called after internal resize.
      * @param {Function} [options.onTransform]  - Called after every pan/zoom transform.
+     * @param {import('./events.js').Selection} [options.selection] - Seleção compartilhada
+     *        (padrão: uma Selection própria).
      */
     constructor(container, options = {}) {
         this._el = typeof container === 'string'
@@ -34,18 +49,86 @@ export class Viewer {
             translateX: 0,
             translateY: 0,
             rotation: 0,
+            flipX: false,
             isDragging: false,
             lastX: 0,
             lastY: 0,
         };
         this._abortController = new AbortController();
+        this._events = new Emitter();
         this._minutiaeInspector = null;
         this._fieldProbe = null;
         this._virtualSize = null;
         this._overlays = new Map();  // name -> { overlay, opts }
+        this._pointerDown = null;
+        this._clickSelect = null;
 
         this._buildDOM();
+        /** Pilha de camadas (ver layer-stack.js). */
+        this.layers = new LayerStack(this);
+        this._selection = null;
+        this._selectionOff = null;
+        this.setSelection(options.selection || new Selection());
         this._bindEvents();
+    }
+
+    /* ── Eventos ────────────────────────────────────────────── */
+
+    /**
+     * Assina um evento do viewer. Devolve a função que cancela a assinatura.
+     *  - 'pointer' {type: 'move'|'down'|'up'|'click'|'leave', x, y (imagem, float), px, py (pixel),
+     *               inside, clientX, clientY, button, buttons, shiftKey, ctrlKey, altKey, metaKey,
+     *               target: {layer, kind, id, data, element} | null, event}
+     *  - 'select'  {items, added, removed, source}   (mudança na `selection`)
+     *  - 'change'  {source: 'layers'|'picker'|..., type, ...}
+     *  - 'view'    {scale, translateX, translateY, rotation, flipX}
+     */
+    on(event, fn) { return this._events.on(event, fn); }
+    once(event, fn) { return this._events.once(event, fn); }
+    off(event, fn) { this._events.off(event, fn); }
+    /** Emite um evento (usado por componentes acoplados ao viewer, como o picker e os editores). */
+    _emit(event, payload) { this._events.emit(event, payload); }
+
+    /* ── Seleção ────────────────────────────────────────────── */
+
+    /** Seleção atual (compartilhável entre viewers e tabelas). */
+    get selection() { return this._selection; }
+
+    /** Troca a seleção (por exemplo, uma Selection comum a vários viewers). */
+    setSelection(selection) {
+        if (this._selectionOff) this._selectionOff();
+        this._selection = selection;
+        this._selectionOff = selection.on('change', (ev) => {
+            this._renderSelection();
+            this._emit('select', ev);
+        });
+        this._renderSelection();
+        return selection;
+    }
+
+    /**
+     * Liga a seleção por clique nos marcadores (minúcias e singularidades):
+     * clique seleciona; com a tecla `multiKey` alterna; clique no vazio limpa.
+     */
+    enableClickSelect({ multiKey = 'shiftKey' } = {}) {
+        this._clickSelect = { multiKey };
+        return this;
+    }
+
+    disableClickSelect() { this._clickSelect = null; return this; }
+
+    /** Reaplica o destaque da seleção (chame depois de redesenhar marcadores). */
+    refreshSelection() { this._renderSelection(); }
+
+    /**
+     * Item de seleção de um elemento desenhado (ou null): {layer, kind, id, data}.
+     * `layer` é o nome da camada (null fora da LayerStack); `id` é o índice do marcador.
+     */
+    itemFromElement(el) {
+        const it = this._targetFromElement(el);
+        if (!it) return null;
+        const { element, ...item } = it;
+        return item;
     }
 
     /* ── Public API ─────────────────────────────────────────── */
@@ -69,7 +152,28 @@ export class Viewer {
             translateX: this._view.translateX,
             translateY: this._view.translateY,
             rotation: this._view.rotation,
+            flipX: this._view.flipX,
         };
+    }
+
+    /** Espelho horizontal ligado? (aplicado antes da rotação, em torno do centro da imagem) */
+    get flipX() { return this._view.flipX; }
+
+    /** Estado da vista para layouts (o mesmo que `viewState`). */
+    getView() { return this.viewState; }
+
+    /**
+     * Aplica um estado de vista de uma vez (um só redesenho). Campos ausentes
+     * não mudam: {scale, translateX, translateY, rotation, flipX}.
+     */
+    setView(state = {}) {
+        const v = this._view;
+        if (Number.isFinite(Number(state.scale))) v.scale = Math.min(Math.max(Number(state.scale), 0.1), 20);
+        if (Number.isFinite(Number(state.translateX))) v.translateX = Number(state.translateX);
+        if (Number.isFinite(Number(state.translateY))) v.translateY = Number(state.translateY);
+        if (Number.isFinite(Number(state.rotation))) v.rotation = _normalizeAngle180(state.rotation);
+        if (state.flipX != null) v.flipX = !!state.flipX;
+        this._applyTransform();
     }
 
     /** Natural dimensions of the loaded image (or virtual size). */
@@ -111,9 +215,10 @@ export class Viewer {
         return [...this._overlays].map(([name, { overlay, opts }]) => ({ name, overlay, opts }));
     }
 
-    /** Return only visible + loaded overlays. */
+    /** Return only visible + loaded overlays (an overlay inside a hidden layer counts as hidden). */
     getVisibleOverlays() {
-        return this.getOverlays().filter(e => e.overlay.visible && e.overlay.loaded);
+        return this.getOverlays().filter(e => e.overlay.visible && e.overlay.loaded
+            && this._layerFactor(e.overlay.imageElement) !== null);
     }
 
     /* ── Image loading ─────────────────────────────────────────── */
@@ -142,10 +247,18 @@ export class Viewer {
         });
     }
 
-    /** Clear the image and SVG layer. */
+    /**
+     * Clear the image and SVG layer. Os nós soltos no SVG raiz (API antiga) saem;
+     * as camadas da LayerStack ficam, vazias (svg e canvas; as html hospedam
+     * componentes, como OverlayLayer, e não são esvaziadas).
+     */
     clear() {
         this._img.removeAttribute('src');
-        this._svg.innerHTML = '';
+        for (const node of [...this._svg.childNodes]) {
+            if (node.nodeType === 1 && node.classList && node.classList.contains('mntviz-layer')) continue;
+            node.remove();
+        }
+        this.layers.clear({ kinds: ['svg', 'canvas'] });
         this._virtualSize = null;
         if (this._minimapWrap) this._minimapWrap.style.display = 'none';
     }
@@ -179,8 +292,51 @@ export class Viewer {
         this._view.translateX = (vw - iw * scale) / 2;
         this._view.translateY = (vh - ih * scale) / 2;
         this._view.rotation = 0;
+        this._view.flipX = false;
         this._applyTransform();
     }
+
+    /**
+     * Ajusta a imagem ao viewport mantendo a rotação e o espelho (o `resetView`
+     * zera os dois). Com rotação, usa a caixa da imagem girada.
+     */
+    fit() {
+        const vw = this._viewport.clientWidth;
+        const vh = this._viewport.clientHeight;
+        const vs = this._virtualSize;
+        const iw = vs ? vs.width : (this._img.naturalWidth || 500);
+        const ih = vs ? vs.height : (this._img.naturalHeight || 500);
+        const rad = this._view.rotation * Math.PI / 180;
+        const c = Math.abs(Math.cos(rad));
+        const s = Math.abs(Math.sin(rad));
+        const bw = iw * c + ih * s;
+        const bh = iw * s + ih * c;
+        const scale = Math.min(Math.max(Math.min(vw / bw, vh / bh), 0.1), 20);
+        // A rotação e o espelho são em torno do centro da imagem, que vai para o centro do viewport.
+        this._view.scale = scale;
+        this._view.translateX = vw / 2 - scale * iw / 2;
+        this._view.translateY = vh / 2 - scale * ih / 2;
+        this._applyTransform();
+    }
+
+    /**
+     * Gira 90° em torno do centro da imagem: `dir` > 0 no sentido horário da
+     * tela, `dir` < 0 no anti-horário.
+     */
+    rotate90(dir = 1) {
+        this.setRotation(this._view.rotation + (dir < 0 ? -90 : 90));
+    }
+
+    /** Liga ou desliga o espelho horizontal (antes da rotação, em torno do centro). */
+    setFlip(flipX) {
+        const next = !!flipX;
+        if (next === this._view.flipX) return;
+        this._view.flipX = next;
+        this._applyTransform();
+    }
+
+    /** Alterna o espelho horizontal. */
+    toggleFlip() { this.setFlip(!this._view.flipX); }
 
     /**
      * Set absolute image scale.
@@ -261,6 +417,43 @@ export class Viewer {
         const p = new DOMPoint(imgX, imgY).matrixTransform(ctm);
         const rect = element.getBoundingClientRect();
         return { x: p.x - rect.left, y: p.y - rect.top };
+    }
+
+    /**
+     * Map image coordinates to screen/client coordinates (inverse of
+     * screenToImageCoords). Works with pan, zoom, rotation and mirror.
+     * @returns {{x:number, y:number}}
+     */
+    imageToScreenCoords(imgX, imgY) {
+        const ctm = this._svg.getScreenCTM();
+        if (!ctm) return { x: NaN, y: NaN };
+        const p = new DOMPoint(imgX, imgY).matrixTransform(ctm);
+        return { x: p.x, y: p.y };
+    }
+
+    /**
+     * Transformação viva imagem → viewport (px CSS do viewport), a mesma do CSS
+     * do container: translate · scale · [rotação e espelho em torno do centro].
+     * @returns {DOMMatrix}
+     */
+    viewMatrix() {
+        const { translateX: tx, translateY: ty, scale: s, rotation: r, flipX } = this._view;
+        const { width, height } = this.imageSize;
+        const cx = width / 2;
+        const cy = height / 2;
+        const m = new DOMMatrix().translateSelf(tx, ty).scaleSelf(s, s).translateSelf(cx, cy).rotateSelf(r);
+        if (flipX) m.scaleSelf(-1, 1);
+        return m.translateSelf(-cx, -cy);
+    }
+
+    /** @private A transformação viva como atributo `transform` de SVG (sem unidades). */
+    _transformAttr() {
+        const { translateX: tx, translateY: ty, scale: s, rotation: r, flipX } = this._view;
+        const { width, height } = this.imageSize;
+        const cx = width / 2;
+        const cy = height / 2;
+        return `translate(${tx}, ${ty}) scale(${s}) translate(${cx}, ${cy}) rotate(${r})`
+            + (flipX ? ' scale(-1, 1)' : '') + ` translate(${-cx}, ${-cy})`;
     }
 
     /**
@@ -386,9 +579,10 @@ export class Viewer {
         clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
         clone.classList.remove('mntviz-mnt-layer');
         clone.removeAttribute('style');
+        _flattenLayersForExport(clone);
 
         // Build the layered stack to prepend below the SVG markers:
-        //   [ background image, overlay canvases (in registration order) ]
+        //   [ background image, overlay canvases and canvas layers (in DOM order) ]
         // Overlays live as <canvas> siblings of the img in canvasContainer, so
         // they're not cloned with the SVG layer — we rasterize each to PNG
         // and embed as <image>.
@@ -408,20 +602,8 @@ export class Viewer {
             layers.push(bg);
         }
 
-        for (const { overlay } of this.getVisibleOverlays()) {
-            const cvs = overlay.imageElement;
-            if (!cvs || !cvs.width || !cvs.height) continue;
-            const w = this._img.naturalWidth || cvs.width;
-            const h = this._img.naturalHeight || cvs.height;
-            const el = document.createElementNS(SVG_NS, 'image');
-            el.setAttribute('href', cvs.toDataURL('image/png'));
-            el.setAttribute('width', w);
-            el.setAttribute('height', h);
-            el.setAttribute('image-rendering', 'pixelated');
-            const op = cvs.style.opacity;
-            if (op) el.setAttribute('opacity', op);
-            layers.push(el);
-        }
+        // Overlays registrados e camadas canvas visíveis, na ordem do DOM.
+        layers.push(...this._rasterImagesForExport());
 
         // Prepend in reverse order so the first pushed ends up at firstChild.
         for (let i = layers.length - 1; i >= 0; i--) {
@@ -461,20 +643,34 @@ export class Viewer {
 
     /**
      * Return the visible image region based on current zoom/pan.
+     * Com rotação ou espelho, é a caixa (alinhada aos eixos da imagem) do
+     * viewport levado para a imagem pela transformação viva.
      * @returns {{ x: number, y: number, w: number, h: number }}
      */
     visibleRegion() {
-        const { scale: s, translateX: tx, translateY: ty } = this._view;
+        const { scale: s, translateX: tx, translateY: ty, rotation: r, flipX } = this._view;
         const vpW = this._viewport.clientWidth;
         const vpH = this._viewport.clientHeight;
-        return { x: -tx / s, y: -ty / s, w: vpW / s, h: vpH / s };
+        if (!r && !flipX) return { x: -tx / s, y: -ty / s, w: vpW / s, h: vpH / s };
+        const inv = this.viewMatrix().inverse();
+        const pts = [[0, 0], [vpW, 0], [0, vpH], [vpW, vpH]]
+            .map(([px, py]) => new DOMPoint(px, py).matrixTransform(inv));
+        const xs = pts.map(p => p.x);
+        const ys = pts.map(p => p.y);
+        const x0 = Math.min(...xs);
+        const y0 = Math.min(...ys);
+        return { x: x0, y: y0, w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
     }
 
     /**
      * Serialize only the currently visible viewport region as SVG.
+     * Sem rotação nem espelho: viewBox na região visível (coordenadas da imagem).
+     * Com rotação ou espelho: SVG do tamanho do viewport com a transformação viva
+     * num <g>, como o MatchViewer faz; a legenda fica em coordenadas da tela.
      * @returns {string} SVG markup.
      */
     exportSVGView() {
+        if (this._view.rotation || this._view.flipX) return this._exportSVGViewLive();
         const { x, y, w, h } = this.visibleRegion();
         const vpW = this._viewport.clientWidth;
         const vpH = this._viewport.clientHeight;
@@ -504,25 +700,13 @@ export class Viewer {
 
         // Overlay canvases (Darlow disks, HUV heatmap, etc.) — positioned at
         // (0,0) at natural image size, same coords as the background image.
-        for (const { overlay } of this.getVisibleOverlays()) {
-            const cvs = overlay.imageElement;
-            if (!cvs || !cvs.width || !cvs.height) continue;
-            const nw = this._img.naturalWidth || cvs.width;
-            const nh = this._img.naturalHeight || cvs.height;
-            const el = document.createElementNS(SVG_NS, 'image');
-            el.setAttribute('href', cvs.toDataURL('image/png'));
-            el.setAttribute('width', nw);
-            el.setAttribute('height', nh);
-            el.setAttribute('image-rendering', 'pixelated');
-            const op = cvs.style.opacity;
-            if (op) el.setAttribute('opacity', op);
-            svg.appendChild(el);
-        }
+        for (const el of this._rasterImagesForExport()) svg.appendChild(el);
 
         // Minutiae layer contents
         const mntClone = this._svg.cloneNode(true);
         mntClone.removeAttribute('class');
         mntClone.removeAttribute('style');
+        _flattenLayersForExport(mntClone);
         // Move children into the root svg (avoid nested svg viewBox issues)
         while (mntClone.firstChild) svg.appendChild(mntClone.firstChild);
 
@@ -541,6 +725,101 @@ export class Viewer {
         }
 
         return new XMLSerializer().serializeToString(svg);
+    }
+
+    /** @private exportSVGView com rotação/espelho: transformação viva num <g>. */
+    _exportSVGViewLive() {
+        const vpW = this._viewport.clientWidth;
+        const vpH = this._viewport.clientHeight;
+        const { width: iw, height: ih } = this.imageSize;
+
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('xmlns', SVG_NS);
+        svg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+        svg.setAttribute('width', vpW);
+        svg.setAttribute('height', vpH);
+        svg.setAttribute('viewBox', `0 0 ${vpW} ${vpH}`);
+
+        const g = document.createElementNS(SVG_NS, 'g');
+        g.setAttribute('transform', this._transformAttr());
+
+        if (this._img.src) {
+            const canvas = document.createElement('canvas');
+            canvas.width = iw;
+            canvas.height = ih;
+            canvas.getContext('2d').drawImage(this._img, 0, 0);
+            const img = document.createElementNS(SVG_NS, 'image');
+            img.setAttribute('href', canvas.toDataURL('image/png'));
+            img.setAttribute('width', iw);
+            img.setAttribute('height', ih);
+            g.appendChild(img);
+        }
+        for (const el of this._rasterImagesForExport()) g.appendChild(el);
+
+        const mntClone = this._svg.cloneNode(true);
+        _flattenLayersForExport(mntClone);
+        while (mntClone.firstChild) g.appendChild(mntClone.firstChild);
+        svg.appendChild(g);
+
+        // A legenda é HTML fixo no viewport (não gira): vai em coordenadas da tela.
+        const lm = this._getLegendMeta();
+        if (lm) {
+            svg.appendChild(this._buildLegendSVG(lm.items, { x: 0, y: 0, w: vpW, h: vpH }, {
+                position: lm.position, scale: lm.scale,
+            }));
+        }
+        return new XMLSerializer().serializeToString(svg);
+    }
+
+    /**
+     * @private Imagens rasterizadas para a exportação: overlays registrados e
+     * visíveis (o fator de opacidade da camada que os contém entra junto) e
+     * camadas canvas visíveis, na ordem do DOM (= ordem de desenho).
+     */
+    _rasterImagesForExport() {
+        const srcs = [];
+        for (const { overlay } of this.getVisibleOverlays()) {
+            const cvs = overlay.imageElement;
+            if (!cvs || !cvs.width || !cvs.height) continue;
+            srcs.push({ cvs, own: cvs.style.opacity, factor: this._layerFactor(cvs) ?? 0 });
+        }
+        for (const layer of this.layers.list()) {
+            if (layer.kind !== 'canvas' || !layer.visible) continue;
+            const cvs = layer.el;
+            if (!cvs.width || !cvs.height) continue;
+            srcs.push({ cvs, own: layer.opacity === 1 ? '' : String(layer.opacity), factor: 1 });
+        }
+        srcs.sort((a, b) => (a.cvs === b.cvs ? 0
+            : (a.cvs.compareDocumentPosition(b.cvs) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)));
+        return srcs.map(({ cvs, own, factor }) => {
+            const w = this._img.naturalWidth || cvs.width;
+            const h = this._img.naturalHeight || cvs.height;
+            const el = document.createElementNS(SVG_NS, 'image');
+            el.setAttribute('href', cvs.toDataURL('image/png'));
+            el.setAttribute('width', w);
+            el.setAttribute('height', h);
+            el.setAttribute('image-rendering', 'pixelated');
+            let op = own;
+            if (factor !== 1) op = String((own === '' ? 1 : Number(own)) * factor);
+            if (op) el.setAttribute('opacity', op);
+            return el;
+        });
+    }
+
+    /**
+     * @private Produto das opacidades das camadas que contêm `el` (dentro do
+     * container transformado); null se alguma delas estiver oculta.
+     */
+    _layerFactor(el) {
+        let f = 1;
+        for (let n = el ? el.parentElement : null; n && n !== this._canvas; n = n.parentElement) {
+            if (!n.classList || !n.classList.contains('mntviz-layer')) continue;
+            const layer = this.layers.get(n.getAttribute('data-layer'));
+            if (!layer) continue;
+            if (!layer.visible) return null;
+            f *= layer.opacity;
+        }
+        return f;
     }
 
     /**
@@ -567,6 +846,9 @@ export class Viewer {
         this._overlays.clear();
         this._abortController.abort();
         if (this._resizeObserver) this._resizeObserver.disconnect();
+        if (this._selectionOff) { this._selectionOff(); this._selectionOff = null; }
+        this.layers.destroy();
+        this._events.removeAllListeners();
         this._el.innerHTML = '';
     }
 
@@ -754,6 +1036,14 @@ export class Viewer {
         this._bindHudField(this._zoomField.input, () => this._applyZoomInput());
         this._bindHudField(this._rotationField.input, () => this._applyRotationInput());
 
+        // Eventos 'pointer' em coordenadas da imagem. Fase de captura no viewport:
+        // vemos o evento antes do picker e do inspector (que param a propagação).
+        const cap = { capture: true, ...sig };
+        this._viewport.addEventListener('mousemove', (e) => this._onPointerEvent('move', e), cap);
+        this._viewport.addEventListener('mousedown', (e) => this._onPointerEvent('down', e), cap);
+        this._viewport.addEventListener('mouseup', (e) => this._onPointerEvent('up', e), cap);
+        this._viewport.addEventListener('mouseleave', (e) => this._onPointerEvent('leave', e), sig);
+
         this._resizeObserver = new ResizeObserver(() => {
             this._syncLayers();
             this._updateMinimap();
@@ -809,23 +1099,109 @@ export class Viewer {
         this._viewport.style.cursor = 'grab';
     }
 
+    /** @private Converte um evento de mouse em 'pointer' (e 'click'); seleção por clique. */
+    _onPointerEvent(type, e) {
+        const wantPointer = this._events.hasListeners('pointer');
+        if (!wantPointer && !this._clickSelect) return;
+        if (type === 'down') {
+            this._pointerDown = { x: e.clientX, y: e.clientY, button: e.button };
+        }
+        const payload = wantPointer || type === 'up' ? this._pointerPayload(type, e) : null;
+        if (wantPointer) this._emit('pointer', payload);
+        if (type !== 'up') return;
+        const d = this._pointerDown;
+        this._pointerDown = null;
+        if (!d || d.button !== e.button || Math.abs(e.clientX - d.x) > 3 || Math.abs(e.clientY - d.y) > 3) return;
+        const click = { ...payload, type: 'click' };
+        if (wantPointer) this._emit('pointer', click);
+        if (this._clickSelect && e.button === 0) this._applyClickSelect(click);
+    }
+
+    /** @private */
+    _pointerPayload(type, e) {
+        const p = this.screenToImageCoords(e.clientX, e.clientY);
+        const { width, height } = this.imageSize;
+        return {
+            type,
+            x: p.x,
+            y: p.y,
+            px: Math.floor(p.x),
+            py: Math.floor(p.y),
+            inside: p.x >= 0 && p.y >= 0 && p.x < width && p.y < height,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            button: e.button,
+            buttons: e.buttons,
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey,
+            altKey: e.altKey,
+            metaKey: e.metaKey,
+            target: this._targetFromElement(e.target),
+            event: e,
+        };
+    }
+
+    /** @private */
+    _applyClickSelect(click) {
+        const multi = !!click[this._clickSelect.multiKey];
+        const t = click.target;
+        if (!t || t.id == null) {
+            if (!multi) this._selection.clear({ source: 'click' });
+            return;
+        }
+        const { element, ...item } = t;
+        if (multi) this._selection.toggle(item, { source: 'click' });
+        else this._selection.set([item], { source: 'click' });
+    }
+
+    /** @private Marcador sob `el` como {layer, kind, id, data, element}, ou null. */
+    _targetFromElement(el) {
+        const marker = el && el.closest ? el.closest('.mntviz-mnt-marker') : null;
+        if (!marker || !this._svg.contains(marker)) return null;
+        const layerEl = marker.closest('g.mntviz-layer');
+        const layer = layerEl ? layerEl.getAttribute('data-layer') : null;
+        let kind = 'minutia';
+        let data = minutiaDataMap.get(marker);
+        if (!data) {
+            data = singularityDataMap.get(marker);
+            kind = data ? 'singularity' : 'marker';
+        }
+        const id = data && data._index != null ? data._index : null;
+        return { layer, kind, id, data: data || null, element: marker };
+    }
+
+    /** @private Liga a classe `mntviz-selected` nos marcadores selecionados. */
+    _renderSelection() {
+        if (!this._svg || !this._selection) return;
+        const keys = new Set(this._selection.keys);
+        if (!keys.size && !this._svg.querySelector('.mntviz-selected')) return;
+        for (const m of this._svg.querySelectorAll('.mntviz-mnt-marker')) {
+            const t = this._targetFromElement(m);
+            const on = !!(t && t.id != null && keys.has(this._selection.keyOf(t)));
+            m.classList.toggle('mntviz-selected', on);
+        }
+    }
+
     /* ── Internal rendering ─────────────────────────────────── */
 
     _applyTransform() {
-        const { translateX: tx, translateY: ty, scale: s, rotation: r } = this._view;
+        const { translateX: tx, translateY: ty, scale: s, rotation: r, flipX } = this._view;
         const { width, height } = this.imageSize;
         // Rotate around the image center while keeping origin-at-zero semantics
         // for (tx, ty, s). `_onWheel` / `resetView` assume screen = img*s + t;
         // the `translate(cx,cy) rotate translate(-cx,-cy)` sandwich is a no-op
-        // at r=0, so pan/zoom math is preserved.
+        // at r=0, so pan/zoom math is preserved. O espelho entra no mesmo
+        // sanduíche (antes da rotação), então também é em torno do centro.
         const cx = width / 2;
         const cy = height / 2;
+        const flip = flipX ? ' scale(-1, 1)' : '';
         this._canvas.style.transform =
-            `translate(${tx}px, ${ty}px) scale(${s}) translate(${cx}px, ${cy}px) rotate(${r}deg) translate(${-cx}px, ${-cy}px)`;
+            `translate(${tx}px, ${ty}px) scale(${s}) translate(${cx}px, ${cy}px) rotate(${r}deg)${flip} translate(${-cx}px, ${-cy}px)`;
         this._setHudInputValue(this._zoomField.input, `${Math.round(s * 100)}`);
         this._setHudInputValue(this._rotationField.input, _formatSignedAngle(r));
         this._updateMinimap();
         if (this._options.onTransform) this._options.onTransform();
+        this._emit('view', this.viewState);
     }
 
     _syncLayers() {
@@ -843,6 +1219,7 @@ export class Viewer {
         this._svg.style.width = cw + 'px';
         this._svg.style.height = ch + 'px';
         this._svg.setAttribute('viewBox', `0 0 ${nw} ${nh}`);
+        if (this.layers) this.layers._syncSize();
     }
 
     _updateMinimap() {
@@ -869,10 +1246,8 @@ export class Viewer {
             rh = ch; rw = ch * imgAspect; ox = (cw - rw) / 2; oy = 0;
         }
 
-        const visX = -this._view.translateX / this._view.scale;
-        const visY = -this._view.translateY / this._view.scale;
-        const visW = vw / this._view.scale;
-        const visH = vh / this._view.scale;
+        // Com rotação/espelho, a caixa da região visível na imagem (visibleRegion).
+        const { x: visX, y: visY, w: visW, h: visH } = this.visibleRegion();
 
         const rx = rw / nw;
         const ry = rh / nh;
@@ -952,6 +1327,22 @@ function _el(tag, className) {
     const el = document.createElement(tag);
     el.className = className;
     return el;
+}
+
+/**
+ * Na cópia do SVG que vai para a exportação, as camadas da LayerStack somem como
+ * estrutura: oculta sai; com opacidade < 1 vira um <g opacity> simples (com o
+ * nome em data-layer); as demais são desembrulhadas. Assim o SVG exportado é o
+ * mesmo de antes da LayerStack para quem não usa opacidade por camada.
+ */
+function _flattenLayersForExport(root) {
+    for (const g of [...root.children]) {
+        if (g.localName !== 'g' || !g.classList.contains('mntviz-layer')) continue;
+        if (g.getAttribute('display') === 'none') { g.remove(); continue; }
+        if (g.hasAttribute('opacity')) { g.removeAttribute('class'); continue; }
+        while (g.firstChild) root.insertBefore(g.firstChild, g);
+        g.remove();
+    }
 }
 
 function _normalizeAngle180(angle) {
