@@ -419,18 +419,32 @@ export async function plotOverlay(host, config) {
     const viewer = new Viewer(host, { minimap: true });
     await viewer.loadImage(config.imageSrc);
 
-    if (config.overlaySrc) {
-        const overlay = new OverlayLayer(viewer.canvasContainer, {
-            opacity: config.overlayOpacity ?? 1.0,
-            insertBefore: viewer.svgLayer,
-        });
-        await overlay.load(config.overlaySrc);
-        overlay.show();
-    }
+    if (config.overlaySrc) await _loadOverlay(viewer, config);
 
     _maybeEnablePicker(viewer, config);
 
     return viewer;
+}
+
+/**
+ * Overlay das fachadas plotOverlay/plotHuv. Sem `overlayColormap`, o PNG já vem
+ * colorido (modo legado, como antes). Com `overlayColormap`, o PNG é o escalar
+ * do protocolo de fio e a LUT é aplicada aqui; o overlay é registrado no viewer
+ * (nome `overlayName`, padrão 'overlay'), então o FieldProbe lê o valor e a
+ * exportação SVG o inclui.
+ */
+async function _loadOverlay(viewer, config) {
+    const lut = config.overlayColormap || null;
+    const overlay = new OverlayLayer(viewer.canvasContainer, {
+        opacity: config.overlayOpacity ?? 1.0,
+        insertBefore: viewer.svgLayer,
+        ...(lut ? { colormap: lut, alpha: config.overlayAlpha ?? 'value' } : {}),
+    });
+    await overlay.load(config.overlaySrc);
+    if (config.pixelated && overlay.setRenderMode) overlay.setRenderMode('pixelated');
+    overlay.show();
+    if (lut) viewer.addOverlay(config.overlayName ?? 'overlay', overlay);
+    return overlay;
 }
 
 /**
@@ -449,21 +463,11 @@ export async function plotHuv(host, config) {
     const viewer = new Viewer(host, { minimap: true });
     await viewer.loadImage(config.imageSrc);
 
-    if (config.overlaySrc) {
-        const overlay = new OverlayLayer(viewer.canvasContainer, {
-            opacity: config.overlayOpacity ?? 1.0,
-            insertBefore: viewer.svgLayer,
-        });
-        await overlay.load(config.overlaySrc);
-        // Match the dataloader thumbnails: when the caller asks for
-        // pixelated, propagate to the overlay canvas so zoomed view
-        // preserves NPZ-cell blockiness (the base image already gets
-        // `image-rendering: pixelated` from .mntviz-img-layer in mntviz.css).
-        if (config.pixelated && overlay.setRenderMode) {
-            overlay.setRenderMode('pixelated');
-        }
-        overlay.show();
-    }
+    // Match the dataloader thumbnails: when the caller asks for pixelated,
+    // _loadOverlay propagates it to the overlay canvas so zoomed view preserves
+    // NPZ-cell blockiness (the base image already gets `image-rendering:
+    // pixelated` from .mntviz-img-layer in mntviz.css).
+    if (config.overlaySrc) await _loadOverlay(viewer, config);
 
     if (config.arrows && config.arrows.length > 0) {
         const uvRenderer = new UVFieldRenderer(viewer.layers.add('uv', { z: Z.uv }));

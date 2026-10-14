@@ -15753,31 +15753,27 @@ async function plotSingularities(host, config) {
 async function plotOverlay(host, config) {
   const viewer = new Viewer(host, { minimap: true });
   await viewer.loadImage(config.imageSrc);
-  if (config.overlaySrc) {
-    const overlay = new OverlayLayer(viewer.canvasContainer, {
-      opacity: config.overlayOpacity ?? 1,
-      insertBefore: viewer.svgLayer
-    });
-    await overlay.load(config.overlaySrc);
-    overlay.show();
-  }
+  if (config.overlaySrc) await _loadOverlay(viewer, config);
   _maybeEnablePicker(viewer, config);
   return viewer;
+}
+async function _loadOverlay(viewer, config) {
+  const lut = config.overlayColormap || null;
+  const overlay = new OverlayLayer(viewer.canvasContainer, {
+    opacity: config.overlayOpacity ?? 1,
+    insertBefore: viewer.svgLayer,
+    ...lut ? { colormap: lut, alpha: config.overlayAlpha ?? "value" } : {}
+  });
+  await overlay.load(config.overlaySrc);
+  if (config.pixelated && overlay.setRenderMode) overlay.setRenderMode("pixelated");
+  overlay.show();
+  if (lut) viewer.addOverlay(config.overlayName ?? "overlay", overlay);
+  return overlay;
 }
 async function plotHuv(host, config) {
   const viewer = new Viewer(host, { minimap: true });
   await viewer.loadImage(config.imageSrc);
-  if (config.overlaySrc) {
-    const overlay = new OverlayLayer(viewer.canvasContainer, {
-      opacity: config.overlayOpacity ?? 1,
-      insertBefore: viewer.svgLayer
-    });
-    await overlay.load(config.overlaySrc);
-    if (config.pixelated && overlay.setRenderMode) {
-      overlay.setRenderMode("pixelated");
-    }
-    overlay.show();
-  }
+  if (config.overlaySrc) await _loadOverlay(viewer, config);
   if (config.arrows && config.arrows.length > 0) {
     const uvRenderer = new UVFieldRenderer(viewer.layers.add("uv", { z: Z.uv }));
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});

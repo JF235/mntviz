@@ -360,6 +360,32 @@ def _array_to_rgba_uri(
     return f"data:image/png;base64,{encoded}"
 
 
+# Colormaps que o JS do mntviz aplica no cliente (src/colormaps.js, COLORMAP_NAMES).
+CLIENT_COLORMAPS = ("magma", "viridis", "RdYlGn", "Greens", "Reds", "PiYG", "inferno", "plasma", "hot", "coolwarm")
+
+
+def _array_to_wire_uri(data: np.ndarray, vmin: float | None, vmax: float | None) -> str:
+    """2D → PNG cinza do protocolo de fio (byte = round(v·254+1), 0 = sem dado), em data URI.
+
+    ``v = (data − vmin)/(vmax − vmin)``; o mínimo vira "sem dado" (transparente no
+    cliente), como no protocolo. NaN também.
+    """
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"data must be a 2D array, got shape {arr.shape}")
+    finite = np.isfinite(arr)
+    lo = float(arr[finite].min()) if vmin is None and finite.any() else (vmin or 0.0)
+    hi = float(arr[finite].max()) if vmax is None and finite.any() else (vmax if vmax is not None else 1.0)
+    norm = (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
+    png = _encode.scalar_png(np.where(finite, norm, np.nan))
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+def _check_client_cmap(cmap: str) -> None:
+    if cmap not in CLIENT_COLORMAPS:
+        raise ValueError(f"client_lut=True needs one of the client colormaps {CLIENT_COLORMAPS}, got {cmap!r}")
+
+
 def _compute_uv_arrows(
     u: np.ndarray,
     v: np.ndarray,
@@ -1238,12 +1264,19 @@ def plot_overlay(
     height: int | None = None,
     picker: bool | dict | None = None,
     initial_points: list[dict[str, Any]] | None = None,
+    client_lut: bool = False,
 ) -> str | MntVizFigure:
     """Render a 2D array as a colormapped overlay on a background image.
 
     Pass ``picker=True`` (or a dict of options) to enable the point picker
     on the resulting viewer; the function then returns an anywidget with a
     synced ``points`` traitlet. See ``plot_mnt`` docs for the picker contract.
+
+    ``client_lut=True``: o mapa vai no protocolo de fio (PNG cinza de
+    ``mntviz.encode``) e o colormap é aplicado no navegador, sem matplotlib;
+    o field probe lê o valor (``(byte − 1)/254`` de ``(v − vmin)/(vmax − vmin)``)
+    e o overlay entra na exportação SVG. ``cmap`` precisa ser um de
+    ``CLIENT_COLORMAPS``; ``alpha_modulated`` vira o modo de alfa ``'value'``.
     """
 
     fmt = output_format.lower().strip()
@@ -1258,14 +1291,22 @@ def plot_overlay(
     w = width or bg_w or arr.shape[1]
     h = height or bg_h or arr.shape[0]
 
-    overlay_uri = _array_to_rgba_uri(arr, cmap, vmin, vmax, alpha, alpha_modulated)
     bg_src = bg_uri or _build_blank_background_data_uri(int(w), int(h))
-
-    config = {
-        "imageSrc": bg_src,
-        "overlaySrc": overlay_uri,
-        "overlayOpacity": 1.0,
-    }
+    if client_lut:
+        _check_client_cmap(cmap)
+        config = {
+            "imageSrc": bg_src,
+            "overlaySrc": _array_to_wire_uri(arr, vmin, vmax),
+            "overlayOpacity": float(alpha),
+            "overlayColormap": cmap,
+            "overlayAlpha": "value" if alpha_modulated else "opaque",
+        }
+    else:
+        config = {
+            "imageSrc": bg_src,
+            "overlaySrc": _array_to_rgba_uri(arr, cmap, vmin, vmax, alpha, alpha_modulated),
+            "overlayOpacity": 1.0,
+        }
 
     if picker:
         from .picker import build_picker_widget
@@ -1313,6 +1354,7 @@ def plot_huv(
     picker: bool | dict | None = None,
     initial_points: list[dict[str, Any]] | None = None,
     shapes: list[dict[str, Any]] | None = None,
+    client_lut: bool = False,
 ) -> str | MntVizFigure:
     """Render an HUV combined plot: heatmap overlay + UV orientation arrows.
 
@@ -1335,6 +1377,8 @@ def plot_huv(
             ``'none'``, ``'alpha'``, ``'width'``, or ``'both'``.
         modulation_alpha_min: Minimum alpha fraction when modulation is active.
         modulation_width_min: Minimum line-width fraction when modulation is active.
+        client_lut: H no protocolo de fio (PNG cinza, ``H/max(H)``) com o colormap
+            ``h_cmap`` aplicado no navegador (sem matplotlib); ver ``plot_overlay``.
     """
 
     fmt = output_format.lower().strip()
@@ -1364,9 +1408,13 @@ def plot_huv(
     w = width or bg_w or h_arr.shape[1]
     h_px = height or bg_h or h_arr.shape[0]
 
-    overlay_uri = _array_to_rgba_uri(
-        h_arr, h_cmap, vmin=0.0, vmax=None, alpha=h_alpha, alpha_modulated=True,
-    )
+    if client_lut:
+        _check_client_cmap(h_cmap)
+        overlay_uri = _array_to_wire_uri(h_arr, 0.0, None)
+    else:
+        overlay_uri = _array_to_rgba_uri(
+            h_arr, h_cmap, vmin=0.0, vmax=None, alpha=h_alpha, alpha_modulated=True,
+        )
 
     # Modulation value (mod/max) goes as the 6th element of each arrow.
     arrows = _compute_uv_arrows(
@@ -1383,7 +1431,8 @@ def plot_huv(
     config = {
         "imageSrc": bg_src,
         "overlaySrc": overlay_uri,
-        "overlayOpacity": 1.0,
+        "overlayOpacity": float(h_alpha) if client_lut else 1.0,
+        **({"overlayColormap": h_cmap, "overlayAlpha": "value"} if client_lut else {}),
         "arrows": arrows,
         "arrowOptions": {
             "arrowSize": arrow_size,
