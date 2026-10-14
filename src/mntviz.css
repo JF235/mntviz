@@ -844,3 +844,63 @@
     align-items: center;
     justify-content: center;
 }
+
+/* ── Editores e ferramentas de perito (G2b) ─────────────── */
+
+/* Modo ativo (ToolModes): cursor de mira nos modos que marcam. */
+.mntviz-viewport.mntviz-mode-minutia,
+.mntviz-viewport.mntviz-mode-core,
+.mntviz-viewport.mntviz-mode-delta,
+.mntviz-viewport.mntviz-mode-roi,
+.mntviz-viewport.mntviz-mode-ruler,
+.mntviz-viewport.mntviz-mode-ridges,
+.mntviz-viewport.mntviz-mode-pair {
+    cursor: crosshair;
+}
+
+/* Features e pares: traço fino que não engorda com o zoom. */
+.mntviz-fe-item *,
+.mntviz-ce-pair circle,
+.mntviz-measure line {
+    vector-effect: non-scaling-stroke;
+}
+
+.mntviz-fe-suggestion {
+    opacity: 0.85;
+}
+
+/* Linhas entre os dois lados (CorrespondenceEditor com host). */
+.mntviz-ce-lines {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 5;
+}
+
+/* Barra de escala na tela (ScaleBar). */
+.mntviz-scalebar {
+    position: absolute;
+    z-index: 6;
+    padding: 4px 6px 3px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font: 11px/1.2 sans-serif;
+    pointer-events: none;
+}
+.mntviz-scalebar-bl { left: 10px; bottom: 10px; }
+.mntviz-scalebar-br { right: 10px; bottom: 10px; }
+.mntviz-scalebar-tl { left: 10px; top: 10px; }
+.mntviz-scalebar-tr { right: 10px; top: 10px; }
+.mntviz-scalebar-bar {
+    height: 4px;
+    background: #fff;
+    border: 1px solid #000;
+    margin-bottom: 2px;
+}
+.mntviz-scalebar-text {
+    text-align: center;
+}

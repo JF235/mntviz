@@ -2179,12 +2179,12 @@ var Viewer = class {
     };
   }
   exportSVG() {
-    const clone = this._svg.cloneNode(true);
-    clone.setAttribute("xmlns", SVG_NS6);
-    clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
-    clone.classList.remove("mntviz-mnt-layer");
-    clone.removeAttribute("style");
-    _flattenLayersForExport(clone);
+    const clone2 = this._svg.cloneNode(true);
+    clone2.setAttribute("xmlns", SVG_NS6);
+    clone2.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+    clone2.classList.remove("mntviz-mnt-layer");
+    clone2.removeAttribute("style");
+    _flattenLayersForExport(clone2);
     const layers = [];
     if (this._img.src) {
       const canvas = document.createElement("canvas");
@@ -2201,7 +2201,7 @@ var Viewer = class {
     }
     layers.push(...this._rasterImagesForExport());
     for (let i = layers.length - 1; i >= 0; i--) {
-      clone.insertBefore(layers[i], clone.firstChild);
+      clone2.insertBefore(layers[i], clone2.firstChild);
     }
     const lm = this._getLegendMeta();
     if (lm) {
@@ -2211,12 +2211,12 @@ var Viewer = class {
         w: this._img.naturalWidth || 0,
         h: this._img.naturalHeight || 0
       };
-      clone.appendChild(this._buildLegendSVG(lm.items, bounds, {
+      clone2.appendChild(this._buildLegendSVG(lm.items, bounds, {
         position: lm.position,
         scale: lm.scale
       }));
     }
-    return new XMLSerializer().serializeToString(clone);
+    return new XMLSerializer().serializeToString(clone2);
   }
   /**
    * Download the full SVG as a file.
@@ -14634,9 +14634,9 @@ var MatchViewer = class {
       altKey: e.altKey,
       metaKey: e.metaKey
     };
-    let clone;
+    let clone2;
     if (e.type === "wheel") {
-      clone = new WheelEvent("wheel", {
+      clone2 = new WheelEvent("wheel", {
         ...init,
         deltaX: e.deltaX,
         deltaY: e.deltaY,
@@ -14644,9 +14644,9 @@ var MatchViewer = class {
         deltaMode: e.deltaMode
       });
     } else {
-      clone = new MouseEvent(e.type, init);
+      clone2 = new MouseEvent(e.type, init);
     }
-    viewport.dispatchEvent(clone);
+    viewport.dispatchEvent(clone2);
   }
   _onMatchLineHoverIn(e) {
     const hitLine = e.currentTarget;
@@ -15480,12 +15480,3749 @@ var MultiViewer = class {
   }
 };
 
-// src/plots.js
+// src/tools.js
 var SVG_NS10 = "http://www.w3.org/2000/svg";
+var MODES = ["view", "minutia", "core", "delta", "roi", "ruler", "ridges", "pair"];
+var DEFAULT_MODE_KEYS = {
+  v: "view",
+  m: "minutia",
+  c: "core",
+  d: "delta",
+  r: "roi",
+  l: "ruler",
+  L: "ridges",
+  p: "pair"
+};
+var MODE_LABELS = {
+  view: "ver",
+  minutia: "min\xFAcia",
+  core: "n\xFAcleo",
+  delta: "delta",
+  roi: "ROI",
+  ruler: "r\xE9gua",
+  ridges: "cristas",
+  pair: "par"
+};
+var GYRO = { G: "#22c55e", Y: "#facc15", R: "#ef4444", O: "#f97316" };
+var GYRO_KEYS = { 1: "G", 2: "Y", 3: "R" };
+var ToolModes = class extends Emitter {
+  /**
+   * @param {object} [opts]
+   * @param {Record<string,string>} [opts.keys] - Tecla → modo (padrão DEFAULT_MODE_KEYS).
+   * @param {string} [opts.mode='view']
+   */
+  constructor({ keys = DEFAULT_MODE_KEYS, mode = "view" } = {}) {
+    super();
+    this._keys = { ...keys };
+    this._mode = mode;
+    this._tools = /* @__PURE__ */ new Set();
+    this._focus = null;
+    this._viewerOff = /* @__PURE__ */ new Map();
+    this._unbind = null;
+  }
+  get mode() {
+    return this._mode;
+  }
+  /** Viewer que recebeu a última interação de mouse (ou null). */
+  get focus() {
+    return this._focus;
+  }
+  get tools() {
+    return [...this._tools];
+  }
+  /** Registra uma ferramenta (FeatureEditor, CorrespondenceEditor, Ruler, RidgeCount...). */
+  add(tool) {
+    if (!tool || this._tools.has(tool)) return tool;
+    this._tools.add(tool);
+    if (typeof tool._attachModes === "function") tool._attachModes(this);
+    for (const v of _viewersOf(tool)) this._watchViewer(v);
+    if (typeof tool.setMode === "function") tool.setMode(this._mode, null);
+    return tool;
+  }
+  remove(tool) {
+    this._tools.delete(tool);
+    if (tool && typeof tool._attachModes === "function") tool._attachModes(null);
+  }
+  /** Troca o modo. Repetir o modo atual também notifica (repeat = true). */
+  setMode(mode, { source = null } = {}) {
+    const prev = this._mode;
+    this._mode = String(mode);
+    for (const v of this._viewerOff.keys()) {
+      v.viewport.classList.remove(`mntviz-mode-${prev}`);
+      v.viewport.classList.add(`mntviz-mode-${this._mode}`);
+    }
+    for (const t of this._tools) {
+      if (typeof t.setMode === "function") t.setMode(this._mode, prev);
+    }
+    this.emit("mode", { mode: this._mode, prev, repeat: prev === this._mode, source });
+  }
+  /** Marca o viewer em foco (as teclas de desfazer valem para as ferramentas dele). */
+  setFocus(viewer) {
+    if (viewer === this._focus) return;
+    this._focus = viewer;
+    this.emit("focus", { viewer });
+  }
+  /**
+   * Trata uma tecla: primeiro as ferramentas (uma operação em curso, como a ROI
+   * aberta, consome o Esc), depois as teclas de modo e o Esc (volta a 'view').
+   * Devolve true se alguém consumiu a tecla (e chama preventDefault).
+   */
+  handleKey(e) {
+    if (_isTyping(e)) return false;
+    const ctx = { mode: this._mode, focus: this._focus, modes: this };
+    for (const t of this._tools) {
+      if (typeof t.handleKey === "function" && t.handleKey(e, ctx)) {
+        e.preventDefault();
+        return true;
+      }
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === "Escape") {
+      if (this._mode !== "view") {
+        this.setMode("view", { source: "key" });
+        e.preventDefault();
+        return true;
+      }
+      return false;
+    }
+    let mode = this._keys[e.key];
+    if (mode == null && !e.shiftKey && typeof e.key === "string") mode = this._keys[e.key.toLowerCase()];
+    if (mode == null) return false;
+    this.setMode(mode, { source: "key" });
+    e.preventDefault();
+    return true;
+  }
+  /** Liga o teclado (keydown em `target`, padrão window). Devolve a função que desliga. */
+  bind(target = window) {
+    if (this._unbind) this._unbind();
+    const fn = (e) => this.handleKey(e);
+    target.addEventListener("keydown", fn);
+    this._unbind = () => {
+      target.removeEventListener("keydown", fn);
+      this._unbind = null;
+    };
+    return this._unbind;
+  }
+  destroy() {
+    if (this._unbind) this._unbind();
+    for (const off of this._viewerOff.values()) off();
+    this._viewerOff.clear();
+    this._tools.clear();
+    this.removeAllListeners();
+  }
+  /** @private Foco = viewer onde o mouse desceu por último. */
+  _watchViewer(viewer) {
+    if (!viewer || this._viewerOff.has(viewer)) return;
+    const vp = viewer.viewport;
+    const fn = () => this.setFocus(viewer);
+    vp.addEventListener("mousedown", fn, true);
+    vp.classList.add(`mntviz-mode-${this._mode}`);
+    this._viewerOff.set(viewer, () => vp.removeEventListener("mousedown", fn, true));
+  }
+};
+var History = class {
+  constructor({ limit = 200 } = {}) {
+    this._undo = [];
+    this._redo = [];
+    this._limit = limit;
+  }
+  push(snapshot) {
+    this._undo.push(snapshot);
+    if (this._undo.length > this._limit) this._undo.shift();
+    this._redo.length = 0;
+  }
+  undo(current) {
+    if (!this._undo.length) return null;
+    const prev = this._undo.pop();
+    this._redo.push(current);
+    return prev;
+  }
+  redo(current) {
+    if (!this._redo.length) return null;
+    const next = this._redo.pop();
+    this._undo.push(current);
+    return next;
+  }
+  get canUndo() {
+    return this._undo.length > 0;
+  }
+  get canRedo() {
+    return this._redo.length > 0;
+  }
+  get sizes() {
+    return { undo: this._undo.length, redo: this._redo.length };
+  }
+  clear() {
+    this._undo.length = 0;
+    this._redo.length = 0;
+  }
+};
+function svgEl(tag, attrs = {}, parent = null) {
+  const el = document.createElementNS(SVG_NS10, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === void 0 || v === false) continue;
+    el.setAttribute(k, String(v));
+  }
+  if (parent) parent.appendChild(el);
+  return el;
+}
+function norm360(a) {
+  const r = Number(a) % 360;
+  return (r < 0 ? r + 360 : r) + 0;
+}
+function isoAngle(x0, y0, x1, y1) {
+  return norm360(Math.atan2(-(y1 - y0), x1 - x0) * 180 / Math.PI);
+}
+function tipPoint(x, y, thetaDeg, len) {
+  const r = thetaDeg * Math.PI / 180;
+  return { x: x + len * Math.cos(r), y: y - len * Math.sin(r) };
+}
+function viewScale(viewer) {
+  const s = viewer && viewer.viewState ? viewer.viewState.scale : 1;
+  return s > 0 ? s : 1;
+}
+function uprightTransform(viewer, x, y, { exportMode = false } = {}) {
+  if (exportMode) return `translate(${x}, ${y})`;
+  const { scale, rotation, flipX } = viewer.viewState;
+  const s = scale > 0 ? scale : 1;
+  return `translate(${x}, ${y})${flipX ? " scale(-1, 1)" : ""} rotate(${-rotation}) scale(${1 / s})`;
+}
+function screenMapper(viewer) {
+  const ctm = viewer.svgLayer.getScreenCTM();
+  if (!ctm) return () => ({ x: NaN, y: NaN });
+  return (x, y) => ({ x: ctm.a * x + ctm.c * y + ctm.e, y: ctm.b * x + ctm.d * y + ctm.f });
+}
+function insideImage(viewer, x, y) {
+  const { width, height } = viewer.imageSize;
+  return x >= 0 && y >= 0 && x < width && y < height;
+}
+function clone(obj) {
+  return obj == null ? obj : JSON.parse(JSON.stringify(obj));
+}
+function onViewFrame(viewer, fn) {
+  let pending = false;
+  return viewer.on("view", () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      fn();
+    });
+  });
+}
+function stopEvent(e) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+function _isTyping(e) {
+  const t = e.target;
+  if (!t || t === window || t === document) return false;
+  const tag = (t.tagName || "").toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || !!t.isContentEditable;
+}
+function _viewersOf(tool) {
+  if (!tool) return [];
+  if (Array.isArray(tool.viewers)) return tool.viewers;
+  return tool.viewer ? [tool.viewer] : [];
+}
+
+// src/feature-editor.js
+var MINUTIA_TYPES = ["ending", "bifurcation", "unknown"];
+var EDIT_MODES = /* @__PURE__ */ new Set(["view", "minutia", "core", "delta", "roi"]);
+var CREATE_MODES = /* @__PURE__ */ new Set(["minutia", "core", "delta"]);
+var SHAPE_OF_TYPE = { ending: "circle", bifurcation: "square", unknown: "diamond" };
+var TYPE_ALIASES = {
+  1: "ending",
+  2: "bifurcation",
+  0: "unknown",
+  ending: "ending",
+  bifurcation: "bifurcation",
+  unknown: "unknown",
+  ridgeending: "ending",
+  ridgebifurcation: "bifurcation",
+  end: "ending",
+  bif: "bifurcation",
+  other: "unknown"
+};
+var DEFAULTS7 = {
+  layer: "features",
+  z: 25,
+  suggestionLayer: "suggestions",
+  suggestionZ: 24,
+  ppi: 500,
+  markerRadius: null,
+  segmentLength: null,
+  color: null,
+  suggestionColor: "#38bdf8",
+  roiColor: "#a78bfa",
+  selectColor: "#ffffff",
+  round: true,
+  angleStep: 1,
+  defaultConfidence: "G",
+  phase: "analysis",
+  newType: "ending",
+  readOnly: false,
+  showConfidence: false,
+  hitRadius: 9,
+  tipRadius: 8,
+  dragThreshold: 4,
+  selection: true,
+  source: null
+};
+var FeatureEditor = class extends Emitter {
+  /**
+   * @param {import('./viewer.js').Viewer} viewer
+   * @param {object} [opts] - Ver DEFAULTS. `features` e `suggestions` iniciais;
+   *        `color(item)` dá a cor de uma feature aceita (padrão: GYRO pela confiança).
+   */
+  constructor(viewer, opts = {}) {
+    super();
+    this.viewer = viewer;
+    this._o = { ...DEFAULTS7, ...opts };
+    this._mode = "view";
+    this._items = [];
+    this._roi = null;
+    this._meta = { frgp: 0, absent: [] };
+    this._sug = [];
+    this._sugSource = null;
+    this._focusSid = null;
+    this._selected = /* @__PURE__ */ new Set();
+    this._nextId = 1;
+    this._history = new History();
+    this._drag = null;
+    this._roiDraft = null;
+    this._roiCursor = null;
+    this._exportMode = false;
+    this._newType = this._o.newType;
+    this._defaultConfidence = this._o.defaultConfidence;
+    this._phase = this._o.phase;
+    this._readOnly = !!this._o.readOnly;
+    this._raf = 0;
+    this._syncing = false;
+    this._layer = viewer.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z });
+    this._sugLayer = viewer.layers.ensure(this._o.suggestionLayer, { kind: "svg", z: this._o.suggestionZ });
+    this._g = svgEl("g", { class: "mntviz-fe" });
+    this._sg = svgEl("g", { class: "mntviz-fe mntviz-fe-suggestions" });
+    this._layer.el.appendChild(this._g);
+    this._sugLayer.el.appendChild(this._sg);
+    this._ac = new AbortController();
+    const sig = { signal: this._ac.signal };
+    const vp = viewer.viewport;
+    vp.addEventListener("mousedown", (e) => this._down(e), { capture: true, ...sig });
+    window.addEventListener("mousemove", (e) => this._move(e), { capture: true, ...sig });
+    window.addEventListener("mouseup", (e) => this._up(e), { capture: true, ...sig });
+    vp.addEventListener("dblclick", (e) => this._dbl(e), { capture: true, ...sig });
+    this._offView = onViewFrame(viewer, () => this.render());
+    this._offSel = viewer.selection && this._o.selection ? viewer.selection.on("change", (ev) => this._fromSharedSelection(ev)) : () => {
+    };
+    if (opts.features) this.setFeatures(opts.features, { silent: true });
+    if (opts.suggestions) this.setSuggestions(opts.suggestions, { source: opts.suggestionSource || null });
+    this.render();
+  }
+  /* ── estado e consultas ─────────────────────────────────── */
+  get mode() {
+    return this._mode;
+  }
+  get layerName() {
+    return this._o.layer;
+  }
+  get ppi() {
+    return this._o.ppi;
+  }
+  get readOnly() {
+    return this._readOnly;
+  }
+  get canUndo() {
+    return this._history.canUndo;
+  }
+  get canRedo() {
+    return this._history.canRedo;
+  }
+  get newType() {
+    return this._newType;
+  }
+  get defaultConfidence() {
+    return this._defaultConfidence;
+  }
+  get phase() {
+    return this._phase;
+  }
+  get roi() {
+    return this._roi ? this._roi.map((p) => [p[0], p[1]]) : null;
+  }
+  get selected() {
+    return [...this._selected];
+  }
+  get selectedItems() {
+    return this.selected.map((id) => this.get(id)).filter(Boolean);
+  }
+  get focusedSuggestion() {
+    const s = this._sugById(this._focusSid);
+    return s ? { ...s } : null;
+  }
+  /** Todas as features (cópias): [{id, kind, x, y, theta, type, ...}]. */
+  get items() {
+    return this._items.map((it) => ({ ...it }));
+  }
+  /** Uma feature pelo id (cópia) ou null. */
+  get(id) {
+    const it = this._items.find((i) => i.id === id);
+    return it ? { ...it } : null;
+  }
+  /** Sugestões com o estado de cada uma ('open' | 'accepted' | 'rejected'). */
+  get suggestions() {
+    return this._sug.map((s) => ({ ...s }));
+  }
+  setPpi(ppi) {
+    this._o.ppi = Number(ppi);
+    this.render();
+    return this;
+  }
+  setReadOnly(on) {
+    this._readOnly = !!on;
+    this._drag = null;
+    this._roiDraft = null;
+    this.render();
+    return this;
+  }
+  /** Fase gravada nas marcas novas; em 'comparison' as novas nascem laranja (O). */
+  setPhase(phase) {
+    this._phase = String(phase);
+    this._emitTool();
+    return this;
+  }
+  /** Confiança padrão das próximas marcas (G/Y/R/O). */
+  setDefaultConfidence(c) {
+    this._defaultConfidence = c;
+    this._emitTool();
+    return this;
+  }
+  /** Campos de análise do vestígio: {frgp, pattern, value, absent}. */
+  setMeta(meta = {}) {
+    const before = this._snap();
+    this._meta = { ...this._meta, ...clone(meta) };
+    this._commit("meta", before, []);
+    return this;
+  }
+  get meta() {
+    return clone(this._meta);
+  }
+  /* ── modos e teclado ────────────────────────────────────── */
+  /** Troca o modo (chamado pelo ToolModes; prev === mode = tecla repetida). */
+  setMode(mode, prev = void 0) {
+    const was = this._mode;
+    this._mode = String(mode);
+    if (this._mode === "minutia" && was === "minutia" && prev === "minutia") {
+      this._newType = this._newType === "ending" ? "bifurcation" : "ending";
+      const mins = this.selectedItems.filter((i) => i.kind === "minutia").map((i) => i.id);
+      if (mins.length && !this._readOnly) this.setType(mins, this._newType);
+      this._emitTool();
+    }
+    if (this._mode !== "roi" && this._roiDraft) {
+      this._roiDraft = null;
+    }
+    if (!EDIT_MODES.has(this._mode)) this._drag = null;
+    this.render();
+  }
+  /** Trata uma tecla; devolve true se consumiu. */
+  handleKey(e, ctx = null) {
+    const mode = ctx ? ctx.mode : this._mode;
+    if (!EDIT_MODES.has(mode)) return false;
+    if (ctx && ctx.focus && ctx.focus !== this.viewer) return false;
+    const k = e.key;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && (k === "z" || k === "Z")) {
+      if (e.shiftKey) this.redo();
+      else this.undo();
+      return true;
+    }
+    if (ctrl && (k === "y" || k === "Y")) {
+      this.redo();
+      return true;
+    }
+    if (ctrl || e.altKey) return false;
+    if (k === "Escape") {
+      if (this._drag) {
+        this._cancelDrag();
+        return true;
+      }
+      if (this._roiDraft) {
+        this._roiDraft = null;
+        this.render();
+        return true;
+      }
+      if (this._selected.size) {
+        this._setSelected([]);
+        return true;
+      }
+      return false;
+    }
+    if (mode === "roi") {
+      if (k === "Enter" && this._roiDraft) {
+        this._closeRoi();
+        return true;
+      }
+      if (k === "Backspace" && this._roiDraft) {
+        this._roiDraft.pop();
+        if (!this._roiDraft.length) this._roiDraft = null;
+        this.render();
+        return true;
+      }
+      if ((k === "Delete" || k === "Backspace") && this._roi && !this._readOnly) {
+        this.setRoi(null);
+        return true;
+      }
+    }
+    if (k === "Delete" || k === "Backspace") {
+      if (!this._selected.size || this._readOnly) return false;
+      this.remove(this.selected);
+      return true;
+    }
+    if (GYRO_KEYS[k]) {
+      this._defaultConfidence = GYRO_KEYS[k];
+      if (this._selected.size && !this._readOnly) this.setConfidence(this.selected, GYRO_KEYS[k]);
+      this._emitTool();
+      return true;
+    }
+    if (k === "t" || k === "T") {
+      if (!this._selected.size || this._readOnly) return false;
+      this.cycleType(this.selected);
+      return true;
+    }
+    if (k === "a") return this.accept("focused").length > 0;
+    if (k === "A") return this.accept("all").length > 0;
+    if (k === "x" || k === "X") return this.reject("focused").length > 0;
+    return false;
+  }
+  /* ── edição programática (cada chamada é um passo de desfazer) ─ */
+  /** Cria uma feature. kind: 'minutia' | 'core' | 'delta'. Devolve o id. */
+  add(kind, props = {}) {
+    const before = this._snap();
+    const it = this._newItem(kind, props.x, props.y, props);
+    this._items.push(it);
+    this._commit("add", before, [it.id]);
+    return it.id;
+  }
+  move(id, x, y) {
+    return this._edit("move", [id], (it) => {
+      it.x = this._coord(x);
+      it.y = this._coord(y);
+    });
+  }
+  rotate(id, theta) {
+    return this._edit("rotate", [id], (it) => {
+      it.theta = this._angle(theta);
+    });
+  }
+  remove(ids) {
+    const set = new Set(_asArray2(ids));
+    if (!set.size) return false;
+    const before = this._snap();
+    const n0 = this._items.length;
+    this._items = this._items.filter((it) => !set.has(it.id));
+    if (this._items.length === n0) return false;
+    for (const id of set) this._selected.delete(id);
+    this._pushSelection();
+    this._commit("delete", before, [...set]);
+    return true;
+  }
+  /** Muda o tipo: minúcia ending|bifurcation|unknown; singularidade core|delta. */
+  setType(ids, type) {
+    const t = String(type).toLowerCase();
+    return this._edit("type", ids, (it) => {
+      if (it.kind === "minutia" && MINUTIA_TYPES.includes(t)) it.type = t;
+      else if (it.kind !== "minutia" && (t === "core" || t === "delta")) it.kind = t;
+    });
+  }
+  /** Alterna o tipo: terminação → bifurcação → desconhecida; núcleo ↔ delta. */
+  cycleType(ids) {
+    return this._edit("type", ids, (it) => {
+      if (it.kind === "minutia") {
+        it.type = MINUTIA_TYPES[(MINUTIA_TYPES.indexOf(it.type) + 1) % MINUTIA_TYPES.length];
+      } else {
+        it.kind = it.kind === "core" ? "delta" : "core";
+      }
+    });
+  }
+  setConfidence(ids, confidence) {
+    return this._edit("confidence", ids, (it) => {
+      it.confidence = confidence || void 0;
+    });
+  }
+  /** Raio de incerteza da posição (px) e do ângulo (graus). */
+  setUncertainty(ids, { coord_unc, theta_unc } = {}) {
+    return this._edit("uncertainty", ids, (it) => {
+      if (coord_unc !== void 0) it.coord_unc = coord_unc == null ? void 0 : Math.max(0, Number(coord_unc));
+      if (theta_unc !== void 0) it.theta_unc = theta_unc == null ? void 0 : Math.max(0, Number(theta_unc));
+    });
+  }
+  /** Define a ROI (polígono [[x, y], ...] com 3+ vértices) ou a apaga (null). */
+  setRoi(points) {
+    const before = this._snap();
+    this._roi = points && points.length >= 3 ? points.map((p) => [this._coord(p[0]), this._coord(p[1])]) : null;
+    this._commit("roi", before, []);
+    return this;
+  }
+  /** Seleciona ids (add: soma à seleção atual). */
+  select(ids, { add = false } = {}) {
+    const next = add ? new Set(this._selected) : /* @__PURE__ */ new Set();
+    for (const id of _asArray2(ids)) if (this._items.some((i) => i.id === id)) next.add(id);
+    this._setSelected([...next]);
+    return this;
+  }
+  clearSelection() {
+    this._setSelected([]);
+    return this;
+  }
+  /** Troca todas as features (Features do contrato ou listas no formato do mntviz). */
+  setFeatures(f, { silent = false, resetHistory = true } = {}) {
+    const before = this._snap();
+    this._items = [];
+    this._nextId = 1;
+    const feats = f || {};
+    for (const m of feats.minutiae || (Array.isArray(f) ? f : [])) this._items.push(this._importItem("minutia", m));
+    for (const c of feats.cores || []) this._items.push(this._importItem("core", c));
+    for (const d of feats.deltas || []) this._items.push(this._importItem("delta", d));
+    this._roi = feats.roi && feats.roi.length >= 3 ? feats.roi.map((p) => [Number(p[0]), Number(p[1])]) : null;
+    const { frgp = 0, pattern, value, absent = [] } = feats;
+    this._meta = { frgp, absent: [...absent] };
+    if (pattern != null) this._meta.pattern = pattern;
+    if (value != null) this._meta.value = value;
+    if (feats.ppi) this._o.ppi = Number(feats.ppi);
+    this._selected.clear();
+    if (resetHistory) this._history.clear();
+    if (!silent) this._emitChange("set", before, this._items.map((i) => i.id));
+    this.render();
+    return this;
+  }
+  /* ── sugestões ──────────────────────────────────────────── */
+  /**
+   * Sugestões do algoritmo (camada tracejada, separada das respostas):
+   * Features-like {minutiae, cores, deltas} ou uma lista de minúcias.
+   * `source` = {kind: 'algo', id, version, params_hash} vai na origem do aceito.
+   */
+  setSuggestions(sug, { source = null } = {}) {
+    this._sug = [];
+    let sid = 0;
+    const s = sug || {};
+    const push = (kind, m) => {
+      const it = this._importItem(kind, m, { keepFloat: true });
+      this._sug.push({
+        sid: sid++,
+        kind,
+        x: it.x,
+        y: it.y,
+        theta: it.theta,
+        type: it.type,
+        quality: it.quality,
+        status: "open"
+      });
+    };
+    for (const m of s.minutiae || (Array.isArray(sug) ? sug : [])) push("minutia", m);
+    for (const c of s.cores || []) push("core", c);
+    for (const d of s.deltas || []) push("delta", d);
+    this._sugSource = source ? clone(source) : null;
+    this._focusSid = null;
+    this.render();
+    this.emit("suggestions", { n: this._sug.length, source: this._sugSource });
+    return this;
+  }
+  /** Aceita sugestões ('focused', 'all' ou lista de sid). Devolve os ids criados. */
+  accept(which = "focused") {
+    const list = this._resolveSug(which);
+    if (!list.length || this._readOnly) return [];
+    const before = this._snap();
+    const ids = [];
+    for (const s of list) {
+      s.status = "accepted";
+      const it = this._newItem(s.kind, s.x, s.y, { theta: s.theta, type: s.type, quality: s.quality });
+      it.origin = { ...this._sugSource || { kind: "algo" }, sid: s.sid };
+      this._items.push(it);
+      ids.push(it.id);
+    }
+    this._focusNextOpen(list[list.length - 1].sid);
+    this._commit("accept", before, ids);
+    return ids;
+  }
+  /** Rejeita sugestões ('focused', 'all' ou lista de sid). Devolve os sid rejeitados. */
+  reject(which = "focused") {
+    const list = this._resolveSug(which);
+    if (!list.length || this._readOnly) return [];
+    const before = this._snap();
+    for (const s of list) s.status = "rejected";
+    this._focusNextOpen(list[list.length - 1].sid);
+    this._commit("reject", before, []);
+    return list.map((s) => s.sid);
+  }
+  /** Foco na próxima (ou anterior) sugestão aberta. */
+  focusNext(dir = 1) {
+    const open = this._sug.filter((s) => s.status === "open");
+    if (!open.length) {
+      this._setFocus(null);
+      return null;
+    }
+    const i = open.findIndex((s) => s.sid === this._focusSid);
+    const next = open[i < 0 ? dir > 0 ? 0 : open.length - 1 : (i + dir + open.length) % open.length];
+    this._setFocus(next.sid);
+    return { ...next };
+  }
+  focusPrev() {
+    return this.focusNext(-1);
+  }
+  /**
+   * Marca de laranja (O, fase 'comparison') as features sem correspondente na
+   * linha de base (por exemplo, a análise travada A0): mesmo tipo de feature a
+   * até `tol` px. Devolve os ids marcados.
+   */
+  markNewAgainst(baseline, { tol = 4 } = {}) {
+    const base = [];
+    const b = baseline || {};
+    for (const m of b.minutiae || []) base.push({ kind: "minutia", x: Number(m.x), y: Number(m.y) });
+    for (const c of b.cores || []) base.push({ kind: "core", x: Number(c.x), y: Number(c.y) });
+    for (const d of b.deltas || []) base.push({ kind: "delta", x: Number(d.x), y: Number(d.y) });
+    const ids = this._items.filter((it) => !base.some((q) => q.kind === it.kind && Math.hypot(q.x - it.x, q.y - it.y) <= tol)).map((it) => it.id);
+    if (!ids.length) return [];
+    this._edit("diff", ids, (it) => {
+      it.confidence = "O";
+      it.phase = "comparison";
+    });
+    return ids;
+  }
+  /* ── desfazer ───────────────────────────────────────────── */
+  undo() {
+    const cur = this._snap();
+    const prev = this._history.undo(cur);
+    if (!prev) return false;
+    this._load(prev);
+    this._emitChange("undo", cur, []);
+    this.render();
+    return true;
+  }
+  redo() {
+    const cur = this._snap();
+    const next = this._history.redo(cur);
+    if (!next) return false;
+    this._load(next);
+    this._emitChange("redo", cur, []);
+    this.render();
+    return true;
+  }
+  /* ── saída ──────────────────────────────────────────────── */
+  /** Features no formato do contrato (EFS-JSON v0). */
+  toFeatures() {
+    const out = {
+      ppi: this._o.ppi,
+      minutiae: [],
+      cores: [],
+      deltas: [],
+      roi: this.roi,
+      frgp: this._meta.frgp ?? 0,
+      absent: [...this._meta.absent || []],
+      conventions: { angle: "iso", coords: "image" }
+    };
+    if (this._meta.pattern != null) out.pattern = this._meta.pattern;
+    if (this._meta.value != null) out.value = this._meta.value;
+    if (this._o.source) out.source = clone(this._o.source);
+    for (const it of this._items) {
+      if (it.kind === "minutia") {
+        out.minutiae.push(_strip({
+          x: it.x,
+          y: it.y,
+          theta_deg_iso: it.theta,
+          type: it.type,
+          quality: it.quality,
+          coord_unc: it.coord_unc,
+          theta_unc: it.theta_unc,
+          confidence: it.confidence,
+          phase: it.phase
+        }));
+      } else {
+        (it.kind === "core" ? out.cores : out.deltas).push(_strip({
+          x: it.x,
+          y: it.y,
+          type: it.kind,
+          theta_deg_iso: it.theta,
+          confidence: it.confidence
+        }));
+      }
+    }
+    return out;
+  }
+  /** Estado completo do editor (JSON). */
+  serialize() {
+    return {
+      version: 1,
+      layer: this._o.layer,
+      ppi: this._o.ppi,
+      phase: this._phase,
+      nextId: this._nextId,
+      items: clone(this._items),
+      roi: this.roi,
+      meta: clone(this._meta),
+      suggestions: { source: clone(this._sugSource), items: clone(this._sug) }
+    };
+  }
+  /** Aplica um estado de serialize() (zera o histórico). */
+  restore(state) {
+    if (!state) return this;
+    this._items = clone(state.items || []);
+    this._roi = state.roi ? clone(state.roi) : null;
+    this._meta = clone(state.meta || { frgp: 0, absent: [] });
+    this._sug = clone(state.suggestions && state.suggestions.items || []);
+    this._sugSource = clone(state.suggestions && state.suggestions.source || null);
+    this._nextId = Math.max(state.nextId || 1, ...this._items.map((i) => i.id + 1), 1);
+    if (state.ppi) this._o.ppi = state.ppi;
+    if (state.phase) this._phase = state.phase;
+    this._selected.clear();
+    this._history.clear();
+    this.render();
+    return this;
+  }
+  beginExport() {
+    this._exportMode = true;
+    this.render();
+  }
+  endExport() {
+    this._exportMode = false;
+    this.render();
+  }
+  destroy() {
+    this._ac.abort();
+    this._offView();
+    this._offSel();
+    this._g.remove();
+    this._sg.remove();
+    this.removeAllListeners();
+  }
+  /* ── desenho ────────────────────────────────────────────── */
+  render() {
+    if (this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = 0;
+    }
+    if (!this._g.isConnected) this._layer.el.appendChild(this._g);
+    if (!this._sg.isConnected) this._sugLayer.el.appendChild(this._sg);
+    this._g.replaceChildren();
+    this._sg.replaceChildren();
+    const ex = this._exportMode;
+    this._drawRoi();
+    for (const s of this._sug) {
+      if (s.status !== "open") continue;
+      this._glyph(this._sg, s, this._o.suggestionColor, { dashed: true, focused: !ex && s.sid === this._focusSid });
+    }
+    for (const it of this._items) {
+      this._glyph(this._g, it, this._colorOf(it), { selected: !ex && this._selected.has(it.id) });
+    }
+  }
+  _scheduleRender() {
+    if (this._raf) return;
+    this._raf = requestAnimationFrame(() => {
+      this._raf = 0;
+      this.render();
+    });
+  }
+  _colorOf(it) {
+    if (typeof this._o.color === "function") {
+      const c = this._o.color({ ...it });
+      if (c) return c;
+    }
+    return GYRO[it.confidence] || GYRO.G;
+  }
+  _radius(it) {
+    const base = this._o.markerRadius != null ? this._o.markerRadius : 5 * this._o.ppi / 500;
+    return it.kind === "core" ? base * 1.35 : it.kind === "delta" ? base * 1.45 : base;
+  }
+  _segLen(it) {
+    const base = this._o.segmentLength != null ? this._o.segmentLength : 13 * this._o.ppi / 500;
+    return it.kind === "minutia" ? base : base * 1.25;
+  }
+  _glyph(parent, it, color, { dashed = false, selected = false, focused = false } = {}) {
+    const s = this._exportMode ? 1 : viewScale(this.viewer);
+    const r = this._radius(it);
+    const L = this._segLen(it);
+    const g = svgEl("g", {
+      class: `mntviz-fe-item mntviz-fe-${it.kind}${dashed ? " mntviz-fe-suggestion" : ""}${selected ? " mntviz-fe-selected" : ""}`,
+      "data-id": dashed ? null : it.id,
+      "data-sid": dashed ? it.sid : null,
+      "data-kind": it.kind
+    }, parent);
+    const stroke = { stroke: color, "stroke-width": 1.7, "vector-effect": "non-scaling-stroke" };
+    if (dashed) stroke["stroke-dasharray"] = "3 2";
+    if (!dashed && it.coord_unc > 0) {
+      svgEl("circle", {
+        cx: it.x,
+        cy: it.y,
+        r: it.coord_unc,
+        fill: color,
+        "fill-opacity": 0.08,
+        stroke: color,
+        "stroke-opacity": 0.55,
+        "stroke-width": 1,
+        "vector-effect": "non-scaling-stroke",
+        class: "mntviz-fe-unc"
+      }, g);
+    }
+    if (!dashed && it.theta_unc > 0 && it.theta != null) {
+      const u = Math.min(it.theta_unc, 179.9);
+      const a = tipPoint(it.x, it.y, it.theta - u, L), b = tipPoint(it.x, it.y, it.theta + u, L);
+      svgEl("path", {
+        d: `M ${it.x} ${it.y} L ${a.x} ${a.y} A ${L} ${L} 0 ${2 * u > 180 ? 1 : 0} 0 ${b.x} ${b.y} Z`,
+        fill: color,
+        "fill-opacity": 0.16,
+        stroke: "none",
+        class: "mntviz-fe-thetaunc"
+      }, g);
+    }
+    const shapeName = it.kind === "minutia" ? SHAPE_OF_TYPE[it.type] || "circle" : it.kind === "core" ? "circle" : "triangle";
+    if (selected || focused) {
+      const halo = createMarkerShape(shapeName, it.x, it.y, r + 2.2 / s);
+      _attrs(halo, {
+        stroke: focused ? "#fde047" : this._o.selectColor,
+        "stroke-width": 4.5,
+        "stroke-opacity": 0.9,
+        fill: "none",
+        "vector-effect": "non-scaling-stroke",
+        class: "mntviz-fe-halo"
+      });
+      g.appendChild(halo);
+    }
+    const shape = createMarkerShape(shapeName, it.x, it.y, r);
+    _attrs(shape, { ...stroke, fill: "none", class: "mntviz-fe-shape" });
+    g.appendChild(shape);
+    if (it.kind === "core") {
+      svgEl("circle", { cx: it.x, cy: it.y, r: Math.max(0.8, r * 0.25), fill: color, stroke: "none" }, g);
+    }
+    if (it.theta != null && Number.isFinite(it.theta)) {
+      const t = tipPoint(it.x, it.y, it.theta, L);
+      const st = tipPoint(it.x, it.y, it.theta, r);
+      svgEl("line", {
+        x1: st.x,
+        y1: st.y,
+        x2: t.x,
+        y2: t.y,
+        ...stroke,
+        "stroke-linecap": "round",
+        class: "mntviz-fe-dir"
+      }, g);
+      if (selected && !this._readOnly) {
+        svgEl("circle", {
+          cx: t.x,
+          cy: t.y,
+          r: 3.2 / s,
+          fill: color,
+          stroke: "#000",
+          "stroke-width": 1,
+          "vector-effect": "non-scaling-stroke",
+          class: "mntviz-fe-tip"
+        }, g);
+      }
+    }
+    if (this._o.showConfidence && !dashed && it.confidence) {
+      const lg = svgEl("g", { transform: uprightTransform(this.viewer, it.x, it.y, { exportMode: this._exportMode }) }, g);
+      const tx = svgEl("text", {
+        x: 7,
+        y: 12,
+        "font-size": 10,
+        "font-family": "sans-serif",
+        fill: color,
+        stroke: "#000",
+        "stroke-width": 2.5,
+        "paint-order": "stroke"
+      }, lg);
+      tx.textContent = it.confidence;
+    }
+    return g;
+  }
+  _drawRoi() {
+    const pts = this._roi;
+    const color = this._o.roiColor;
+    const s = this._exportMode ? 1 : viewScale(this.viewer);
+    if (pts && pts.length >= 3) {
+      svgEl("polygon", {
+        points: pts.map((p) => p.join(",")).join(" "),
+        fill: color,
+        "fill-opacity": 0.06,
+        stroke: color,
+        "stroke-width": 1.8,
+        "vector-effect": "non-scaling-stroke",
+        class: "mntviz-fe-roi"
+      }, this._g);
+      if (this._mode === "roi" && !this._exportMode) {
+        for (const p of pts) {
+          svgEl("rect", {
+            x: p[0] - 3 / s,
+            y: p[1] - 3 / s,
+            width: 6 / s,
+            height: 6 / s,
+            fill: color,
+            stroke: "#000",
+            "stroke-width": 1,
+            "vector-effect": "non-scaling-stroke"
+          }, this._g);
+        }
+      }
+    }
+    const d = this._roiDraft;
+    if (d && d.length && !this._exportMode) {
+      const all = this._roiCursor ? [...d, this._roiCursor] : d;
+      svgEl("polyline", {
+        points: all.map((p) => p.join(",")).join(" "),
+        fill: "none",
+        stroke: color,
+        "stroke-width": 1.6,
+        "stroke-dasharray": "4 3",
+        "vector-effect": "non-scaling-stroke",
+        class: "mntviz-fe-roi-draft"
+      }, this._g);
+      for (const p of d) {
+        svgEl("circle", {
+          cx: p[0],
+          cy: p[1],
+          r: 3 / s,
+          fill: color,
+          stroke: "#000",
+          "stroke-width": 1,
+          "vector-effect": "non-scaling-stroke"
+        }, this._g);
+      }
+    }
+  }
+  /* ── mouse ──────────────────────────────────────────────── */
+  _img(e) {
+    return this.viewer.screenToImageCoords(e.clientX, e.clientY);
+  }
+  _down(e) {
+    if (e.button !== 0 || !EDIT_MODES.has(this._mode)) return;
+    if (this._mode === "roi") {
+      this._roiDown(e);
+      return;
+    }
+    const hit = this._hit(e);
+    if (hit) {
+      stopEvent(e);
+      const it = this._items.find((i) => i.id === hit.id);
+      if (e.shiftKey) {
+        const next = new Set(this._selected);
+        if (next.has(it.id)) next.delete(it.id);
+        else next.add(it.id);
+        this._setSelected([...next]);
+      } else if (!this._selected.has(it.id)) {
+        this._setSelected([it.id]);
+      }
+      if (this._readOnly || !this._selected.has(it.id)) {
+        this.render();
+        return;
+      }
+      const before = this._snap();
+      const p = this._img(e);
+      if (e.altKey && it.kind === "minutia") this._drag = { type: "radius", id: it.id, before };
+      else if (hit.part === "tip") this._drag = { type: "rotate", id: it.id, before };
+      else {
+        const orig = {};
+        for (const id of this._selected) {
+          const o = this._items.find((i) => i.id === id);
+          if (o) orig[id] = { x: o.x, y: o.y };
+        }
+        this._drag = { type: "move", ids: Object.keys(orig).map(Number), orig, start: p, before };
+      }
+      this.render();
+      return;
+    }
+    const sh = this._hitSug(e);
+    if (sh) {
+      stopEvent(e);
+      this._setFocus(sh.sid);
+      return;
+    }
+    if (CREATE_MODES.has(this._mode) && !this._readOnly) {
+      const p = this._img(e);
+      if (!insideImage(this.viewer, p.x, p.y)) return;
+      stopEvent(e);
+      const before = this._snap();
+      const it = this._newItem(this._mode, p.x, p.y, {});
+      this._items.push(it);
+      this._selected = /* @__PURE__ */ new Set([it.id]);
+      this._drag = { type: "create", id: it.id, start: p, sx: e.clientX, sy: e.clientY, before };
+      this.render();
+      return;
+    }
+    if (!e.shiftKey && this._selected.size) this._setSelected([]);
+  }
+  _move(e) {
+    if (this._mode === "roi" && this._roiDraft) {
+      const p2 = this._img(e);
+      this._roiCursor = [this._coord(p2.x), this._coord(p2.y)];
+      this._scheduleRender();
+    }
+    const d = this._drag;
+    if (!d) return;
+    const p = this._img(e);
+    if (d.type === "roi-vertex") {
+      this._roi[d.index] = [this._coord(p.x), this._coord(p.y)];
+      this._scheduleRender();
+      return;
+    }
+    const it = this._items.find((i) => i.id === (d.id ?? d.ids[0]));
+    if (!it) {
+      this._drag = null;
+      return;
+    }
+    switch (d.type) {
+      case "create":
+        if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) >= this._o.dragThreshold) {
+          it.theta = this._angle(isoAngle(d.start.x, d.start.y, p.x, p.y));
+          d.angled = true;
+        }
+        break;
+      case "rotate":
+        it.theta = this._angle(isoAngle(it.x, it.y, p.x, p.y));
+        break;
+      case "move":
+        for (const id of d.ids) {
+          const o = this._items.find((i) => i.id === id);
+          if (!o) continue;
+          o.x = this._coord(d.orig[id].x + p.x - d.start.x);
+          o.y = this._coord(d.orig[id].y + p.y - d.start.y);
+        }
+        break;
+      case "radius":
+        it.coord_unc = Math.round(Math.hypot(p.x - it.x, p.y - it.y) * 10) / 10;
+        break;
+      default:
+        break;
+    }
+    this._scheduleRender();
+  }
+  _up() {
+    const d = this._drag;
+    if (!d) return;
+    this._drag = null;
+    if (d.type === "roi-vertex") {
+      this._commit("roi", d.before, []);
+      return;
+    }
+    const changed = JSON.stringify(d.before.items) !== JSON.stringify(this._items);
+    if (d.type !== "create" && !changed) {
+      this.render();
+      return;
+    }
+    const type = { create: "add", rotate: "rotate", move: "move", radius: "uncertainty" }[d.type] || d.type;
+    if (d.type === "create") this._setSelected([d.id]);
+    this._commit(type, d.before, d.ids || [d.id]);
+  }
+  _dbl(e) {
+    if (!EDIT_MODES.has(this._mode)) return;
+    const sh = this._hitSug(e);
+    if (sh) {
+      stopEvent(e);
+      this.accept([sh.sid]);
+    }
+  }
+  _cancelDrag() {
+    const d = this._drag;
+    this._drag = null;
+    if (d && d.before) this._load(d.before);
+    this.render();
+  }
+  _roiDown(e) {
+    if (this._readOnly) return;
+    const p = this._img(e);
+    const map = screenMapper(this.viewer);
+    const near = (q) => {
+      const sp = map(q[0], q[1]);
+      return Math.hypot(sp.x - e.clientX, sp.y - e.clientY) <= this._o.hitRadius;
+    };
+    if (this._roiDraft) {
+      stopEvent(e);
+      if (this._roiDraft.length >= 3 && near(this._roiDraft[0])) {
+        this._closeRoi();
+        return;
+      }
+      this._roiDraft.push([this._coord(p.x), this._coord(p.y)]);
+      this.render();
+      return;
+    }
+    if (this._roi) {
+      const idx = this._roi.findIndex(near);
+      if (idx >= 0) {
+        stopEvent(e);
+        this._drag = { type: "roi-vertex", index: idx, before: this._snap() };
+        return;
+      }
+    }
+    if (!insideImage(this.viewer, p.x, p.y)) return;
+    stopEvent(e);
+    this._roiDraft = [[this._coord(p.x), this._coord(p.y)]];
+    this.render();
+  }
+  _closeRoi() {
+    const pts = this._roiDraft;
+    this._roiDraft = null;
+    this._roiCursor = null;
+    if (pts && pts.length >= 3) this.setRoi(pts);
+    else this.render();
+  }
+  /** Alvo sob o mouse: {id, part: 'center' | 'tip', d} ou null. */
+  _hit(e) {
+    const map = screenMapper(this.viewer);
+    const mx = e.clientX, my = e.clientY;
+    let center = null, tip = null;
+    for (const it of this._items) {
+      const c = map(it.x, it.y);
+      const dc = Math.hypot(c.x - mx, c.y - my);
+      if (dc <= this._o.hitRadius && (!center || dc < center.d)) center = { id: it.id, part: "center", d: dc };
+      if (it.theta == null) continue;
+      const tp = tipPoint(it.x, it.y, it.theta, this._segLen(it));
+      const t = map(tp.x, tp.y);
+      if (Math.hypot(t.x - c.x, t.y - c.y) < 6) continue;
+      const dt = Math.hypot(t.x - mx, t.y - my);
+      if (dt <= this._o.tipRadius && (!tip || dt < tip.d)) tip = { id: it.id, part: "tip", d: dt };
+    }
+    if (tip && (!center || this._selected.has(tip.id) || tip.d < center.d)) return tip;
+    return center;
+  }
+  _hitSug(e) {
+    const map = screenMapper(this.viewer);
+    let best = null;
+    for (const s of this._sug) {
+      if (s.status !== "open") continue;
+      const c = map(s.x, s.y);
+      const d = Math.hypot(c.x - e.clientX, c.y - e.clientY);
+      if (d <= this._o.hitRadius && (!best || d < best.d)) best = { sid: s.sid, d };
+    }
+    return best;
+  }
+  /* ── interno ────────────────────────────────────────────── */
+  _coord(v) {
+    return (this._o.round ? Math.round(Number(v)) : Number(v)) + 0;
+  }
+  _angle(a) {
+    const st = this._o.angleStep;
+    const v = st > 0 ? Math.round(Number(a) / st) * st : Number(a);
+    return norm360(v);
+  }
+  _newItem(kind, x, y, props = {}) {
+    const k = kind === "core" || kind === "delta" ? kind : "minutia";
+    const it = { id: this._nextId++, kind: k, x: this._coord(x), y: this._coord(y) };
+    if (k === "minutia") {
+      it.theta = this._angle(props.theta ?? 0);
+      it.type = TYPE_ALIASES[String(props.type ?? this._newType).toLowerCase()] || this._newType;
+    } else if (props.theta != null) {
+      it.theta = this._angle(props.theta);
+    }
+    if (props.quality != null) it.quality = Number(props.quality);
+    if (props.coord_unc != null) it.coord_unc = Number(props.coord_unc);
+    if (props.theta_unc != null) it.theta_unc = Number(props.theta_unc);
+    it.confidence = props.confidence || (this._phase === "comparison" ? "O" : this._defaultConfidence) || void 0;
+    it.phase = props.phase || this._phase;
+    return it;
+  }
+  _importItem(kind, m, { keepFloat = false } = {}) {
+    const theta = m.theta_deg_iso ?? m.theta ?? m.angle ?? (Array.isArray(m.angles) ? m.angles[0] : void 0);
+    const k = kind === "minutia" ? "minutia" : String(m.type || kind).toLowerCase() === "delta" ? "delta" : kind;
+    const it = {
+      id: keepFloat ? -1 : this._nextId++,
+      kind: k,
+      x: keepFloat ? Number(m.x) : this._coord(m.x),
+      y: keepFloat ? Number(m.y) : this._coord(m.y)
+    };
+    if (theta != null && Number.isFinite(Number(theta))) it.theta = keepFloat ? norm360(Number(theta)) : this._angle(theta);
+    else if (k === "minutia") it.theta = 0;
+    if (k === "minutia") it.type = TYPE_ALIASES[String(m.type ?? "unknown").toLowerCase()] || "unknown";
+    for (const f of ["quality", "coord_unc", "theta_unc"]) if (m[f] != null) it[f] = Number(m[f]);
+    if (m.confidence && typeof m.confidence === "string") it.confidence = m.confidence;
+    if (m.phase) it.phase = m.phase;
+    if (m.origin) it.origin = clone(m.origin);
+    return it;
+  }
+  _edit(type, ids, fn) {
+    const set = new Set(_asArray2(ids));
+    const targets = this._items.filter((it) => set.has(it.id));
+    if (!targets.length || this._readOnly) return false;
+    const before = this._snap();
+    for (const it of targets) fn(it);
+    if (JSON.stringify(before.items) === JSON.stringify(this._items)) return false;
+    this._commit(type, before, [...set]);
+    return true;
+  }
+  _snap() {
+    return {
+      items: clone(this._items),
+      roi: this._roi ? clone(this._roi) : null,
+      meta: clone(this._meta),
+      sug: this._sug.map((s) => s.status),
+      nextId: this._nextId
+    };
+  }
+  _load(s) {
+    this._items = clone(s.items);
+    this._roi = s.roi ? clone(s.roi) : null;
+    this._meta = clone(s.meta);
+    s.sug.forEach((st, i) => {
+      if (this._sug[i]) this._sug[i].status = st;
+    });
+    for (const id of [...this._selected]) if (!this._items.some((i) => i.id === id)) this._selected.delete(id);
+    this._pushSelection();
+  }
+  _commit(type, before, ids) {
+    this._history.push(before);
+    this._emitChange(type, before, ids);
+    this.render();
+  }
+  _emitChange(type, before, ids) {
+    const prev = new Map(before.items.map((i) => [i.id, i]));
+    const now = new Map(this._items.map((i) => [i.id, i]));
+    const added = [], removed = [], changed = [];
+    for (const [id, it] of now) {
+      if (!prev.has(id)) added.push({ ...it });
+      else if (JSON.stringify(prev.get(id)) !== JSON.stringify(it)) changed.push({ before: { ...prev.get(id) }, after: { ...it } });
+    }
+    for (const [id, it] of prev) if (!now.has(id)) removed.push({ ...it });
+    const payload = {
+      source: "feature-editor",
+      layer: this._o.layer,
+      type,
+      ids,
+      diff: { added, removed, changed },
+      features: this.toFeatures()
+    };
+    this.emit("change", payload);
+    if (typeof this.viewer._emit === "function") this.viewer._emit("change", payload);
+  }
+  _emitTool() {
+    this.emit("tool", { newType: this._newType, defaultConfidence: this._defaultConfidence, phase: this._phase });
+  }
+  _setSelected(ids) {
+    this._selected = new Set(ids);
+    this._pushSelection();
+    this.emit("select", { ids: this.selected, items: this.selectedItems });
+    this.render();
+  }
+  _pushSelection() {
+    const sel = this.viewer.selection;
+    if (!sel || !this._o.selection) return;
+    const layer = this._o.layer;
+    this._syncing = true;
+    try {
+      const mine = sel.items.filter((it) => it && it.layer === layer);
+      const want = this.selected.map((id) => {
+        const it = this._items.find((i) => i.id === id);
+        return { layer, kind: it ? it.kind : "minutia", id };
+      });
+      const keys = new Set(want.map((w) => sel.keyOf(w)));
+      sel.remove(mine.filter((it) => !keys.has(sel.keyOf(it))), { source: "feature-editor" });
+      sel.add(want, { source: "feature-editor" });
+    } finally {
+      this._syncing = false;
+    }
+  }
+  _fromSharedSelection(ev) {
+    if (this._syncing || ev.source === "feature-editor") return;
+    const layer = this._o.layer;
+    const ids = ev.items.filter((it) => it && it.layer === layer && this._items.some((i) => i.id === it.id)).map((it) => it.id);
+    this._selected = new Set(ids);
+    this.emit("select", { ids: this.selected, items: this.selectedItems });
+    this.render();
+  }
+  _sugById(sid) {
+    return sid == null ? null : this._sug.find((s) => s.sid === sid) || null;
+  }
+  _setFocus(sid) {
+    this._focusSid = sid;
+    const s = this._sugById(sid);
+    this.emit("focus", { sid, suggestion: s ? { ...s } : null });
+    this.render();
+  }
+  _focusNextOpen(afterSid) {
+    const open = this._sug.filter((s) => s.status === "open");
+    const next = open.find((s) => s.sid > afterSid) || open[0] || null;
+    this._focusSid = next ? next.sid : null;
+  }
+  _resolveSug(which) {
+    if (which === "all") return this._sug.filter((s) => s.status === "open");
+    if (which === "focused") {
+      const s = this._sugById(this._focusSid);
+      return s && s.status === "open" ? [s] : [];
+    }
+    const set = new Set(_asArray2(which));
+    return this._sug.filter((s) => set.has(s.sid) && s.status === "open");
+  }
+};
+function _asArray2(v) {
+  return v == null ? [] : Array.isArray(v) ? v : [v];
+}
+function _strip(o) {
+  const out = {};
+  for (const [k, v] of Object.entries(o)) if (v !== void 0 && v !== null) out[k] = v;
+  return out;
+}
+function _attrs(el, attrs) {
+  for (const [k, v] of Object.entries(attrs)) if (v != null) el.setAttribute(k, String(v));
+}
+
+// src/image-adjust.js
+var ADJUST_OPS = ["levels", "brightness", "contrast", "gamma", "invert", "clahe"];
+var SERVER_OPS = /* @__PURE__ */ new Set(["clahe"]);
+var IDENTITY = (() => {
+  const l = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) l[i] = i;
+  return l;
+})();
+function _clamp012(v) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+function isServerOp(o) {
+  return !!o && (o.server === true || SERVER_OPS.has(o.op));
+}
+function applyAdjustOp(o, v) {
+  switch (o.op) {
+    case "levels": {
+      const lo = Number(o.lo ?? 0) / 255, hi = Number(o.hi ?? 255) / 255;
+      v = hi > lo ? (v - lo) / (hi - lo) : v >= lo ? 1 : 0;
+      break;
+    }
+    case "brightness":
+      v = v + Number(o.v ?? 0);
+      break;
+    case "contrast":
+      v = (v - 0.5) * Number(o.v ?? 1) + 0.5;
+      break;
+    case "gamma": {
+      const g = Number(o.v ?? 1);
+      if (g > 0) v = Math.pow(_clamp012(v), 1 / g);
+      break;
+    }
+    case "invert":
+      if (o.v !== false) v = 1 - v;
+      break;
+    default:
+      return v;
+  }
+  return _clamp012(v);
+}
+function buildLut(ops) {
+  const client = (ops || []).filter((o) => o && !isServerOp(o) && ADJUST_OPS.includes(o.op));
+  if (!client.length) return IDENTITY.slice();
+  const lut = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    let v = i / 255;
+    for (const o of client) v = applyAdjustOp(o, v);
+    lut[i] = Math.round(_clamp012(v) * 255);
+  }
+  return lut;
+}
+function describeAdjust(ops) {
+  const f = (x, d = 2) => Number(x).toFixed(d);
+  const parts = [];
+  for (const o of ops || []) {
+    switch (o.op) {
+      case "clahe":
+        parts.push(`CLAHE ${f(o.clip ?? 2, 1)} ${o.tile ?? 8}\xD7${o.tile ?? 8}`);
+        break;
+      case "levels":
+        parts.push(`n\xEDveis ${o.lo ?? 0}-${o.hi ?? 255}`);
+        break;
+      case "brightness":
+        parts.push(`brilho ${Number(o.v) >= 0 ? "+" : ""}${f(o.v ?? 0)}`);
+        break;
+      case "contrast":
+        parts.push(`contraste \xD7${f(o.v ?? 1)}`);
+        break;
+      case "gamma":
+        parts.push(`gama ${f(o.v ?? 1)}`);
+        break;
+      case "invert":
+        if (o.v !== false) parts.push("invers\xE3o");
+        break;
+      default:
+        parts.push(String(o.op));
+    }
+  }
+  return parts.join(" \xB7 ");
+}
+var ImageAdjust = class extends Emitter {
+  /**
+   * @param {import('./viewer.js').Viewer} viewer
+   * @param {object} [opts]
+   * @param {Array<object>} [opts.ops] - Pilha inicial.
+   * @param {'raw'|'browser'} [opts.decode='raw'] - Valores do arquivo ou os do navegador.
+   * @param {(serverOps: object[], src: string) => string} [opts.server] - URL da versão
+   *        processada no servidor (CLAHE). Sem ela, as operações de servidor ficam inativas.
+   * @param {string} [opts.layer='adjust'] - Nome da camada canvas.
+   */
+  constructor(viewer, { ops = [], decode = "raw", server = null, layer = "adjust", z = -1e3 } = {}) {
+    super();
+    this.viewer = viewer;
+    this._ops = _sanitize(ops);
+    this._decode = decode === "browser" ? "browser" : "raw";
+    this._server = typeof server === "function" ? server : null;
+    this._bypass = false;
+    this._base = null;
+    this._serverBase = null;
+    this._serverKey = null;
+    this._colorManaged = false;
+    this._out = null;
+    this._reasons = {};
+    this._layer = viewer.layers.ensure(layer, { kind: "canvas", z });
+    this._placeLayer();
+    this._layer.hide();
+    this._onLoad = () => {
+      this.ready = this._loadBase();
+    };
+    viewer.imageElement.addEventListener("load", this._onLoad);
+    this.ready = this._loadBase();
+  }
+  /* ── pilha ──────────────────────────────────────────────── */
+  get ops() {
+    return this._ops.map((o) => ({ ...o }));
+  }
+  get decode() {
+    return this._decode;
+  }
+  /** O navegador desenha o original com valores diferentes dos do arquivo (gAMA/ICC)? */
+  get colorManaged() {
+    return this._colorManaged;
+  }
+  get bypass() {
+    return this._bypass;
+  }
+  get layer() {
+    return this._layer;
+  }
+  /** Razões das operações inativas ({op: texto}). */
+  get reasons() {
+    return { ...this._reasons };
+  }
+  push(op) {
+    this._ops.push(..._sanitize([op]));
+    this._changed("push");
+    return this;
+  }
+  /** Troca a pilha inteira. */
+  set(ops) {
+    this._ops = _sanitize(ops);
+    this._changed("set");
+    return this;
+  }
+  /** Atualiza a operação `index` (merge de campos). */
+  update(index, patch) {
+    if (!this._ops[index]) return this;
+    this._ops[index] = { ...this._ops[index], ...patch };
+    this._changed("update");
+    return this;
+  }
+  /**
+   * Define o parâmetro de uma operação pelo nome: cria, atualiza ou remove
+   * (remove com `null`). Útil para sliders: adj.setParam('gamma', 0.85).
+   */
+  setParam(op, value) {
+    const i = this._ops.findIndex((o) => o.op === op);
+    if (value === null || value === void 0 || value === false) {
+      if (i >= 0) {
+        this._ops.splice(i, 1);
+        this._changed("remove");
+      }
+      return this;
+    }
+    const patch = typeof value === "object" ? value : op === "invert" ? {} : { v: Number(value) };
+    if (i >= 0) this._ops[i] = { ...this._ops[i], ...patch };
+    else this._ops.push(..._sanitize([{ op, ...patch }]));
+    this._changed("param");
+    return this;
+  }
+  remove(index) {
+    this._ops.splice(index, 1);
+    this._changed("remove");
+    return this;
+  }
+  clear() {
+    this._ops = [];
+    this._changed("clear");
+    return this;
+  }
+  /** Estado JSON da pilha. */
+  serialize() {
+    return { version: 1, decode: this._decode, ops: this.ops };
+  }
+  /** Aplica um estado salvo por serialize(). */
+  restore(state) {
+    const ops = Array.isArray(state) ? state : state && state.ops || [];
+    const decode = state && !Array.isArray(state) && state.decode === "browser" ? "browser" : "raw";
+    this._ops = _sanitize(ops);
+    if (decode !== this._decode) {
+      this._decode = decode;
+      this.ready = this._loadBase().then(() => this._changed("restore"));
+      return this;
+    }
+    this._changed("restore");
+    return this;
+  }
+  /** LUT das operações de cliente. */
+  lut() {
+    return buildLut(this._ops);
+  }
+  /** A pilha não muda nada? */
+  isIdentity() {
+    if (this._ops.some((o) => isServerOp(o))) return false;
+    const lut = this.lut();
+    for (let i = 0; i < 256; i++) if (lut[i] !== i) return false;
+    return true;
+  }
+  /** Texto para o rótulo "processado" da exportação ("" se nada muda). */
+  label() {
+    return this.isIdentity() ? "" : describeAdjust(this._ops);
+  }
+  /** Antes/depois: com bypass, mostra o original (valores do arquivo). */
+  setBypass(on) {
+    this._bypass = !!on;
+    this._apply();
+    this._emitChange("bypass");
+    return this;
+  }
+  toggleBypass() {
+    return this.setBypass(!this._bypass);
+  }
+  /** Pixels exibidos (ImageData) — o original se nada muda. */
+  pixels() {
+    if (!this._base) return null;
+    return this._out && this._layer.visible ? this._out : this._base;
+  }
+  /** Pixels do original (valores do arquivo no modo 'raw'). */
+  basePixels() {
+    return this._base;
+  }
+  destroy() {
+    this.viewer.imageElement.removeEventListener("load", this._onLoad);
+    this._layer.remove();
+    this.removeAllListeners();
+  }
+  /* ── interno ────────────────────────────────────────────── */
+  _placeLayer() {
+    const img = this.viewer.imageElement;
+    if (img.nextSibling !== this._layer.el) img.after(this._layer.el);
+  }
+  async _loadBase() {
+    const img = this.viewer.imageElement;
+    if (!img.src) {
+      this._base = null;
+      return;
+    }
+    try {
+      await img.decode();
+    } catch {
+    }
+    if (!img.naturalWidth) return;
+    this._base = await _pixelsOf(img, this._decode);
+    this._colorManaged = false;
+    if (this._decode === "raw") {
+      const shown = await _pixelsOf(img, "browser");
+      this._colorManaged = !_sameSample(this._base, shown);
+    }
+    this._serverKey = null;
+    this._serverBase = null;
+    this._placeLayer();
+    await this._refreshServer();
+    this._apply();
+    this._emitChange("load");
+  }
+  async _refreshServer() {
+    const sops = this._ops.filter((o) => isServerOp(o));
+    this._reasons = {};
+    if (!sops.length) {
+      this._serverBase = null;
+      this._serverKey = null;
+      return;
+    }
+    if (!this._server) {
+      for (const o of sops) this._reasons[o.op] = `${o.op} vem do servidor: falta a op\xE7\xE3o server`;
+      this._serverBase = null;
+      return;
+    }
+    const url = this._server(sops.map((o) => ({ ...o })), this.viewer.imageElement.src);
+    if (url === this._serverKey && this._serverBase) return;
+    try {
+      const im = await _loadImage(url);
+      this._serverBase = await _pixelsOf(im, this._decode);
+      this._serverKey = url;
+    } catch (err) {
+      for (const o of sops) this._reasons[o.op] = `servidor: ${err.message}`;
+      this._serverBase = null;
+      this._serverKey = null;
+    }
+  }
+  _apply() {
+    const base = this._base;
+    if (!base) return;
+    const serverActive = !!this._serverBase && !this._bypass;
+    const src = serverActive ? this._serverBase : base;
+    const lut = this._bypass ? IDENTITY : this.lut();
+    const identity = lut.every((v, i) => v === i);
+    const show = this._colorManaged || serverActive || !identity;
+    if (!show) {
+      this._layer.hide();
+      this._out = null;
+      return;
+    }
+    const { width: w, height: h } = src;
+    if (!this._out || this._out.width !== w || this._out.height !== h) this._out = new ImageData(w, h);
+    const s = src.data, d = this._out.data;
+    for (let i = 0; i < s.length; i += 4) {
+      d[i] = lut[s[i]];
+      d[i + 1] = lut[s[i + 1]];
+      d[i + 2] = lut[s[i + 2]];
+      d[i + 3] = s[i + 3];
+    }
+    const c = this._layer.el;
+    if (c.width !== w || c.height !== h) {
+      c.width = w;
+      c.height = h;
+    }
+    c.getContext("2d").putImageData(this._out, 0, 0);
+    this._layer.show();
+  }
+  _changed(type) {
+    const run = async () => {
+      await this._refreshServer();
+      this._apply();
+      this._emitChange(type);
+    };
+    this.ready = (this.ready || Promise.resolve()).then(run, run);
+  }
+  _emitChange(type) {
+    const payload = {
+      source: "image-adjust",
+      type,
+      ops: this.ops,
+      identity: this.isIdentity(),
+      label: this.label(),
+      bypass: this._bypass,
+      colorManaged: this._colorManaged
+    };
+    this.emit("change", payload);
+    if (typeof this.viewer._emit === "function") this.viewer._emit("change", payload);
+  }
+};
+function _sanitize(ops) {
+  const out = [];
+  for (const o of ops || []) {
+    if (!o || typeof o !== "object" || !o.op) continue;
+    const c = { ...o, op: String(o.op) };
+    if (c.op === "clahe") {
+      c.server = true;
+      c.clip = Number(c.clip ?? 2);
+      c.tile = Number(c.tile ?? 8);
+    }
+    out.push(c);
+  }
+  return out;
+}
+function _loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error(`falha ao carregar ${src}`));
+    im.src = src;
+  });
+}
+async function _pixelsOf(img, decode) {
+  const w = img.naturalWidth, h = img.naturalHeight;
+  let src = img;
+  if (decode === "raw" && typeof createImageBitmap === "function") {
+    src = await createImageBitmap(img, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+  }
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0);
+  if (src !== img && typeof src.close === "function") src.close();
+  return ctx.getImageData(0, 0, w, h);
+}
+function _sameSample(a, b) {
+  if (!a || !b || a.data.length !== b.data.length) return false;
+  const n = a.data.length;
+  const step = Math.max(4, 4 * Math.floor(n / 4 / 4096));
+  for (let i = 0; i < n; i += step) {
+    if (a.data[i] !== b.data[i] || a.data[i + 1] !== b.data[i + 1] || a.data[i + 2] !== b.data[i + 2]) return false;
+  }
+  return true;
+}
+
+// src/registration.js
+function mlsRigid(controls, x, y) {
+  const n = controls.length;
+  if (n === 0) return { x, y };
+  const EPS = 1e-8;
+  let W = 0, pcx = 0, pcy = 0, qcx = 0, qcy = 0;
+  const w = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = controls[i].p;
+    const dx = p[0] - x, dy = p[1] - y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < EPS) {
+      const q = controls[i].q;
+      return { x: q[0], y: q[1] };
+    }
+    const wi = 1 / d2;
+    w[i] = wi;
+    W += wi;
+    pcx += wi * p[0];
+    pcy += wi * p[1];
+    qcx += wi * controls[i].q[0];
+    qcy += wi * controls[i].q[1];
+  }
+  pcx /= W;
+  pcy /= W;
+  qcx /= W;
+  qcy /= W;
+  let A = 0, B = 0;
+  for (let i = 0; i < n; i++) {
+    const p = controls[i].p, q = controls[i].q;
+    const ax = p[0] - pcx, ay = p[1] - pcy, bx = q[0] - qcx, by = q[1] - qcy;
+    A += w[i] * (ax * bx + ay * by);
+    B += w[i] * (ax * by - ay * bx);
+  }
+  const theta = Math.atan2(B, A);
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const vx = x - pcx, vy = y - pcy;
+  return { x: c * vx - s * vy + qcx, y: s * vx + c * vy + qcy };
+}
+function buildWarp(pairs) {
+  const r2l = pairs.map((pr) => ({ p: [pr.r[0], pr.r[1]], q: [pr.l[0], pr.l[1]] }));
+  const l2r = pairs.map((pr) => ({ p: [pr.l[0], pr.l[1]], q: [pr.r[0], pr.r[1]] }));
+  return {
+    rightToLeft: (x, y) => mlsRigid(r2l, x, y),
+    leftToRight: (x, y) => mlsRigid(l2r, x, y)
+  };
+}
+function estimateTransform(cs, left, right) {
+  const n = cs.length;
+  if (n < 1) return null;
+  let lx = 0, ly = 0, rx = 0, ry = 0;
+  for (const c2 of cs) {
+    const L = left[c2.leftIdx], R = right[c2.rightIdx];
+    lx += L.x;
+    ly += L.y;
+    rx += R.x;
+    ry += R.y;
+  }
+  lx /= n;
+  ly /= n;
+  rx /= n;
+  ry /= n;
+  let A = 0, B = 0;
+  for (const c2 of cs) {
+    const L = left[c2.leftIdx], R = right[c2.rightIdx];
+    const ax = L.x - lx, ay = L.y - ly, bx = R.x - rx, by = R.y - ry;
+    A += ax * bx + ay * by;
+    B += ax * by - ay * bx;
+  }
+  const beta = n >= 2 && (A !== 0 || B !== 0) ? Math.atan2(B, A) : 0;
+  const c = Math.cos(beta), s = Math.sin(beta);
+  return { angle: beta * 180 / Math.PI, tx: lx - (c * rx + s * ry), ty: ly - (-s * rx + c * ry) };
+}
+function estimateRigid(pairs) {
+  if (!pairs || !pairs.length) return null;
+  const left = pairs.map((p) => ({ x: p.l[0], y: p.l[1] }));
+  const right = pairs.map((p) => ({ x: p.r[0], y: p.r[1] }));
+  const cs = pairs.map((_, i) => ({ leftIdx: i, rightIdx: i }));
+  const t = estimateTransform(cs, left, right);
+  let ss = 0;
+  for (const p of pairs) {
+    const q = applyRigid(t, p.r[0], p.r[1]);
+    ss += (q.x - p.l[0]) ** 2 + (q.y - p.l[1]) ** 2;
+  }
+  return { ...t, n: pairs.length, rms: Math.sqrt(ss / pairs.length) };
+}
+function applyRigid(t, x, y) {
+  const b = t.angle * Math.PI / 180;
+  const c = Math.cos(b), s = Math.sin(b);
+  return { x: c * x + s * y + t.tx, y: -s * x + c * y + t.ty };
+}
+function invertRigid(t, x, y) {
+  const b = t.angle * Math.PI / 180;
+  const c = Math.cos(b), s = Math.sin(b);
+  const u = x - t.tx, v = y - t.ty;
+  return { x: c * u - s * v, y: s * u + c * v };
+}
+function rigidCanvasMatrix(t) {
+  const b = t.angle * Math.PI / 180;
+  const c = Math.cos(b), s = Math.sin(b);
+  return [c, -s, s, c, t.tx, t.ty];
+}
+function warpImage(src, dst, map, { step = 8 } = {}) {
+  const W = dst.width, H = dst.height;
+  const gw = Math.floor((W - 1) / step) + 2, gh = Math.floor((H - 1) / step) + 2;
+  const gx = new Float64Array(gw * gh), gy = new Float64Array(gw * gh);
+  for (let j = 0; j < gh; j++) {
+    for (let i = 0; i < gw; i++) {
+      const p = map(i * step, j * step);
+      gx[j * gw + i] = p.x;
+      gy[j * gw + i] = p.y;
+    }
+  }
+  const sd = src.data, dd = dst.data, sw = src.width, sh = src.height;
+  for (let y = 0; y < H; y++) {
+    const fj = y / step, j0 = Math.floor(fj), ty = fj - j0;
+    for (let x = 0; x < W; x++) {
+      const fi = x / step, i0 = Math.floor(fi), tx = fi - i0;
+      const k00 = j0 * gw + i0, k01 = k00 + 1, k10 = k00 + gw, k11 = k10 + 1;
+      const u = (1 - ty) * ((1 - tx) * gx[k00] + tx * gx[k01]) + ty * ((1 - tx) * gx[k10] + tx * gx[k11]);
+      const v = (1 - ty) * ((1 - tx) * gy[k00] + tx * gy[k01]) + ty * ((1 - tx) * gy[k10] + tx * gy[k11]);
+      const o = 4 * (y * W + x);
+      if (!(u >= 0 && v >= 0 && u <= sw - 1 && v <= sh - 1)) {
+        dd[o + 3] = 0;
+        continue;
+      }
+      const x0 = Math.floor(u), y0 = Math.floor(v);
+      const x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
+      const a = u - x0, b = v - y0;
+      for (let ch = 0; ch < 3; ch++) {
+        const p00 = sd[4 * (y0 * sw + x0) + ch], p01 = sd[4 * (y0 * sw + x1) + ch];
+        const p10 = sd[4 * (y1 * sw + x0) + ch], p11 = sd[4 * (y1 * sw + x1) + ch];
+        dd[o + ch] = (1 - b) * ((1 - a) * p00 + a * p01) + b * ((1 - a) * p10 + a * p11);
+      }
+      dd[o + 3] = 255;
+    }
+  }
+  return dst;
+}
+
+// src/correspondence-editor.js
+var PAIR_TYPES = ["definite", "possible", "does_not_exist", "out_of_region", "unclear_area"];
+var PAIR_TYPE_LABELS = {
+  definite: "Definite",
+  possible: "Possible",
+  does_not_exist: "DoesNotExist",
+  out_of_region: "OutOfRegion",
+  unclear_area: "UnclearArea"
+};
+var PAIR_COLORS = {
+  definite: "#38bdf8",
+  possible: "#f472b6",
+  does_not_exist: "#ef4444",
+  out_of_region: "#94a3b8",
+  unclear_area: "#a78bfa"
+};
+var KIND_LETTER = { minutia: "M", core: "C", delta: "D", point: "P" };
+var LETTER_KIND = { M: "minutia", C: "core", D: "delta", P: "point" };
+var OVERLAY_MODES = ["off", "rigid", "mls"];
+var DEFAULTS8 = {
+  layer: "pairs",
+  z: 60,
+  overlayLayer: "overlay-ref",
+  overlayZ: 5,
+  host: null,
+  lines: false,
+  allowPoints: true,
+  ppi: 500,
+  hitRadius: 10,
+  ringRadius: null,
+  mode: "pair",
+  overlayOpacity: 0.6,
+  flickerMs: 450,
+  ghost: false,
+  overlayStyle: "ridges",
+  overlayColor: "#ff3df5",
+  rightPixels: null
+};
+var CorrespondenceEditor = class extends Emitter {
+  /**
+   * @param {import('./viewer.js').Viewer} left  - latente (probe)
+   * @param {import('./viewer.js').Viewer} right - referência
+   * @param {object} [opts] - left/right: FeatureEditor | Features | lista de minúcias;
+   *        host: elemento que contém os dois viewers (linhas entre eles);
+   *        rightPixels: () => ImageData da referência (sobreposição MLS).
+   */
+  constructor(left, right, opts = {}) {
+    super();
+    this.viewers = [left, right];
+    this._o = { ...DEFAULTS8, ...opts };
+    this._src = [this._makeSource(opts.left), this._makeSource(opts.right)];
+    this._pairs = [];
+    this._selected = null;
+    this._armed = null;
+    this._history = new History();
+    this._active = false;
+    this._exportMode = false;
+    this._overlay = "off";
+    this._flicker = null;
+    this._ghost = !!this._o.ghost;
+    this._ghostPt = null;
+    this._pending = null;
+    this._layers = this.viewers.map((v) => v.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z }));
+    this._g = this._layers.map((l) => svgEl("g", { class: "mntviz-ce" }, l.el));
+    this._ovLayer = null;
+    this._ac = new AbortController();
+    const sig = { signal: this._ac.signal };
+    this.viewers.forEach((v, side) => {
+      v.viewport.addEventListener("mousedown", (e) => this._down(side, e), { capture: true, ...sig });
+      v.viewport.addEventListener("mouseup", (e) => this._up(side, e), { capture: true, ...sig });
+    });
+    this._offs = [
+      ...this.viewers.map((v) => onViewFrame(v, () => {
+        this.render();
+        this._drawLines();
+      })),
+      ...this.viewers.map((v, side) => v.on("pointer", (p) => this._pointer(side, p)))
+    ];
+    for (const s of this._src) {
+      if (s.editor) this._offs.push(s.editor.on("change", () => {
+        this.render();
+        this._drawLines();
+        this._refreshOverlay();
+      }));
+    }
+    this._linesSvg = null;
+    if (this._o.host) {
+      this._linesSvg = svgEl("svg", { class: "mntviz-ce-lines" });
+      this._o.host.appendChild(this._linesSvg);
+      this._ro = new ResizeObserver(() => this._drawLines());
+      this._ro.observe(this._o.host);
+    }
+    this.render();
+  }
+  /* ── consultas ──────────────────────────────────────────── */
+  get pairs() {
+    return this._pairs.map((p) => this._publicPair(p));
+  }
+  get selected() {
+    return this._selected;
+  }
+  get armed() {
+    return this._armed ? { side: this._armed.side, ...this._armed.ep } : null;
+  }
+  get overlay() {
+    return this._overlay;
+  }
+  get canUndo() {
+    return this._history.canUndo;
+  }
+  get canRedo() {
+    return this._history.canRedo;
+  }
+  pair(n) {
+    const p = this._pairs.find((q) => q.n === n);
+    return p ? this._publicPair(p) : null;
+  }
+  /** Próximo número livre (máximo + 1). */
+  nextNumber() {
+    return this._pairs.reduce((m, p) => Math.max(m, p.n), 0) + 1;
+  }
+  /* ── edição ─────────────────────────────────────────────── */
+  /**
+   * Cria um par. a/b: {kind: 'minutia'|'core'|'delta'|'point', ref?, index?, x?, y?}
+   * (ref = id no FeatureEditor ou índice na lista fixa; index = índice entre as
+   * minúcias do lado). Devolve n.
+   */
+  addPair(a, b, { type = "definite", n = null } = {}) {
+    const ea = this._endpoint(0, a), eb = this._endpoint(1, b);
+    if (!ea || !eb) throw new Error("mntviz CorrespondenceEditor: ponta inv\xE1lida");
+    const before = this._snap();
+    const num = n != null ? Number(n) : this.nextNumber();
+    if (this._pairs.some((p) => p.n === num)) throw new Error(`mntviz CorrespondenceEditor: par ${num} j\xE1 existe`);
+    this._pairs.push({ n: num, type: PAIR_TYPES.includes(type) ? type : "definite", a: ea, b: eb });
+    this._pairs.sort((p, q) => p.n - q.n);
+    this._selected = num;
+    this._commit("add", before, [num]);
+    return num;
+  }
+  removePair(n) {
+    const before = this._snap();
+    const k = this._pairs.findIndex((p) => p.n === n);
+    if (k < 0) return false;
+    this._pairs.splice(k, 1);
+    if (this._selected === n) this._selected = null;
+    this._commit("delete", before, [n]);
+    return true;
+  }
+  setType(n, type) {
+    const p = this._pairs.find((q) => q.n === n);
+    if (!p || !PAIR_TYPES.includes(type) || p.type === type) return false;
+    const before = this._snap();
+    p.type = type;
+    this._commit("type", before, [n]);
+    return true;
+  }
+  /** Renumera 1..N na ordem atual (um passo de desfazer). */
+  renumber() {
+    const before = this._snap();
+    this._pairs.forEach((p, i) => {
+      if (this._selected === p.n) this._selected = i + 1;
+      p.n = i + 1;
+    });
+    this._commit("renumber", before, this._pairs.map((p) => p.n));
+  }
+  clear() {
+    if (!this._pairs.length) return;
+    const before = this._snap();
+    this._pairs = [];
+    this._selected = null;
+    this._commit("clear", before, []);
+  }
+  select(n) {
+    this._selected = n != null && this._pairs.some((p) => p.n === n) ? n : null;
+    this.emit("select", { n: this._selected, pair: this._selected != null ? this.pair(this._selected) : null });
+    this.render();
+    this._drawLines();
+  }
+  disarm() {
+    if (this._armed) {
+      this._armed = null;
+      this.render();
+    }
+  }
+  undo() {
+    const cur = this._snap();
+    const prev = this._history.undo(cur);
+    if (!prev) return false;
+    this._load(prev);
+    this._changed("undo", []);
+    return true;
+  }
+  redo() {
+    const cur = this._snap();
+    const next = this._history.redo(cur);
+    if (!next) return false;
+    this._load(next);
+    this._changed("redo", []);
+    return true;
+  }
+  /* ── modos e teclado ────────────────────────────────────── */
+  setMode(mode) {
+    this._active = mode === this._o.mode;
+    if (!this._active) {
+      this._armed = null;
+      this._pending = null;
+    }
+    this.render();
+  }
+  handleKey(e, ctx = null) {
+    const mode = ctx ? ctx.mode : this._active ? this._o.mode : null;
+    if (mode !== this._o.mode) return false;
+    if (ctx && ctx.focus && !this.viewers.includes(ctx.focus)) return false;
+    const k = e.key;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && (k === "z" || k === "Z")) {
+      if (e.shiftKey) this.redo();
+      else this.undo();
+      return true;
+    }
+    if (ctrl && (k === "y" || k === "Y")) {
+      this.redo();
+      return true;
+    }
+    if (ctrl || e.altKey) return false;
+    if (k === "Escape") {
+      if (this._armed) {
+        this.disarm();
+        return true;
+      }
+      if (this._selected != null) {
+        this.select(null);
+        return true;
+      }
+      return false;
+    }
+    if (/^[1-5]$/.test(k) && this._selected != null) {
+      this.setType(this._selected, PAIR_TYPES[Number(k) - 1]);
+      return true;
+    }
+    if ((k === "Delete" || k === "Backspace") && this._selected != null) {
+      this.removePair(this._selected);
+      return true;
+    }
+    if (k === "g" || k === "G") {
+      this.setGhost(!this._ghost);
+      return true;
+    }
+    if (k === "o" || k === "O") {
+      this.cycleOverlay();
+      return true;
+    }
+    if (k === "t" || k === "T") {
+      this.setFlicker(!this._flicker);
+      return true;
+    }
+    return false;
+  }
+  /* ── registro, fantasma e sobreposição ──────────────────── */
+  /** Pontos de controle {l: [x, y], r: [x, y], n} dos pares (opcional: só um tipo). */
+  controls({ types = null } = {}) {
+    const out = [];
+    for (const p of this._pairs) {
+      if (types && !types.includes(p.type)) continue;
+      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      out.push({ n: p.n, l: [a.x, a.y], r: [b.x, b.y] });
+    }
+    return out;
+  }
+  /** Ajuste rígido referência → latente: {angle, tx, ty, n, rms} ou null. */
+  rigid(opts = {}) {
+    return estimateRigid(this.controls(opts));
+  }
+  /** Warp MLS {rightToLeft(x, y), leftToRight(x, y)} ou null sem pares. */
+  warp(opts = {}) {
+    const c = this.controls(opts);
+    return c.length ? buildWarp(c) : null;
+  }
+  /** Leva um ponto de um lado ao outro (MLS): side 0 → direita, 1 → esquerda. */
+  mapPoint(side, x, y) {
+    const w = this.warp();
+    if (!w) return null;
+    return side === 0 ? w.leftToRight(x, y) : w.rightToLeft(x, y);
+  }
+  setGhost(on) {
+    this._ghost = !!on;
+    if (!this._ghost) this._ghostPt = null;
+    this.render();
+    this.emit("ghost", { on: this._ghost });
+    return this;
+  }
+  /** Sobreposição da referência sobre a latente: 'off' | 'rigid' | 'mls'. */
+  setOverlay(mode, { opacity = null } = {}) {
+    this._overlay = OVERLAY_MODES.includes(mode) ? mode : "off";
+    if (opacity != null) this._o.overlayOpacity = Number(opacity);
+    this._refreshOverlay();
+    this.emit("overlay", { mode: this._overlay, opacity: this._o.overlayOpacity });
+    return this;
+  }
+  cycleOverlay() {
+    return this.setOverlay(OVERLAY_MODES[(OVERLAY_MODES.indexOf(this._overlay) + 1) % OVERLAY_MODES.length]);
+  }
+  /** Alternância (flicker) da sobreposição a cada `ms`. */
+  setFlicker(on, { ms = null } = {}) {
+    if (this._flicker) {
+      clearInterval(this._flicker);
+      this._flicker = null;
+    }
+    if (this._ovLayer) this._ovLayer.setVisible(this._overlay !== "off");
+    if (on) {
+      if (this._overlay === "off") this.setOverlay("rigid");
+      const period = ms || this._o.flickerMs;
+      this._flicker = setInterval(() => {
+        if (this._ovLayer) this._ovLayer.toggle();
+      }, period);
+    }
+    this.emit("flicker", { on: !!this._flicker });
+    return this;
+  }
+  /* ── arquivos ───────────────────────────────────────────── */
+  /** Estado (JSON) do editor. */
+  toJSON() {
+    return { version: 1, pairs: this.pairs, rigid: this.rigid(), overlay: this._overlay };
+  }
+  fromJSON(state) {
+    const before = this._snap();
+    this._pairs = [];
+    for (const p of state && state.pairs || []) {
+      const a = this._endpoint(0, p.a), b = this._endpoint(1, p.b);
+      if (a && b) this._pairs.push({ n: Number(p.n), type: p.type || "definite", a, b });
+    }
+    this._pairs.sort((p, q) => p.n - q.n);
+    this._selected = null;
+    this._commit("load", before, this._pairs.map((p) => p.n));
+    return this;
+  }
+  /**
+   * Correspondence do contrato: pairs [{i_probe, j_ref, type, n, kind, probe_xy, ref_xy}]
+   * (i/j = índice entre as minúcias de cada lado; -1 se a ponta não é minúcia) e
+   * transform {angle, tx, ty} (rígido referência → latente).
+   */
+  toCorrespondence() {
+    const t = this.rigid();
+    return {
+      pairs: this._pairs.map((p) => {
+        const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+        return {
+          i_probe: this._minutiaIndex(0, a),
+          j_ref: this._minutiaIndex(1, b),
+          type: p.type,
+          n: p.n,
+          kind: _pairKind(a, b),
+          probe_xy: [a.x, a.y],
+          ref_xy: [b.x, b.y]
+        };
+      }),
+      transform: t ? { angle: t.angle, tx: t.tx, ty: t.ty } : null
+    };
+  }
+  /** Texto .match (dashboard), com linhas #PAIR N TYPE. */
+  toMatchText({ q = "probe", g = "reference", label = "manual" } = {}) {
+    const rows = this._pairs.map((p) => {
+      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      return {
+        score: 1,
+        x1: a.x,
+        y1: a.y,
+        t1: a.theta ?? 0,
+        q1: a.quality ?? 0,
+        x2: b.x,
+        y2: b.y,
+        t2: b.theta ?? 0,
+        q2: b.quality ?? 0
+      };
+    });
+    return formatMatchText({ q, g, label }, rows, this._pairs.map((p) => ({ n: p.n, type: p.type })));
+  }
+  /** Texto #CORR v2 (GT do SD302), com linhas #PAIR N TYPE. */
+  toCorrText(meta = {}) {
+    const rows = this._pairs.map((p) => {
+      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      const kind = _pairKind(a, b);
+      return {
+        kind,
+        idxA: kind === "M" ? this._minutiaIndex(0, a) : -1,
+        idxB: kind === "M" ? this._minutiaIndex(1, b) : -1,
+        xa: a.x,
+        ya: a.y,
+        xb: b.x,
+        yb: b.y
+      };
+    });
+    return formatCorrText(meta, rows, this._pairs.map((p) => ({ n: p.n, type: p.type })));
+  }
+  /**
+   * Carrega pares de um texto (.match, #CORR ou lista de índices; 'auto' detecta).
+   * Pontas casam com as features do lado pelo índice (quando há) ou pela posição
+   * (até `tol` px); sem feature, viram ponto livre (allowPoints) ou são descartadas.
+   * Devolve {format, added, dropped, meta}.
+   */
+  loadText(text, { format = "auto", tol = 2, append = false } = {}) {
+    const fmt = format === "auto" ? detectPairsFormat(text) : format;
+    let parsed, specs = [];
+    if (fmt === "match") {
+      parsed = parseMatchText(text);
+      specs = parsed.rows.map((r) => [{ x: r.x1, y: r.y1, theta: r.t1 }, { x: r.x2, y: r.y2, theta: r.t2 }]);
+    } else if (fmt === "corr") {
+      parsed = parseCorrText(text);
+      specs = parsed.rows.map((r) => {
+        const kind = LETTER_KIND[r.kind] || "point";
+        return [
+          { kind, index: kind === "minutia" ? r.idxA : -1, x: r.xa, y: r.ya },
+          { kind, index: kind === "minutia" ? r.idxB : -1, x: r.xb, y: r.yb }
+        ];
+      });
+    } else if (fmt === "pairs") {
+      parsed = parsePairsText(text);
+      specs = parsed.rows.map((r) => [{ kind: "minutia", index: r.i }, { kind: "minutia", index: r.j }]);
+    } else {
+      throw new Error("mntviz CorrespondenceEditor: formato de pares desconhecido");
+    }
+    const before = this._snap();
+    if (!append) {
+      this._pairs = [];
+      this._selected = null;
+    }
+    let added = 0, dropped = 0;
+    const meta = parsed.pairsMeta || [];
+    specs.forEach(([sa, sb], i) => {
+      const a = this._match(0, sa, tol), b = this._match(1, sb, tol);
+      if (!a || !b) {
+        dropped++;
+        return;
+      }
+      const pm = meta[i] || {};
+      let n = pm.n != null ? pm.n : this.nextNumber();
+      if (this._pairs.some((p) => p.n === n)) n = this.nextNumber();
+      this._pairs.push({ n, type: PAIR_TYPES.includes(pm.type) ? pm.type : "definite", a, b });
+      added++;
+    });
+    this._pairs.sort((p, q) => p.n - q.n);
+    this._commit("load", before, this._pairs.map((p) => p.n));
+    return { format: fmt, added, dropped, meta: parsed.meta || {} };
+  }
+  beginExport() {
+    this._exportMode = true;
+    this.render();
+  }
+  endExport() {
+    this._exportMode = false;
+    this.render();
+  }
+  destroy() {
+    this.setFlicker(false);
+    this._ac.abort();
+    for (const off of this._offs) off();
+    if (this._ro) this._ro.disconnect();
+    if (this._linesSvg) this._linesSvg.remove();
+    this._g.forEach((g) => g.remove());
+    if (this._ovLayer) this._ovLayer.remove();
+    this.removeAllListeners();
+  }
+  /* ── desenho ────────────────────────────────────────────── */
+  render() {
+    [0, 1].forEach((side) => {
+      const g = this._g[side];
+      if (!g.isConnected) this._layers[side].el.appendChild(g);
+      g.replaceChildren();
+      const v = this.viewers[side];
+      const s = this._exportMode ? 1 : viewScale(v);
+      const R = this._ring();
+      for (const p of this._pairs) {
+        const ep = this._resolve(side, side === 0 ? p.a : p.b);
+        const color = PAIR_COLORS[p.type] || PAIR_COLORS.definite;
+        const sel = !this._exportMode && p.n === this._selected;
+        const pg = svgEl("g", {
+          class: `mntviz-ce-pair${sel ? " mntviz-ce-selected" : ""}`,
+          "data-n": p.n,
+          "data-type": p.type
+        }, g);
+        if (sel) {
+          svgEl("circle", {
+            cx: ep.x,
+            cy: ep.y,
+            r: R + 2 / s,
+            fill: "none",
+            stroke: "#fff",
+            "stroke-width": 4.5,
+            "stroke-opacity": 0.9,
+            "vector-effect": "non-scaling-stroke"
+          }, pg);
+        }
+        svgEl("circle", {
+          cx: ep.x,
+          cy: ep.y,
+          r: R,
+          fill: "none",
+          stroke: color,
+          "stroke-width": 2,
+          "vector-effect": "non-scaling-stroke",
+          "stroke-dasharray": p.type === "definite" ? null : "4 2"
+        }, pg);
+        const lg = svgEl("g", {
+          class: "mntviz-ce-label",
+          "data-n": p.n,
+          transform: uprightTransform(v, ep.x, ep.y, { exportMode: this._exportMode })
+        }, pg);
+        const t = svgEl("text", {
+          x: this._exportMode ? R + 2 : R * s + 3,
+          y: this._exportMode ? -R - 2 : -R * s - 3,
+          "font-size": 13,
+          "font-weight": 700,
+          "font-family": "sans-serif",
+          fill: color,
+          stroke: "#000",
+          "stroke-width": 3,
+          "stroke-opacity": 0.8,
+          "paint-order": "stroke"
+        }, lg);
+        t.textContent = String(p.n);
+      }
+      if (this._armed && this._armed.side === side && !this._exportMode) {
+        const a = this._resolve(side, this._armed.ep);
+        svgEl("circle", {
+          cx: a.x,
+          cy: a.y,
+          r: R * 1.25,
+          fill: "none",
+          stroke: "#fde047",
+          "stroke-width": 2,
+          "stroke-dasharray": "3 2",
+          "vector-effect": "non-scaling-stroke",
+          class: "mntviz-ce-armed"
+        }, g);
+      }
+      if (this._ghost && this._ghostPt && this._ghostPt.side === side && !this._exportMode) {
+        const { x, y } = this._ghostPt;
+        const d = 9 / s;
+        const gg = svgEl("g", {
+          class: "mntviz-ce-ghost",
+          stroke: "#fde047",
+          "stroke-width": 1.5,
+          "vector-effect": "non-scaling-stroke"
+        }, g);
+        svgEl("line", { x1: x - d, y1: y, x2: x + d, y2: y, "vector-effect": "non-scaling-stroke" }, gg);
+        svgEl("line", { x1: x, y1: y - d, x2: x, y2: y + d, "vector-effect": "non-scaling-stroke" }, gg);
+        svgEl("circle", { cx: x, cy: y, r: d * 0.6, fill: "none", "vector-effect": "non-scaling-stroke" }, gg);
+      }
+    });
+  }
+  _ring() {
+    return this._o.ringRadius != null ? this._o.ringRadius : 9 * this._o.ppi / 500;
+  }
+  _drawLines() {
+    const svg = this._linesSvg;
+    if (!svg) return;
+    svg.replaceChildren();
+    if (!this._o.lines) return;
+    const host = this._o.host.getBoundingClientRect();
+    const [ml, mr] = this.viewers.map((v) => screenMapper(v));
+    const [rl, rr] = this.viewers.map((v) => v.viewport.getBoundingClientRect());
+    const inside = (p, r) => p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
+    for (const p of this._pairs) {
+      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      const pa = ml(a.x, a.y), pb = mr(b.x, b.y);
+      if (!inside(pa, rl) || !inside(pb, rr)) continue;
+      svgEl("line", {
+        x1: pa.x - host.left,
+        y1: pa.y - host.top,
+        x2: pb.x - host.left,
+        y2: pb.y - host.top,
+        stroke: PAIR_COLORS[p.type],
+        "stroke-width": p.n === this._selected ? 2.2 : 1.2,
+        "stroke-opacity": 0.75,
+        "data-n": p.n
+      }, svg);
+    }
+  }
+  /** Liga ou desliga as linhas entre os lados (precisa de `host`). */
+  setLines(on) {
+    this._o.lines = !!on;
+    this._drawLines();
+    return this;
+  }
+  _refreshOverlay() {
+    if (this._overlay === "off") {
+      if (this._ovLayer) this._ovLayer.hide();
+      return;
+    }
+    const [lv, rv] = this.viewers;
+    if (!this._ovLayer) {
+      this._ovLayer = lv.layers.ensure(this._o.overlayLayer, { kind: "canvas", z: this._o.overlayZ });
+    }
+    const layer = this._ovLayer;
+    layer.setOpacity(this._o.overlayOpacity);
+    const c = layer.el;
+    const { width: W, height: H } = lv.imageSize;
+    if (!W || !H) return;
+    if (c.width !== W || c.height !== H) {
+      c.width = W;
+      c.height = H;
+    }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const ctrl = this.controls();
+    if (!ctrl.length) {
+      layer.hide();
+      return;
+    }
+    const src = this._rightPixels();
+    if (!src) {
+      layer.hide();
+      return;
+    }
+    if (this._overlay === "rigid") {
+      const off = document.createElement("canvas");
+      off.width = src.width;
+      off.height = src.height;
+      off.getContext("2d").putImageData(src, 0, 0);
+      ctx.setTransform(...rigidCanvasMatrix(estimateRigid(ctrl)));
+      ctx.drawImage(off, 0, 0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else {
+      const dst = ctx.createImageData(W, H);
+      const w = buildWarp(ctrl);
+      warpImage(src, dst, (x, y) => w.leftToRight(x, y));
+      ctx.putImageData(dst, 0, 0);
+    }
+    if (this._o.overlayStyle === "ridges") _ridgeTint(ctx, W, H, this._o.overlayColor);
+    if (!this._flicker) layer.show();
+  }
+  /** Estilo da sobreposição: 'ridges' (cristas da referência coloridas, fundo transparente) ou 'gray'. */
+  setOverlayStyle(style, color = null) {
+    this._o.overlayStyle = style === "gray" ? "gray" : "ridges";
+    if (color) this._o.overlayColor = color;
+    this._refreshOverlay();
+    return this;
+  }
+  _rightPixels() {
+    if (typeof this._o.rightPixels === "function") {
+      const px = this._o.rightPixels();
+      if (px) return px;
+    }
+    const img = this.viewers[1].imageElement;
+    if (!img.naturalWidth) return null;
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    return ctx.getImageData(0, 0, c.width, c.height);
+  }
+  /* ── mouse ──────────────────────────────────────────────── */
+  _down(side, e) {
+    this._pending = null;
+    if (!this._active || e.button !== 0) return;
+    const hit = this._hitFeature(side, e);
+    const hp = this._hitPairPoint(side, e);
+    if (!hit && !hp) {
+      if (!this._o.allowPoints) return;
+      const p = this.viewers[side].screenToImageCoords(e.clientX, e.clientY);
+      if (insideImage(this.viewers[side], p.x, p.y)) this._pending = { side, x: e.clientX, y: e.clientY, p };
+      return;
+    }
+    stopEvent(e);
+    const ep = hit ? hit.ep : hp.ep;
+    const used = hit ? this._pairUsing(side, ep) : hp.pair;
+    this._pick(side, ep, used);
+  }
+  _up(side, e) {
+    const pend = this._pending;
+    this._pending = null;
+    if (!pend || pend.side !== side || !this._active) return;
+    if (Math.abs(e.clientX - pend.x) > 3 || Math.abs(e.clientY - pend.y) > 3) return;
+    const p = pend.p;
+    this._pick(side, { kind: "point", ref: null, x: Math.round(p.x), y: Math.round(p.y) }, null);
+  }
+  _pick(side, ep, used) {
+    const armed = this._armed;
+    if (used) {
+      if (armed && armed.side !== side) {
+        this.emit("hint", { text: `essa feature j\xE1 est\xE1 no par ${used.n}`, n: used.n });
+        return;
+      }
+      this._armed = null;
+      this.select(used.n);
+      return;
+    }
+    if (!armed || armed.side === side) {
+      this._armed = { side, ep };
+      this.emit("armed", { side, ...ep });
+      this.render();
+      return;
+    }
+    const a = side === 0 ? ep : armed.ep;
+    const b = side === 0 ? armed.ep : ep;
+    this._armed = null;
+    this.addPair(a, b);
+  }
+  _pointer(side, p) {
+    if (!this._ghost) return;
+    if (p.type === "leave") {
+      this._ghostPt = null;
+      this.render();
+      return;
+    }
+    if (p.type !== "move") return;
+    const q = this.mapPoint(side, p.x, p.y);
+    this._ghostPt = q ? { side: 1 - side, x: q.x, y: q.y } : null;
+    this.render();
+  }
+  _hitFeature(side, e) {
+    const map = screenMapper(this.viewers[side]);
+    let best = null;
+    for (const it2 of this._src[side].items()) {
+      const c = map(it2.x, it2.y);
+      const d = Math.hypot(c.x - e.clientX, c.y - e.clientY);
+      if (d <= this._o.hitRadius && (!best || d < best.d)) best = { d, it: it2 };
+    }
+    if (!best) return null;
+    const it = best.it;
+    return { d: best.d, ep: { kind: it.kind, ref: it.id, x: it.x, y: it.y } };
+  }
+  _hitPairPoint(side, e) {
+    const map = screenMapper(this.viewers[side]);
+    let best = null;
+    for (const p of this._pairs) {
+      const ep = side === 0 ? p.a : p.b;
+      if (ep.ref != null) continue;
+      const c = map(ep.x, ep.y);
+      const d = Math.hypot(c.x - e.clientX, c.y - e.clientY);
+      if (d <= this._o.hitRadius && (!best || d < best.d)) best = { d, pair: p, ep: { ...ep } };
+    }
+    return best;
+  }
+  _pairUsing(side, ep) {
+    if (ep.ref == null) return null;
+    return this._pairs.find((p) => {
+      const q = side === 0 ? p.a : p.b;
+      return q.ref === ep.ref && q.kind === ep.kind;
+    }) || null;
+  }
+  /* ── fontes de features ─────────────────────────────────── */
+  _makeSource(spec) {
+    if (spec && typeof spec.toFeatures === "function" && typeof spec.get === "function") {
+      const ed = spec;
+      return {
+        editor: ed,
+        items: () => ed.items,
+        get: (id) => ed.get(id),
+        minutiae: () => ed.items.filter((i) => i.kind === "minutia")
+      };
+    }
+    const f = Array.isArray(spec) ? { minutiae: spec } : spec || {};
+    const items = [];
+    const add = (kind, m) => {
+      const theta = m.theta_deg_iso ?? m.theta ?? m.angle;
+      items.push({
+        id: items.length,
+        kind,
+        x: Number(m.x),
+        y: Number(m.y),
+        theta: theta != null ? Number(theta) : void 0,
+        quality: m.quality != null ? Number(m.quality) : void 0
+      });
+    };
+    for (const m of f.minutiae || []) add("minutia", m);
+    for (const c of f.cores || []) add("core", c);
+    for (const d of f.deltas || []) add("delta", d);
+    return {
+      editor: null,
+      items: () => items.map((i) => ({ ...i })),
+      get: (id) => items[id] ? { ...items[id] } : null,
+      minutiae: () => items.filter((i) => i.kind === "minutia")
+    };
+  }
+  /** Troca as features de um lado (0 latente, 1 referência). */
+  setSource(side, spec) {
+    this._src[side] = this._makeSource(spec);
+    if (this._src[side].editor) {
+      this._offs.push(this._src[side].editor.on("change", () => {
+        this.render();
+        this._drawLines();
+      }));
+    }
+    this.render();
+    this._drawLines();
+  }
+  /** Normaliza uma ponta dada pelo usuário. */
+  _endpoint(side, spec) {
+    if (!spec) return null;
+    const kind = LETTER_KIND[spec.kind] || spec.kind || "minutia";
+    const src = this._src[side];
+    let ref = spec.ref ?? null;
+    if (ref == null && spec.index != null && spec.index >= 0 && kind === "minutia") {
+      const m = src.minutiae()[spec.index];
+      if (m) ref = m.id;
+    }
+    if (ref != null) {
+      const it = src.get(ref);
+      if (!it) return null;
+      return { kind: it.kind, ref, x: it.x, y: it.y };
+    }
+    if (spec.x == null || spec.y == null) return null;
+    return { kind: kind === "minutia" ? "point" : kind, ref: null, x: Number(spec.x), y: Number(spec.y) };
+  }
+  /** Casa uma ponta lida de arquivo com as features do lado. */
+  _match(side, spec, tol) {
+    const src = this._src[side];
+    const kind = spec.kind || "minutia";
+    if (kind === "minutia" && spec.index != null && spec.index >= 0) {
+      const m = src.minutiae()[spec.index];
+      if (m && (spec.x == null || Math.hypot(m.x - spec.x, m.y - spec.y) <= tol)) {
+        return { kind: "minutia", ref: m.id, x: m.x, y: m.y };
+      }
+    }
+    if (spec.x == null || spec.y == null) return null;
+    let best = null;
+    for (const it of src.items()) {
+      if (kind !== "point" && it.kind !== kind) continue;
+      const d = Math.hypot(it.x - spec.x, it.y - spec.y);
+      if (d > tol) continue;
+      const dt = spec.theta != null && it.theta != null ? Math.abs(((it.theta - spec.theta) % 360 + 540) % 360 - 180) : 0;
+      const score = d + dt / 360;
+      if (!best || score < best.score) best = { score, it };
+    }
+    if (best) return { kind: best.it.kind, ref: best.it.id, x: best.it.x, y: best.it.y };
+    if (!this._o.allowPoints) return null;
+    return { kind: kind === "minutia" ? "point" : kind, ref: null, x: Number(spec.x), y: Number(spec.y) };
+  }
+  /** Ponta com as coordenadas atuais (a feature pode ter sido movida no editor). */
+  _resolve(side, ep) {
+    if (ep.ref == null) return { ...ep };
+    const it = this._src[side].get(ep.ref);
+    if (!it) return { ...ep, missing: true };
+    ep.x = it.x;
+    ep.y = it.y;
+    return { ...ep, x: it.x, y: it.y, theta: it.theta, quality: it.quality, type: it.type };
+  }
+  _minutiaIndex(side, ep) {
+    if (ep.ref == null || ep.kind !== "minutia") return -1;
+    return this._src[side].minutiae().findIndex((m) => m.id === ep.ref);
+  }
+  _publicPair(p) {
+    const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+    return {
+      n: p.n,
+      type: p.type,
+      kind: _pairKind(a, b),
+      a: { ...a, index: this._minutiaIndex(0, a) },
+      b: { ...b, index: this._minutiaIndex(1, b) }
+    };
+  }
+  _snap() {
+    return { pairs: clone(this._pairs), selected: this._selected };
+  }
+  _load(s) {
+    this._pairs = clone(s.pairs);
+    this._selected = s.selected != null && this._pairs.some((p) => p.n === s.selected) ? s.selected : null;
+    this._armed = null;
+  }
+  _commit(type, before, ns) {
+    this._history.push(before);
+    this._changed(type, ns);
+  }
+  _changed(type, ns) {
+    this.render();
+    this._drawLines();
+    this._refreshOverlay();
+    const payload = { source: "correspondence-editor", type, n: ns, pairs: this.pairs };
+    this.emit("change", payload);
+    for (const v of this.viewers) if (typeof v._emit === "function") v._emit("change", payload);
+  }
+};
+function _ridgeTint(ctx, W, H, color) {
+  const img = ctx.getImageData(0, 0, W, H);
+  const d = img.data;
+  const c = parseInt(String(color).replace("#", ""), 16);
+  const r = c >> 16 & 255, g = c >> 8 & 255, b = c & 255;
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    const v = (d[i] + d[i + 1] + d[i + 2]) / 3;
+    d[i] = r;
+    d[i + 1] = g;
+    d[i + 2] = b;
+    d[i + 3] = Math.round((255 - v) * d[i + 3] / 255);
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function _pairKind(a, b) {
+  if (a.kind === b.kind && (a.kind === "minutia" || a.kind === "core" || a.kind === "delta")) return KIND_LETTER[a.kind];
+  return "P";
+}
+var _i = (v) => String(Math.round(Number(v)));
+function detectPairsFormat(text) {
+  if (/^#MATCH\b/m.test(text) || /^#MMIN\b/m.test(text)) return "match";
+  if (/^#CORR\b/m.test(text)) return "corr";
+  const rows = text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  if (rows.length && rows.every((l) => /^-?\d+\s+-?\d+$/.test(l))) return "pairs";
+  return null;
+}
+function _pairLines(text) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    const m = line.trim().match(/^#PAIR\s+(\d+)\s+(\w+)/);
+    if (m) out.push({ n: Number(m[1]), type: m[2] });
+  }
+  return out;
+}
+function parseMatchText(text) {
+  let q = null, g = null, label = null, score = null;
+  const rows = [];
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line) continue;
+    if (line.startsWith("#MATCH Q")) {
+      q = line.split(/\s+/).slice(2).join(" ");
+      continue;
+    }
+    if (line.startsWith("#MATCH G")) {
+      g = line.split(/\s+/).slice(2).join(" ");
+      continue;
+    }
+    if (line.startsWith("#MATCH LABEL")) {
+      label = line.split(/\s+/).slice(2).join(" ");
+      continue;
+    }
+    if (line.startsWith("#MATCH SCORE")) {
+      score = Number(line.split(/\s+/)[2]);
+      continue;
+    }
+    if (line.startsWith("#")) continue;
+    const f = line.split(/\s+/);
+    if (f.length < 9) continue;
+    rows.push({ score: +f[0], x1: +f[1], y1: +f[2], t1: +f[3], q1: +f[4], x2: +f[5], y2: +f[6], t2: +f[7], q2: +f[8] });
+  }
+  return { q, g, label, score, rows, meta: { q, g, label, score }, pairsMeta: _pairLines(text) };
+}
+function formatMatchText({ q = "probe", g = "reference", label = "manual", score = 0 } = {}, rows = [], pairsMeta = []) {
+  const lines = [
+    `#MATCH SCORE ${Number(score).toFixed(6)}`,
+    `#MATCH LABEL ${label}`,
+    `#MATCH Q ${q}`,
+    `#MATCH G ${g}`,
+    "#MMIN SCORE X1 Y1 THETA1 Q1 X2 Y2 THETA2 Q2"
+  ];
+  for (const r of rows) {
+    lines.push(`${Number(r.score ?? 1).toFixed(6)} ${_i(r.x1)} ${_i(r.y1)} ${_i(r.t1 ?? 0)} ${_i(r.q1 ?? 0)} ${_i(r.x2)} ${_i(r.y2)} ${_i(r.t2 ?? 0)} ${_i(r.q2 ?? 0)}`);
+  }
+  if (pairsMeta.length) lines.push("#PAIR N TYPE", ...pairsMeta.map((p) => `#PAIR ${p.n} ${p.type}`));
+  return lines.join("\n") + "\n";
+}
+function parseCorrText(text) {
+  const meta = {};
+  const rows = [];
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line) continue;
+    if (line.startsWith("#")) {
+      const m = line.match(/^#\s*([A-Za-z_]+)\s*=\s*(.*)$/);
+      if (m) meta[m[1]] = m[2].trim();
+      continue;
+    }
+    const f = line.split(/\s+/);
+    if (f.length < 7) continue;
+    rows.push({ kind: f[0], idxA: +f[1], idxB: +f[2], xa: +f[3], ya: +f[4], xb: +f[5], yb: +f[6] });
+  }
+  return { meta, rows, pairsMeta: _pairLines(text) };
+}
+function formatCorrText(meta = {}, rows = [], pairsMeta = []) {
+  const keys = ["A", "B", "impression", "decision", "rotation", "source"];
+  const lines = [];
+  for (const k of keys) if (meta[k] != null) lines.push(`# ${k} = ${meta[k]}`);
+  for (const [k, v] of Object.entries(meta)) if (!keys.includes(k) && v != null) lines.push(`# ${k} = ${v}`);
+  lines.push("#CORR KIND IDX_A IDX_B XA YA XB YB");
+  for (const r of rows) lines.push(`${r.kind} ${r.idxA} ${r.idxB} ${_i(r.xa)} ${_i(r.ya)} ${_i(r.xb)} ${_i(r.yb)}`);
+  if (pairsMeta.length) lines.push("#PAIR N TYPE", ...pairsMeta.map((p) => `#PAIR ${p.n} ${p.type}`));
+  return lines.join("\n") + "\n";
+}
+function parsePairsText(text) {
+  const meta = {};
+  const rows = [];
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line) continue;
+    if (line.startsWith("#")) {
+      const m = line.match(/^#\s*([A-Za-z_]+)\s*:\s*(.*)$/);
+      if (m) meta[m[1]] = m[2].trim();
+      continue;
+    }
+    const f = line.split(/\s+/);
+    if (f.length >= 2) rows.push({ i: +f[0], j: +f[1] });
+  }
+  return { meta, rows, pairsMeta: _pairLines(text) };
+}
+
+// src/measure.js
+function mmFromPx(px, ppi) {
+  return ppi > 0 ? px / ppi * 25.4 : NaN;
+}
+function ridgeProfile(img, p1, p2, { channel = 0 } = {}) {
+  const dx = p2.x - p1.x, dy = p2.y - p1.y;
+  const length = Math.hypot(dx, dy);
+  const n = Math.max(2, Math.floor(length) + 1);
+  const values = new Float64Array(n), xs = new Float64Array(n), ys = new Float64Array(n);
+  const W = img.width, H = img.height, d = img.data;
+  const at = (x, y) => d[4 * (y * W + x) + channel];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    const x = p1.x + t * dx, y = p1.y + t * dy;
+    xs[i] = x;
+    ys[i] = y;
+    const cx = Math.min(Math.max(x, 0), W - 1), cy = Math.min(Math.max(y, 0), H - 1);
+    const x0 = Math.floor(cx), y0 = Math.floor(cy);
+    const x1 = Math.min(x0 + 1, W - 1), y1 = Math.min(y0 + 1, H - 1);
+    const a = cx - x0, b = cy - y0;
+    values[i] = (1 - b) * ((1 - a) * at(x0, y0) + a * at(x1, y0)) + b * ((1 - a) * at(x0, y1) + a * at(x1, y1));
+  }
+  return { values, xs, ys, length };
+}
+function smoothProfile(values, sigma = 1) {
+  const n = values.length;
+  if (!(sigma > 0)) return Float64Array.from(values);
+  const r = Math.max(1, Math.ceil(3 * sigma));
+  const k = new Float64Array(2 * r + 1);
+  let sum = 0;
+  for (let j = -r; j <= r; j++) {
+    k[j + r] = Math.exp(-(j * j) / (2 * sigma * sigma));
+    sum += k[j + r];
+  }
+  for (let j = 0; j < k.length; j++) k[j] /= sum;
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let acc = 0;
+    for (let j = -r; j <= r; j++) {
+      const idx = Math.min(Math.max(i + j, 0), n - 1);
+      acc += k[j + r] * values[idx];
+    }
+    out[i] = acc;
+  }
+  return out;
+}
+function findRidges(smoothed, { minProminence = 8, exclude = 3, polarity = "dark" } = {}) {
+  const n = smoothed.length;
+  const s = polarity === "light" ? Array.from(smoothed, (v) => -v) : smoothed;
+  const cand = [];
+  for (let i = 1; i < n - 1; i++) if (s[i] < s[i - 1] && s[i] <= s[i + 1]) cand.push(i);
+  const out = [];
+  for (let k = 0; k < cand.length; k++) {
+    const i = cand[k];
+    const lo = k > 0 ? cand[k - 1] : 0, hi = k < cand.length - 1 ? cand[k + 1] : n - 1;
+    let lm = -Infinity, rm = -Infinity;
+    for (let j = lo; j <= i; j++) if (s[j] > lm) lm = s[j];
+    for (let j = i; j <= hi; j++) if (s[j] > rm) rm = s[j];
+    const prom = Math.min(lm, rm) - s[i];
+    if (prom >= minProminence && i >= exclude && i <= n - 1 - exclude) out.push({ i, prominence: prom });
+  }
+  return out;
+}
+var RULER_DEFAULTS = { ppi: 500, layer: "measure", z: 45, color: "#fbbf24", keep: false, mode: "ruler" };
+var Ruler = class extends Emitter {
+  /**
+   * @param {import('./viewer.js').Viewer} viewer
+   * @param {object} [opts] - ppi, color, keep (true: várias medidas), mode ('ruler').
+   */
+  constructor(viewer, opts = {}) {
+    super();
+    this.viewer = viewer;
+    this._o = { ...RULER_DEFAULTS, ...opts };
+    this._layer = viewer.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z });
+    this._g = svgEl("g", { class: "mntviz-measure mntviz-ruler" }, this._layer.el);
+    this._items = [];
+    this._drag = null;
+    this._active = false;
+    this._exportMode = false;
+    this._ac = new AbortController();
+    const sig = { signal: this._ac.signal };
+    viewer.viewport.addEventListener("mousedown", (e) => this._down(e), { capture: true, ...sig });
+    window.addEventListener("mousemove", (e) => this._move(e), { capture: true, ...sig });
+    window.addEventListener("mouseup", (e) => this._up(e), { capture: true, ...sig });
+    this._offView = onViewFrame(viewer, () => this.render());
+  }
+  get ppi() {
+    return this._o.ppi;
+  }
+  setPpi(ppi) {
+    this._o.ppi = Number(ppi);
+    this._items = this._items.map((m) => this._measure(m));
+    this.render();
+    return this;
+  }
+  get measurements() {
+    return this._items.map((m) => ({ ...m }));
+  }
+  get active() {
+    return this._active;
+  }
+  setMode(mode) {
+    this._active = mode === this._o.mode;
+    if (!this._active) this._drag = null;
+  }
+  /** Mede de p1 a p2 (coordenadas da imagem); devolve a medida. */
+  measure(p1, p2, { keep = this._o.keep } = {}) {
+    const m = this._measure({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+    if (!keep) this._items = [];
+    this._items.push(m);
+    this.render();
+    this.emit("measure", { ...m });
+    this._emitChange();
+    return { ...m };
+  }
+  clear() {
+    this._items = [];
+    this.render();
+    this._emitChange();
+  }
+  serialize() {
+    return { kind: "ruler", ppi: this._o.ppi, items: this.measurements };
+  }
+  restore(state) {
+    this._items = (state && state.items || []).map((m) => this._measure(m));
+    this.render();
+    return this;
+  }
+  handleKey(e, ctx) {
+    if (!this._active || ctx && ctx.focus && ctx.focus !== this.viewer) return false;
+    if (e.key === "Escape" && (this._drag || this._items.length)) {
+      this._drag = null;
+      this.clear();
+      return true;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && this._items.length) {
+      this._items.pop();
+      this.render();
+      this._emitChange();
+      return true;
+    }
+    return false;
+  }
+  beginExport() {
+    this._exportMode = true;
+    this.render();
+  }
+  endExport() {
+    this._exportMode = false;
+    this.render();
+  }
+  destroy() {
+    this._ac.abort();
+    this._offView();
+    this._g.remove();
+    this.removeAllListeners();
+  }
+  _measure(m) {
+    const px = Math.hypot(m.x2 - m.x1, m.y2 - m.y1);
+    return { x1: m.x1, y1: m.y1, x2: m.x2, y2: m.y2, px, mm: mmFromPx(px, this._o.ppi), ppi: this._o.ppi };
+  }
+  _down(e) {
+    if (!this._active || e.button !== 0) return;
+    const p = this.viewer.screenToImageCoords(e.clientX, e.clientY);
+    if (!insideImage(this.viewer, p.x, p.y)) return;
+    stopEvent(e);
+    this._drag = { x1: p.x, y1: p.y, x2: p.x, y2: p.y, keep: e.shiftKey || this._o.keep };
+    this.render();
+  }
+  _move(e) {
+    if (!this._drag) return;
+    const p = this.viewer.screenToImageCoords(e.clientX, e.clientY);
+    this._drag.x2 = p.x;
+    this._drag.y2 = p.y;
+    this.render();
+    const m = this._measure(this._drag);
+    this.emit("preview", m);
+  }
+  _up(e) {
+    if (!this._drag) return;
+    const d = this._drag;
+    this._drag = null;
+    const p = this.viewer.screenToImageCoords(e.clientX, e.clientY);
+    d.x2 = p.x;
+    d.y2 = p.y;
+    if (Math.hypot(d.x2 - d.x1, d.y2 - d.y1) * viewScale(this.viewer) < 3) {
+      this.render();
+      return;
+    }
+    this.measure({ x: d.x1, y: d.y1 }, { x: d.x2, y: d.y2 }, { keep: d.keep });
+  }
+  render() {
+    this._g.replaceChildren();
+    const all = this._drag ? [...this._items, this._measure(this._drag)] : this._items;
+    for (const m of all) _drawSegment(this._g, this.viewer, m, this._o.color, _rulerLabel(m), this._exportMode);
+  }
+  _emitChange() {
+    const payload = { source: "ruler", type: "measure", items: this.measurements };
+    this.emit("change", payload);
+    if (typeof this.viewer._emit === "function") this.viewer._emit("change", payload);
+  }
+};
+function _rulerLabel(m) {
+  const px = `${m.px.toFixed(1)} px`;
+  return Number.isFinite(m.mm) ? `${m.mm.toFixed(2)} mm (${px})` : px;
+}
+var RIDGE_DEFAULTS = {
+  ppi: 500,
+  layer: "measure",
+  z: 45,
+  color: "#22d3ee",
+  mode: "ridges",
+  sigma: 1,
+  minProminence: 8,
+  exclude: 3,
+  polarity: "dark",
+  channel: 0,
+  source: null
+};
+var RidgeCount = class extends Emitter {
+  /**
+   * @param {import('./viewer.js').Viewer} viewer
+   * @param {object} [opts] - ppi; source: () => ImageData (padrão: pixels do <img>);
+   *        sigma, minProminence, exclude, polarity ('dark' = cristas escuras).
+   */
+  constructor(viewer, opts = {}) {
+    super();
+    this.viewer = viewer;
+    this._o = { ...RIDGE_DEFAULTS, ...opts };
+    this._layer = viewer.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z });
+    this._g = svgEl("g", { class: "mntviz-measure mntviz-ridgecount" }, this._layer.el);
+    this._items = [];
+    this._drag = null;
+    this._active = false;
+    this._exportMode = false;
+    this._fallback = null;
+    this._ac = new AbortController();
+    const sig = { signal: this._ac.signal };
+    viewer.viewport.addEventListener("mousedown", (e) => this._down(e), { capture: true, ...sig });
+    window.addEventListener("mousemove", (e) => this._move(e), { capture: true, ...sig });
+    window.addEventListener("mouseup", (e) => this._up(e), { capture: true, ...sig });
+    this._offView = onViewFrame(viewer, () => this.render());
+  }
+  get measurements() {
+    return this._items.map(_publicCount);
+  }
+  setPpi(ppi) {
+    this._o.ppi = Number(ppi);
+    return this;
+  }
+  setMode(mode) {
+    this._active = mode === this._o.mode;
+    if (!this._active) this._drag = null;
+  }
+  /** Conta as cristas de p1 a p2. Devolve {x1, y1, x2, y2, px, mm, count, minima, profile, smoothed}. */
+  count(p1, p2, { keep = false } = {}) {
+    const img = this._pixels();
+    if (!img) throw new Error("mntviz RidgeCount: sem pixels (imagem n\xE3o carregada)");
+    const o = this._o;
+    const prof = ridgeProfile(img, p1, p2, { channel: o.channel });
+    const sm = smoothProfile(prof.values, o.sigma);
+    const ridges = findRidges(sm, { minProminence: o.minProminence, exclude: o.exclude, polarity: o.polarity });
+    const m = {
+      x1: p1.x,
+      y1: p1.y,
+      x2: p2.x,
+      y2: p2.y,
+      px: prof.length,
+      mm: mmFromPx(prof.length, o.ppi),
+      ppi: o.ppi,
+      count: ridges.length,
+      minima: ridges.map((r) => ({ i: r.i, x: prof.xs[r.i], y: prof.ys[r.i], v: sm[r.i], prominence: r.prominence })),
+      profile: Array.from(prof.values),
+      smoothed: Array.from(sm),
+      params: { sigma: o.sigma, minProminence: o.minProminence, exclude: o.exclude, polarity: o.polarity }
+    };
+    if (!keep) this._items = [];
+    this._items.push(m);
+    this.render();
+    this.emit("measure", _publicCount(m, true));
+    const payload = { source: "ridgecount", type: "measure", items: this.measurements };
+    this.emit("change", payload);
+    if (typeof this.viewer._emit === "function") this.viewer._emit("change", payload);
+    return _publicCount(m, true);
+  }
+  clear() {
+    this._items = [];
+    this.render();
+  }
+  serialize() {
+    return { kind: "ridgecount", ppi: this._o.ppi, items: this.measurements };
+  }
+  handleKey(e, ctx) {
+    if (!this._active || ctx && ctx.focus && ctx.focus !== this.viewer) return false;
+    if (e.key === "Escape" && (this._drag || this._items.length)) {
+      this._drag = null;
+      this.clear();
+      return true;
+    }
+    return false;
+  }
+  beginExport() {
+    this._exportMode = true;
+    this.render();
+  }
+  endExport() {
+    this._exportMode = false;
+    this.render();
+  }
+  destroy() {
+    this._ac.abort();
+    this._offView();
+    this._g.remove();
+    this.removeAllListeners();
+  }
+  _pixels() {
+    if (typeof this._o.source === "function") {
+      const px = this._o.source();
+      if (px) return px;
+    }
+    const img = this.viewer.imageElement;
+    if (!img.naturalWidth) return null;
+    if (!this._fallback || this._fallback.src !== img.src) {
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      this._fallback = { src: img.src, data: ctx.getImageData(0, 0, c.width, c.height) };
+    }
+    return this._fallback.data;
+  }
+  _down(e) {
+    if (!this._active || e.button !== 0) return;
+    const p = this.viewer.screenToImageCoords(e.clientX, e.clientY);
+    if (!insideImage(this.viewer, p.x, p.y)) return;
+    stopEvent(e);
+    this._drag = { x1: p.x, y1: p.y, x2: p.x, y2: p.y, keep: e.shiftKey };
+    this.render();
+  }
+  _move(e) {
+    if (!this._drag) return;
+    const p = this.viewer.screenToImageCoords(e.clientX, e.clientY);
+    this._drag.x2 = p.x;
+    this._drag.y2 = p.y;
+    this.render();
+  }
+  _up(e) {
+    if (!this._drag) return;
+    const d = this._drag;
+    this._drag = null;
+    const p = this.viewer.screenToImageCoords(e.clientX, e.clientY);
+    if (Math.hypot(p.x - d.x1, p.y - d.y1) * viewScale(this.viewer) < 3) {
+      this.render();
+      return;
+    }
+    this.count({ x: d.x1, y: d.y1 }, { x: p.x, y: p.y }, { keep: d.keep });
+  }
+  render() {
+    this._g.replaceChildren();
+    for (const m of this._items) {
+      _drawSegment(this._g, this.viewer, m, this._o.color, `${m.count} cristas \xB7 ${m.px.toFixed(0)} px`, this._exportMode);
+      for (const t of m.minima) {
+        svgEl("circle", { cx: t.x, cy: t.y, r: 1.6, fill: this._o.color, stroke: "none" }, this._g);
+      }
+    }
+    if (this._drag) {
+      const d = this._drag;
+      _drawSegment(
+        this._g,
+        this.viewer,
+        { ...d, px: Math.hypot(d.x2 - d.x1, d.y2 - d.y1) },
+        this._o.color,
+        "\u2026",
+        this._exportMode
+      );
+    }
+  }
+};
+function _publicCount(m, withProfile = false) {
+  const out = {
+    x1: m.x1,
+    y1: m.y1,
+    x2: m.x2,
+    y2: m.y2,
+    px: m.px,
+    mm: m.mm,
+    ppi: m.ppi,
+    count: m.count,
+    minima: m.minima.map((t) => ({ ...t })),
+    params: { ...m.params }
+  };
+  if (withProfile) {
+    out.profile = m.profile.slice();
+    out.smoothed = m.smoothed.slice();
+  }
+  return out;
+}
+function _drawSegment(g, viewer, m, color, text, exportMode) {
+  const line = { x1: m.x1, y1: m.y1, x2: m.x2, y2: m.y2 };
+  svgEl("line", {
+    ...line,
+    stroke: "#000",
+    "stroke-width": 3.2,
+    "stroke-opacity": 0.55,
+    "vector-effect": "non-scaling-stroke",
+    "stroke-linecap": "round"
+  }, g);
+  svgEl("line", {
+    ...line,
+    stroke: color,
+    "stroke-width": 1.6,
+    "vector-effect": "non-scaling-stroke",
+    "stroke-linecap": "round"
+  }, g);
+  const s = exportMode ? 1 : viewScale(viewer);
+  const len = Math.hypot(m.x2 - m.x1, m.y2 - m.y1) || 1;
+  const nx = -(m.y2 - m.y1) / len * 5 / s, ny = (m.x2 - m.x1) / len * 5 / s;
+  for (const [x, y] of [[m.x1, m.y1], [m.x2, m.y2]]) {
+    svgEl("line", {
+      x1: x - nx,
+      y1: y - ny,
+      x2: x + nx,
+      y2: y + ny,
+      stroke: color,
+      "stroke-width": 1.6,
+      "vector-effect": "non-scaling-stroke"
+    }, g);
+  }
+  const lg = svgEl("g", {
+    transform: uprightTransform(viewer, (m.x1 + m.x2) / 2, (m.y1 + m.y2) / 2, { exportMode }),
+    class: "mntviz-measure-label"
+  }, g);
+  const t = svgEl("text", {
+    x: 6,
+    y: -6,
+    "font-size": 12,
+    "font-family": "sans-serif",
+    fill: color,
+    stroke: "#000",
+    "stroke-width": 3,
+    "stroke-opacity": 0.7,
+    "paint-order": "stroke"
+  }, lg);
+  t.textContent = text;
+}
+var NICE_MM = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50];
+var ScaleBar = class {
+  constructor(viewer, { ppi = 500, position = "TL", minPx = 60, maxPx = 160 } = {}) {
+    this.viewer = viewer;
+    this._o = { ppi, position, minPx, maxPx };
+    this._el = document.createElement("div");
+    this._el.className = `mntviz-scalebar mntviz-scalebar-${position.toLowerCase()}`;
+    this._bar = document.createElement("div");
+    this._bar.className = "mntviz-scalebar-bar";
+    this._txt = document.createElement("div");
+    this._txt.className = "mntviz-scalebar-text";
+    this._el.append(this._bar, this._txt);
+    viewer.viewport.appendChild(this._el);
+    this._off = viewer.on("view", () => this.update());
+    this.update();
+  }
+  setPpi(ppi) {
+    this._o.ppi = Number(ppi);
+    this.update();
+    return this;
+  }
+  /** Comprimento atual {mm, px} (px de tela). */
+  get value() {
+    return { mm: this._mm, px: this._px };
+  }
+  update() {
+    const pxPerMm = viewScale(this.viewer) * this._o.ppi / 25.4;
+    let mm = NICE_MM[NICE_MM.length - 1];
+    for (const v of NICE_MM) {
+      if (v * pxPerMm >= this._o.minPx) {
+        mm = v;
+        break;
+      }
+    }
+    if (mm * pxPerMm > this._o.maxPx) {
+      for (let i = NICE_MM.length - 1; i >= 0; i--) if (NICE_MM[i] * pxPerMm <= this._o.maxPx) {
+        mm = NICE_MM[i];
+        break;
+      }
+    }
+    this._mm = mm;
+    this._px = mm * pxPerMm;
+    this._bar.style.width = `${this._px.toFixed(1)}px`;
+    this._txt.textContent = `${mm} mm`;
+  }
+  destroy() {
+    this._off();
+    this._el.remove();
+  }
+};
+function scaleBarSVG(width, height, ppi, { mm = null, position = "BR", color = "#fff" } = {}) {
+  const pxPerMm = ppi / 25.4;
+  let len = mm;
+  if (len == null) {
+    len = 1;
+    for (const v of NICE_MM) if (v * pxPerMm <= width * 0.25) len = v;
+  }
+  const px = len * pxPerMm;
+  const pad = Math.max(8, Math.round(width * 0.02));
+  const fs = Math.max(10, Math.round(width * 0.022));
+  const x0 = position.endsWith("R") ? width - pad - px : pad;
+  const y0 = position.startsWith("B") ? height - pad : pad + fs + 6;
+  const g = svgEl("g", { class: "mntviz-scalebar-export", "data-mm": len, "data-px": px.toFixed(3) });
+  svgEl("rect", { x: x0 - 4, y: y0 - fs - 8, width: px + 8, height: fs + 14, fill: "#000", "fill-opacity": 0.55, rx: 3 }, g);
+  svgEl("line", { x1: x0, y1: y0, x2: x0 + px, y2: y0, stroke: color, "stroke-width": 3 }, g);
+  const t = svgEl("text", {
+    x: x0 + px / 2,
+    y: y0 - 6,
+    "text-anchor": "middle",
+    "font-size": fs,
+    "font-family": "sans-serif",
+    fill: color
+  }, g);
+  t.textContent = `${len} mm`;
+  return g;
+}
+
+// src/report-exporter.js
+var MNTVIZ_VERSION = "0.2.0";
+var ReportExporter = class {
+  /**
+   * @param {import('./viewer.js').Viewer} viewer
+   * @param {object} [opts]
+   * @param {import('./image-adjust.js').ImageAdjust} [opts.adjust] - Realce (rótulo e pixels).
+   * @param {Array<object>} [opts.tools] - FeatureEditor, CorrespondenceEditor, Ruler, RidgeCount...
+   * @param {number} [opts.ppi=500]
+   * @param {object} [opts.provenance] - Campos do host (usuário, caso, engine, versão...).
+   * @param {string} [opts.name] - Base dos nomes de arquivo.
+   */
+  constructor(viewer, {
+    adjust = null,
+    tools = [],
+    ppi = 500,
+    provenance = {},
+    name = "mntviz",
+    scaleBar = true,
+    labelProcessed = true
+  } = {}) {
+    this.viewer = viewer;
+    this._o = { adjust, tools: [...tools], ppi, provenance: { ...provenance }, name, scaleBar, labelProcessed };
+  }
+  setPpi(ppi) {
+    this._o.ppi = Number(ppi);
+    return this;
+  }
+  addTool(tool) {
+    this._o.tools.push(tool);
+    return this;
+  }
+  setProvenance(p) {
+    this._o.provenance = { ...this._o.provenance, ...p };
+    return this;
+  }
+  /** SVG na vista nativa (string). */
+  async exportSVG({ scaleBar = this._o.scaleBar, label = this._o.labelProcessed, metadata = true } = {}) {
+    if (this._o.adjust && this._o.adjust.ready) await this._o.adjust.ready;
+    const tools = this._o.tools.filter((t) => t && typeof t.beginExport === "function");
+    let text;
+    try {
+      for (const t of tools) t.beginExport();
+      text = this.viewer.exportSVG();
+    } finally {
+      for (const t of tools) t.endExport();
+    }
+    const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+    const root = doc.documentElement;
+    const { width: W, height: H } = this.viewer.imageSize;
+    root.setAttribute("width", W);
+    root.setAttribute("height", H);
+    root.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const adj = this._o.adjust;
+    const processed = !!(adj && !adj.isIdentity());
+    if (label && processed) root.appendChild(doc.importNode(_processedLabel(W, `PROCESSADO: ${adj.label()}`), true));
+    if (scaleBar && this._o.ppi > 0) root.appendChild(doc.importNode(scaleBarSVG(W, H, this._o.ppi), true));
+    if (metadata) {
+      const md = doc.createElementNS("http://www.w3.org/2000/svg", "metadata");
+      md.setAttribute("id", "mntviz-provenance");
+      md.textContent = JSON.stringify(this._provenance(null));
+      root.insertBefore(md, root.firstChild);
+    }
+    return new XMLSerializer().serializeToString(doc);
+  }
+  /** PNG (Blob) no tamanho natural × scale. */
+  async exportPNG({ scale = 1, ...svgOpts } = {}) {
+    const canvas = await this._rasterize(scale, svgOpts);
+    return new Promise((resolve, reject) => canvas.toBlob(
+      (b) => b ? resolve(b) : reject(new Error("mntviz: toBlob falhou")),
+      "image/png"
+    ));
+  }
+  /** PNG como data URL. */
+  async exportPNGDataURL({ scale = 1, ...svgOpts } = {}) {
+    const canvas = await this._rasterize(scale, svgOpts);
+    return canvas.toDataURL("image/png");
+  }
+  /** JSON do relatório (objeto). */
+  async exportJSON({ imageHash = true } = {}) {
+    const adj = this._o.adjust;
+    if (adj && adj.ready) await adj.ready;
+    const sha = imageHash ? await this.imageSha256() : null;
+    const out = {
+      schema: "mntviz.report/1",
+      created_utc: (/* @__PURE__ */ new Date()).toISOString(),
+      provenance: this._provenance(sha),
+      processed: !!(adj && !adj.isIdentity()),
+      label: adj ? adj.label() : "",
+      view: this.viewer.getView(),
+      layers: this.viewer.layers.serialize(),
+      adjust: adj ? adj.serialize() : null,
+      editors: [],
+      correspondence: null,
+      measurements: []
+    };
+    for (const t of this._o.tools) {
+      if (!t) continue;
+      if (typeof t.toCorrespondence === "function") {
+        out.correspondence = { contract: t.toCorrespondence(), state: t.toJSON() };
+      } else if (typeof t.toFeatures === "function") {
+        out.editors.push({ layer: t.layerName, features: t.toFeatures(), state: t.serialize() });
+      } else if (typeof t.serialize === "function") {
+        out.measurements.push(t.serialize());
+      }
+    }
+    return out;
+  }
+  /** sha256 (hex) dos bytes da imagem do viewer, ou null se não der para ler. */
+  async imageSha256() {
+    const src = this.viewer.imageElement.src;
+    if (!src) return null;
+    try {
+      const r = await fetch(src);
+      if (!r.ok) return null;
+      return await sha256Hex(new Uint8Array(await r.arrayBuffer()));
+    } catch {
+      return null;
+    }
+  }
+  /** Baixa 'png' | 'svg' | 'json'. */
+  async download(kind = "png", filename = null) {
+    let blob;
+    if (kind === "png") blob = await this.exportPNG();
+    else if (kind === "svg") blob = new Blob([await this.exportSVG()], { type: "image/svg+xml" });
+    else if (kind === "json") blob = new Blob([JSON.stringify(await this.exportJSON(), null, 2)], { type: "application/json" });
+    else throw new Error(`mntviz ReportExporter: tipo desconhecido '${kind}'`);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename || `${this._o.name}_report.${kind}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1e3);
+    return blob;
+  }
+  async _rasterize(scale, svgOpts) {
+    const svg = await this.exportSVG(svgOpts);
+    const { width: W, height: H } = this.viewer.imageSize;
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = () => reject(new Error("mntviz: falha ao rasterizar o SVG"));
+        im.src = url;
+      });
+      const c = document.createElement("canvas");
+      c.width = Math.round(W * scale);
+      c.height = Math.round(H * scale);
+      const ctx = c.getContext("2d");
+      ctx.imageSmoothingEnabled = scale !== 1;
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      return c;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  _provenance(sha) {
+    const img = this.viewer.imageElement;
+    const adj = this._o.adjust;
+    const { width, height } = this.viewer.imageSize;
+    return {
+      mntviz: { version: MNTVIZ_VERSION },
+      ...this._o.provenance,
+      image: {
+        src: img.src && img.src.startsWith("data:") ? "data:" : img.src || null,
+        width,
+        height,
+        ppi: this._o.ppi,
+        sha256: sha,
+        decode: adj ? adj.decode : "browser",
+        color_managed: adj ? adj.colorManaged : null
+      }
+    };
+  }
+};
+function _processedLabel(W, text) {
+  const fs = Math.max(10, Math.round(W * 0.02));
+  const g = svgEl("g", { class: "mntviz-processed-label" });
+  const w = Math.min(W - 8, text.length * fs * 0.62 + 12);
+  svgEl("rect", { x: 4, y: 4, width: w, height: fs + 10, fill: "#7f1d1d", "fill-opacity": 0.85, rx: 3 }, g);
+  const t = svgEl("text", { x: 10, y: fs + 7, "font-size": fs, "font-family": "sans-serif", fill: "#fff" }, g);
+  t.textContent = text;
+  return g;
+}
+var K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
+function sha256HexSync(bytes) {
+  const ror = (x, n) => x >>> n | x << 32 - n;
+  const l = bytes.length;
+  const total = l + 9 + 63 >> 6 << 6;
+  const buf = new Uint8Array(total);
+  buf.set(bytes);
+  buf[l] = 128;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(total - 8, Math.floor(l / 536870912));
+  dv.setUint32(total - 4, l << 3 >>> 0);
+  const H = new Uint32Array([1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225]);
+  const W = new Uint32Array(64);
+  for (let off = 0; off < total; off += 64) {
+    for (let i = 0; i < 16; i++) W[i] = dv.getUint32(off + 4 * i);
+    for (let i = 16; i < 64; i++) {
+      const a2 = W[i - 15], b2 = W[i - 2];
+      const s0 = ror(a2, 7) ^ ror(a2, 18) ^ a2 >>> 3;
+      const s1 = ror(b2, 17) ^ ror(b2, 19) ^ b2 >>> 10;
+      W[i] = W[i - 16] + s0 + W[i - 7] + s1 | 0;
+    }
+    let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25);
+      const ch = e & f ^ ~e & g;
+      const t1 = h + S1 + ch + K[i] + W[i] | 0;
+      const S0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22);
+      const maj = a & b ^ a & c ^ b & c;
+      const t2 = S0 + maj | 0;
+      h = g;
+      g = f;
+      f = e;
+      e = d + t1 | 0;
+      d = c;
+      c = b;
+      b = a;
+      a = t1 + t2 | 0;
+    }
+    H[0] += a;
+    H[1] += b;
+    H[2] += c;
+    H[3] += d;
+    H[4] += e;
+    H[5] += f;
+    H[6] += g;
+    H[7] += h;
+  }
+  return Array.from(H, (x) => x.toString(16).padStart(8, "0")).join("");
+}
+async function sha256Hex(bytes) {
+  const c = globalThis.crypto;
+  if (c && c.subtle && globalThis.isSecureContext) {
+    const d = await c.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(d), (x) => x.toString(16).padStart(2, "0")).join("");
+  }
+  return sha256HexSync(bytes);
+}
+
+// src/plots.js
+var SVG_NS11 = "http://www.w3.org/2000/svg";
 var Z = { segments: 10, uv: 10, minutiae: 20, singularities: 30, shapes: 40 };
 function _createShapeElement(shape) {
   if (shape.type === "polygon") {
-    const poly = document.createElementNS(SVG_NS10, "polygon");
+    const poly = document.createElementNS(SVG_NS11, "polygon");
     poly.setAttribute("points", shape.points.map((p) => p.join(",")).join(" "));
     poly.setAttribute("stroke", shape.stroke || "#ff0000");
     poly.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -15494,7 +19231,7 @@ function _createShapeElement(shape) {
     return poly;
   }
   if (shape.type === "circle") {
-    const c = document.createElementNS(SVG_NS10, "circle");
+    const c = document.createElementNS(SVG_NS11, "circle");
     c.setAttribute("cx", shape.x);
     c.setAttribute("cy", shape.y);
     c.setAttribute("r", shape.r != null ? shape.r : 3);
@@ -15505,16 +19242,16 @@ function _createShapeElement(shape) {
     return c;
   }
   if (shape.type === "cross") {
-    const g = document.createElementNS(SVG_NS10, "g");
+    const g = document.createElementNS(SVG_NS11, "g");
     g.setAttribute("stroke", shape.stroke || "#00ff00");
     g.setAttribute("stroke-width", shape.strokeWidth || 1);
     const s = shape.size || 10;
-    const h = document.createElementNS(SVG_NS10, "line");
+    const h = document.createElementNS(SVG_NS11, "line");
     h.setAttribute("x1", shape.x - s / 2);
     h.setAttribute("y1", shape.y);
     h.setAttribute("x2", shape.x + s / 2);
     h.setAttribute("y2", shape.y);
-    const v = document.createElementNS(SVG_NS10, "line");
+    const v = document.createElementNS(SVG_NS11, "line");
     v.setAttribute("x1", shape.x);
     v.setAttribute("y1", shape.y - s / 2);
     v.setAttribute("x2", shape.x);
@@ -15524,13 +19261,13 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "minutia") {
-    const g = document.createElementNS(SVG_NS10, "g");
+    const g = document.createElementNS(SVG_NS11, "g");
     const color = shape.stroke || "#00ff00";
     g.setAttribute("stroke", color);
     g.setAttribute("fill", "none");
     g.setAttribute("stroke-width", shape.strokeWidth || 1.5);
     const r = shape.radius || 6;
-    const circle = document.createElementNS(SVG_NS10, "circle");
+    const circle = document.createElementNS(SVG_NS11, "circle");
     circle.setAttribute("cx", shape.x);
     circle.setAttribute("cy", shape.y);
     circle.setAttribute("r", r);
@@ -15539,7 +19276,7 @@ function _createShapeElement(shape) {
     const rad = (shape.angle || 0) * Math.PI / 180;
     const dx = Math.cos(rad) * segLen;
     const dy = Math.sin(rad) * segLen;
-    const line = document.createElementNS(SVG_NS10, "line");
+    const line = document.createElementNS(SVG_NS11, "line");
     line.setAttribute("x1", shape.x);
     line.setAttribute("y1", shape.y);
     line.setAttribute("x2", shape.x + dx);
@@ -15549,7 +19286,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "path") {
-    const path = document.createElementNS(SVG_NS10, "path");
+    const path = document.createElementNS(SVG_NS11, "path");
     path.setAttribute("d", shape.d);
     path.setAttribute("stroke", shape.stroke || "#ff0000");
     path.setAttribute("stroke-width", shape.strokeWidth || 2);
@@ -15558,7 +19295,7 @@ function _createShapeElement(shape) {
     return path;
   }
   if (shape.type === "conic-ring") {
-    const g = document.createElementNS(SVG_NS10, "g");
+    const g = document.createElementNS(SVG_NS11, "g");
     if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
     const cx = shape.x, cy = shape.y, r = shape.r;
     const sw = shape.strokeWidth != null ? shape.strokeWidth : 2;
@@ -15566,22 +19303,22 @@ function _createShapeElement(shape) {
     const bx = cx - r - pad, by = cy - r - pad;
     const bs = (r + pad) * 2;
     const maskId = "mntviz-conic-mask-" + Math.random().toString(36).slice(2, 10);
-    const defs = document.createElementNS(SVG_NS10, "defs");
-    const mask = document.createElementNS(SVG_NS10, "mask");
+    const defs = document.createElementNS(SVG_NS11, "defs");
+    const mask = document.createElementNS(SVG_NS11, "mask");
     mask.setAttribute("id", maskId);
     mask.setAttribute("maskUnits", "userSpaceOnUse");
     mask.setAttribute("x", bx);
     mask.setAttribute("y", by);
     mask.setAttribute("width", bs);
     mask.setAttribute("height", bs);
-    const bg = document.createElementNS(SVG_NS10, "rect");
+    const bg = document.createElementNS(SVG_NS11, "rect");
     bg.setAttribute("x", bx);
     bg.setAttribute("y", by);
     bg.setAttribute("width", bs);
     bg.setAttribute("height", bs);
     bg.setAttribute("fill", "black");
     mask.appendChild(bg);
-    const ringCircle = document.createElementNS(SVG_NS10, "circle");
+    const ringCircle = document.createElementNS(SVG_NS11, "circle");
     ringCircle.setAttribute("cx", cx);
     ringCircle.setAttribute("cy", cy);
     ringCircle.setAttribute("r", r);
@@ -15604,7 +19341,7 @@ function _createShapeElement(shape) {
       stops = String(shape.gradient || "red, yellow, lime, cyan, blue, magenta, red");
     }
     const fromDeg = shape.fromAngle != null ? shape.fromAngle : 0;
-    const fo = document.createElementNS(SVG_NS10, "foreignObject");
+    const fo = document.createElementNS(SVG_NS11, "foreignObject");
     fo.setAttribute("x", bx);
     fo.setAttribute("y", by);
     fo.setAttribute("width", bs);
@@ -15620,7 +19357,7 @@ function _createShapeElement(shape) {
     return g;
   }
   if (shape.type === "lines") {
-    const g = document.createElementNS(SVG_NS10, "g");
+    const g = document.createElementNS(SVG_NS11, "g");
     if (shape.strokeWidth != null) g.setAttribute("stroke-width", shape.strokeWidth);
     if (shape.stroke != null) g.setAttribute("stroke", shape.stroke);
     if (shape.opacity != null) g.setAttribute("opacity", shape.opacity);
@@ -15630,29 +19367,29 @@ function _createShapeElement(shape) {
     const lineList = shape.lines || [];
     for (let i = 0; i < lineList.length; i++) {
       const l = lineList[i];
-      const ln = document.createElementNS(SVG_NS10, "line");
+      const ln = document.createElementNS(SVG_NS11, "line");
       ln.setAttribute("x1", l.x1);
       ln.setAttribute("y1", l.y1);
       ln.setAttribute("x2", l.x2);
       ln.setAttribute("y2", l.y2);
       if (l.colorStart != null && l.colorEnd != null) {
         if (defs == null) {
-          defs = document.createElementNS(SVG_NS10, "defs");
+          defs = document.createElementNS(SVG_NS11, "defs");
           gradPrefix = "mntviz-grad-" + Math.random().toString(36).slice(2, 8);
           g.insertBefore(defs, g.firstChild);
         }
         const id = `${gradPrefix}-${i}`;
-        const grad = document.createElementNS(SVG_NS10, "linearGradient");
+        const grad = document.createElementNS(SVG_NS11, "linearGradient");
         grad.setAttribute("id", id);
         grad.setAttribute("gradientUnits", "userSpaceOnUse");
         grad.setAttribute("x1", l.x1);
         grad.setAttribute("y1", l.y1);
         grad.setAttribute("x2", l.x2);
         grad.setAttribute("y2", l.y2);
-        const s0 = document.createElementNS(SVG_NS10, "stop");
+        const s0 = document.createElementNS(SVG_NS11, "stop");
         s0.setAttribute("offset", "0%");
         s0.setAttribute("stop-color", l.colorStart);
-        const s1 = document.createElementNS(SVG_NS10, "stop");
+        const s1 = document.createElementNS(SVG_NS11, "stop");
         s1.setAttribute("offset", "100%");
         s1.setAttribute("stop-color", l.colorEnd);
         grad.append(s0, s1);
@@ -15671,7 +19408,7 @@ function _createShapeElement(shape) {
 }
 function _renderShapes(svgTarget, shapes) {
   if (!shapes || shapes.length === 0) return;
-  const g = document.createElementNS(SVG_NS10, "g");
+  const g = document.createElementNS(SVG_NS11, "g");
   g.setAttribute("class", "mntviz-shapes-layer");
   for (const shape of shapes) {
     const el = _createShapeElement(shape);
@@ -15689,7 +19426,7 @@ function renderLegend(viewer, items) {
     row.classList.add("mntviz-legend-item");
     const size = 16;
     const r = 5;
-    const svg = document.createElementNS(SVG_NS10, "svg");
+    const svg = document.createElementNS(SVG_NS11, "svg");
     svg.setAttribute("width", size);
     svg.setAttribute("height", size);
     svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
@@ -15804,18 +19541,18 @@ function _loadImageDimensions(src) {
   });
 }
 function _createStaticHuvSvg(config, w, h) {
-  const svg = document.createElementNS(SVG_NS10, "svg");
+  const svg = document.createElementNS(SVG_NS11, "svg");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   if (config.pixelated) svg.style.imageRendering = "pixelated";
-  const bgImage = document.createElementNS(SVG_NS10, "image");
+  const bgImage = document.createElementNS(SVG_NS11, "image");
   bgImage.setAttribute("href", config.imageSrc);
   bgImage.setAttribute("width", w);
   bgImage.setAttribute("height", h);
   if (config.pixelated) bgImage.setAttribute("image-rendering", "pixelated");
   svg.appendChild(bgImage);
   if (config.overlaySrc) {
-    const ovImage = document.createElementNS(SVG_NS10, "image");
+    const ovImage = document.createElementNS(SVG_NS11, "image");
     ovImage.setAttribute("href", config.overlaySrc);
     ovImage.setAttribute("width", w);
     ovImage.setAttribute("height", h);
@@ -15824,7 +19561,7 @@ function _createStaticHuvSvg(config, w, h) {
     svg.appendChild(ovImage);
   }
   if (config.arrows && config.arrows.length > 0) {
-    const arrowGroup = document.createElementNS(SVG_NS10, "g");
+    const arrowGroup = document.createElementNS(SVG_NS11, "g");
     svg.appendChild(arrowGroup);
     const uvRenderer = new UVFieldRenderer(arrowGroup);
     uvRenderer.draw(config.arrows, config.arrowOptions ?? {});
@@ -15895,26 +19632,63 @@ async function plotMatch(host, config) {
   return mv;
 }
 export {
+  ADJUST_OPS,
   COLORMAP_NAMES,
+  CorrespondenceEditor,
+  DEFAULT_MODE_KEYS,
   Emitter,
+  FeatureEditor,
   FieldProbe,
+  GYRO,
+  GYRO_KEYS,
+  History,
+  ImageAdjust,
   Layer,
   LayerStack,
+  MINUTIA_TYPES,
+  MNTVIZ_VERSION,
+  MODES,
+  MODE_LABELS,
   MatchViewer,
   MinutiaeInspector,
   MinutiaeRenderer,
   MultiViewer,
   OverlayLayer,
+  PAIR_COLORS,
+  PAIR_TYPES,
+  PAIR_TYPE_LABELS,
   PointPicker,
+  ReportExporter,
+  RidgeCount,
+  Ruler,
+  ScaleBar,
   SegmentsRenderer,
   Selection,
   SingularityRenderer,
+  ToolModes,
   UVFieldRenderer,
   Viewer,
   applyColormap,
+  applyRigid,
+  buildLut,
+  buildWarp,
   createMarkerShape,
+  describeAdjust,
+  detectPairsFormat,
+  estimateRigid,
+  estimateTransform,
+  findRidges,
+  formatCorrText,
+  formatMatchText,
+  invertRigid,
+  isoAngle,
   minutiaDataMap,
+  mlsRigid,
+  mmFromPx,
+  parseCorrText,
+  parseMatchText,
   parseMinutiaeText,
+  parsePairsText,
   parseSingularityText,
   plotHuv,
   plotHuvThumbnail,
@@ -15923,6 +19697,13 @@ export {
   plotOverlay,
   plotSingularities,
   renderLegend,
+  ridgeProfile,
+  scaleBarSVG,
   segmentDataMap,
-  singularityDataMap
+  sha256Hex,
+  sha256HexSync,
+  singularityDataMap,
+  smoothProfile,
+  uprightTransform,
+  warpImage
 };

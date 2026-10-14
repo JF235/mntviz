@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mntviz · editor de perito</title>
+<!--
+  Demonstração dos editores e ferramentas de perito do mntviz sobre o exemplo SD258 000
+  (latente à esquerda, referência à direita). Módulos ES de ../src, sem build.
+  Servir a raiz do repositório por HTTP (módulos ES não carregam de file://):
+      python -m http.server 8000      # e abrir http://127.0.0.1:8000/examples/editor.html
+  Parâmetros: ?ppi=1000 (ppi das duas amostras) · ?proc=1 (CLAHE pedido ao servidor como
+  <imagem>?proc=clahe&clip=2&tile=8, como uma rota de imagens com processamento no servidor).
+  Teclas: V ver · M minúcia (de novo: tipo) · C núcleo · D delta · R ROI · L régua ·
+  Shift+L cristas · P par · 1/2/3 GYRO (no modo P: tipo do par 1-5) · T tipo · Del apaga ·
+  A/X/Shift+A sugestões · Ctrl+Z/Ctrl+Shift+Z · [ ] girar · Shift+H espelho · B antes/depois ·
+  I inverter · O sobreposição · G cursor fantasma · Esc sai do modo.
+-->
+<link rel="stylesheet" href="../src/mntviz.css">
+<style>
+  :root { color-scheme: dark; --bg: #0b1220; --panel: #111a2e; --line: #24324f; --fg: #e2e8f0; --mut: #94a3b8; --acc: #38bdf8; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.35 system-ui, sans-serif; }
+  #app { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+  header { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header .grp { display: flex; gap: 3px; align-items: center; padding-right: 8px; border-right: 1px solid var(--line); }
+  header .grp:last-child { border-right: 0; }
+  button { background: #1b2742; color: var(--fg); border: 1px solid #2c3d63; border-radius: 4px; padding: 3px 7px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--acc); }
+  button.on { background: #0c4a6e; border-color: var(--acc); }
+  button kbd { color: var(--mut); font-size: 11px; margin-left: 3px; }
+  main { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+  #pair-host { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px; min-height: 0; }
+  .pane { position: relative; display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+  .pane h2 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--mut); }
+  .pane .vhost { position: relative; min-height: 0; }
+  .pane.focus h2 { color: var(--acc); }
+  aside { border-left: 1px solid var(--line); background: var(--panel); padding: 8px 10px; overflow: auto; }
+  aside h3 { margin: 10px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--mut); }
+  aside label { display: grid; grid-template-columns: 78px 1fr 44px; gap: 6px; align-items: center; margin: 3px 0; }
+  aside input[type=range] { width: 100%; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 2px 4px; border-bottom: 1px solid var(--line); text-align: left; }
+  tr.sel td { background: #0c4a6e; }
+  footer { display: flex; flex-wrap: wrap; gap: 14px; padding: 4px 10px; border-top: 1px solid var(--line); background: var(--panel); color: var(--mut); font-size: 12px; }
+  footer b { color: var(--fg); font-weight: 600; }
+  #hint { color: #fde047; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="grp" id="modes">
+      <button data-mode="view">Ver<kbd>V</kbd></button>
+      <button data-mode="minutia">Minúcia<kbd>M</kbd></button>
+      <button data-mode="core">Núcleo<kbd>C</kbd></button>
+      <button data-mode="delta">Delta<kbd>D</kbd></button>
+      <button data-mode="roi">ROI<kbd>R</kbd></button>
+      <button data-mode="ruler">Régua<kbd>L</kbd></button>
+      <button data-mode="ridges">Cristas<kbd>⇧L</kbd></button>
+      <button data-mode="pair">Par<kbd>P</kbd></button>
+    </div>
+    <div class="grp">
+      <button data-gyro="G" title="confiança alta">G<kbd>1</kbd></button>
+      <button data-gyro="Y" title="confiança média">Y<kbd>2</kbd></button>
+      <button data-gyro="R" title="confiança baixa">R<kbd>3</kbd></button>
+    </div>
+    <div class="grp">
+      <button id="undo">Desfazer</button><button id="redo">Refazer</button>
+    </div>
+    <div class="grp">
+      <button id="rotl">⟲ 90°<kbd>[</kbd></button><button id="rotr">⟳ 90°<kbd>]</kbd></button>
+      <button id="flip">Espelho<kbd>⇧H</kbd></button><button id="fit">Ajustar<kbd>F</kbd></button>
+    </div>
+    <div class="grp">
+      <button id="overlay">Sobreposição: off<kbd>O</kbd></button>
+      <button id="flicker">Alternar<kbd>T</kbd></button>
+      <button id="ghost">Fantasma<kbd>G</kbd></button>
+      <button id="lines">Linhas</button>
+    </div>
+    <div class="grp">
+      <button id="exp-png">PNG</button><button id="exp-svg">SVG</button><button id="exp-json">JSON</button>
+    </div>
+  </header>
+  <main>
+    <div id="pair-host">
+      <div class="pane" id="pane-0"><h2>Latente · sd258:000_11-00</h2><div class="vhost" id="v0"></div></div>
+      <div class="pane" id="pane-1"><h2>Referência · sd258:000_11-01</h2><div class="vhost" id="v1"></div></div>
+    </div>
+    <aside>
+      <h3>Realce (lado em foco)</h3>
+      <label>Brilho <input type="range" id="adj-brightness" min="-0.5" max="0.5" step="0.01" value="0"><span id="val-brightness">0</span></label>
+      <label>Contraste <input type="range" id="adj-contrast" min="0.2" max="3" step="0.05" value="1"><span id="val-contrast">1</span></label>
+      <label>Gama <input type="range" id="adj-gamma" min="0.2" max="3" step="0.05" value="1"><span id="val-gamma">1</span></label>
+      <label>Inverter <input type="checkbox" id="adj-invert"><span></span></label>
+      <label>CLAHE <input type="checkbox" id="adj-clahe"><span id="val-clahe"></span></label>
+      <div><button id="adj-reset">Limpar</button> <button id="adj-bypass">Antes/depois<kbd>B</kbd></button></div>
+      <div id="adj-label" style="color:var(--mut);margin-top:4px"></div>
+      <h3>Pares</h3>
+      <div><input type="file" id="pairs-file" accept=".txt,.match"> <button id="pairs-example">Exemplo</button></div>
+      <table><thead><tr><th>n</th><th>tipo</th><th>k</th><th>lat</th><th>ref</th></tr></thead><tbody id="pairs"></tbody></table>
+      <div id="rigid" style="color:var(--mut);margin-top:4px"></div>
+      <h3>Medidas</h3>
+      <div id="measure" style="color:var(--mut)"></div>
+      <h3>Feature selecionada</h3>
+      <div id="props" style="color:var(--mut)"></div>
+    </aside>
+  </main>
+  <footer>
+    <span>modo <b id="st-mode">ver</b></span>
+    <span>px <b id="st-px">-</b></span>
+    <span>mm <b id="st-mm">-</b></span>
+    <span>ppi <b id="st-ppi">500</b></span>
+    <span>zoom <b id="st-zoom">-</b></span>
+    <span>tipo novo <b id="st-type">terminação</b></span>
+    <span>GYRO <b id="st-gyro">G</b></span>
+    <span id="hint"></span>
+  </footer>
+</div>
+
+<script type="module">
+import {
+  Viewer, FeatureEditor, ImageAdjust, CorrespondenceEditor, Ruler, RidgeCount, ScaleBar, ReportExporter,
+  ToolModes, MODE_LABELS, PAIR_TYPE_LABELS, parseMinutiaeText,
+} from '../src/index.js';
+
+const q = new URLSearchParams(location.search);
+const PPI = Number(q.get('ppi') || 500);
+const EX = './sd258/000';
+const IMG = [`${EX}/images/sd258_000_11-00_latent_bad.png`, `${EX}/images/sd258_000_11-01_template_bad.png`];
+const MIN = [`${EX}/minutiae/sd258_000_11-00_latent_bad.min`, `${EX}/minutiae/sd258_000_11-01_template_bad.min`];
+const PAIRS = `${EX}/matching/sd258_000_11-00_latent_bad__sd258_000_11-01_template_bad.txt`;
+const $ = (id) => document.getElementById(id);
+const TYPE_PT = { ending: 'terminação', bifurcation: 'bifurcação', unknown: 'desconhecida' };
+
+const text = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(`${u}: ${r.status}`); return r.text(); };
+const toFeat = (rows) => rows.map(m => ({ x: m.x, y: m.y, theta_deg_iso: m.angle, quality: m.quality,
+  type: m.type === 2 ? 'bifurcation' : m.type === 1 ? 'ending' : 'unknown' }));
+
+const modes = new ToolModes();
+const viewers = [new Viewer($('v0')), new Viewer($('v1'))];
+await Promise.all(viewers.map((v, i) => v.loadImage(IMG[i])));
+const [latMin, refMin] = (await Promise.all(MIN.map(text))).map(t => toFeat(parseMinutiaeText(t)));
+
+const server = q.get('proc') ? (ops, src) => {
+  const o = ops.find(x => x.op === 'clahe') || {};
+  return `${src.split('?')[0]}?proc=clahe&clip=${o.clip ?? 2}&tile=${o.tile ?? 8}`;
+} : null;
+const adjust = viewers.map(v => new ImageAdjust(v, { server }));
+await Promise.all(adjust.map(a => a.ready));
+
+const editors = [
+  new FeatureEditor(viewers[0], { ppi: PPI, layer: 'analise', suggestionLayer: 'sugestoes',
+    suggestions: { minutiae: latMin }, suggestionSource: { kind: 'algo', id: 'exemplo-min', version: 'sd258-000' } }),
+  new FeatureEditor(viewers[1], { ppi: PPI, layer: 'referencia', features: { minutiae: refMin } }),
+];
+const rulers = viewers.map(v => new Ruler(v, { ppi: PPI }));
+const ridges = viewers.map((v, i) => new RidgeCount(v, { ppi: PPI, source: () => adjust[i].basePixels() }));
+const scalebars = viewers.map(v => new ScaleBar(v, { ppi: PPI }));
+const ce = new CorrespondenceEditor(viewers[0], viewers[1], { left: editors[0], right: editors[1], host: $('pair-host'),
+  ppi: PPI, rightPixels: () => adjust[1].pixels() });
+for (const t of [...editors, ...rulers, ...ridges, ce]) modes.add(t);
+modes.bind(window);
+const reporters = viewers.map((v, i) => new ReportExporter(v, {
+  adjust: adjust[i], ppi: PPI, name: i ? 'sd258_000_11-01' : 'sd258_000_11-00',
+  tools: i ? [editors[1], rulers[1], ridges[1], ce] : [editors[0], rulers[0], ridges[0], ce],
+  provenance: { app: 'mntviz/examples/editor.html', sample_id: i ? 'sd258:000_11-01' : 'sd258:000_11-00' },
+}));
+
+/* ── estado da página ─────────────────────────────────────── */
+let focus = 0;
+const setFocus = (i) => { focus = i; for (const k of [0, 1]) $(`pane-${k}`).classList.toggle('focus', k === i); syncAdjustUI(); };
+modes.on('focus', ({ viewer }) => setFocus(viewers.indexOf(viewer)));
+setFocus(0);
+
+modes.on('mode', ({ mode }) => {
+  $('st-mode').textContent = MODE_LABELS[mode] || mode;
+  for (const b of document.querySelectorAll('[data-mode]')) b.classList.toggle('on', b.dataset.mode === mode);
+});
+modes.setMode('view');
+for (const b of document.querySelectorAll('[data-mode]')) b.onclick = () => modes.setMode(b.dataset.mode);
+for (const b of document.querySelectorAll('[data-gyro]')) b.onclick = () => {
+  const ed = editors[focus];
+  ed.setDefaultConfidence(b.dataset.gyro);
+  if (ed.selected.length) ed.setConfidence(ed.selected, b.dataset.gyro);
+};
+editors.forEach(ed => ed.on('tool', (t) => { $('st-type').textContent = TYPE_PT[t.newType]; $('st-gyro').textContent = t.defaultConfidence; }));
+editors.forEach((ed, i) => ed.on('select', ({ items }) => showProps(i, items)));
+editors.forEach((ed, i) => ed.on('change', () => showProps(i, ed.selectedItems)));
+
+const undo = () => (modes.mode === 'pair' ? ce.undo() : editors[focus].undo());
+const redo = () => (modes.mode === 'pair' ? ce.redo() : editors[focus].redo());
+$('undo').onclick = undo; $('redo').onclick = redo;
+$('rotl').onclick = () => viewers[focus].rotate90(-1);
+$('rotr').onclick = () => viewers[focus].rotate90(1);
+$('flip').onclick = () => viewers[focus].toggleFlip();
+$('fit').onclick = () => viewers[focus].fit();
+
+// Teclas da página (no GUI, keys.js): girar, espelhar, ajustar, inverter, antes/depois.
+window.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  const v = viewers[focus];
+  if (e.key === '[') v.rotate90(-1);
+  else if (e.key === ']') v.rotate90(1);
+  else if (e.key === 'H') v.toggleFlip();
+  else if (e.key === 'f' || e.key === 'F') v.fit();
+  else if (e.key === 'i' || e.key === 'I') { $('adj-invert').checked = !$('adj-invert').checked; applyAdjustUI(); }
+  else if (e.key === 'b' || e.key === 'B') adjust[focus].toggleBypass();
+  else return;
+  e.preventDefault();
+});
+
+/* ── realce ───────────────────────────────────────────────── */
+function syncAdjustUI() {
+  const ops = Object.fromEntries(adjust[focus].ops.map(o => [o.op, o]));
+  $('adj-brightness').value = ops.brightness ? ops.brightness.v : 0;
+  $('adj-contrast').value = ops.contrast ? ops.contrast.v : 1;
+  $('adj-gamma').value = ops.gamma ? ops.gamma.v : 1;
+  $('adj-invert').checked = !!ops.invert;
+  $('adj-clahe').checked = !!ops.clahe;
+  for (const k of ['brightness', 'contrast', 'gamma']) $(`val-${k}`).textContent = Number($(`adj-${k}`).value).toFixed(2);
+  $('adj-label').textContent = adjust[focus].label() || 'sem realce (valores do arquivo)';
+  $('adj-clahe').disabled = !server;
+  $('adj-clahe').title = server ? 'CLAHE 2,0 e 8×8, calculado no servidor' : 'CLAHE vem do servidor: abra a página com ?proc=1';
+  $('val-clahe').textContent = server ? 'srv' : '-';
+}
+function applyAdjustUI() {
+  const ops = [];
+  if ($('adj-clahe').checked) ops.push({ op: 'clahe', clip: 2.0, tile: 8 });
+  const b = Number($('adj-brightness').value), c = Number($('adj-contrast').value), g = Number($('adj-gamma').value);
+  if (b !== 0) ops.push({ op: 'brightness', v: b });
+  if (c !== 1) ops.push({ op: 'contrast', v: c });
+  if (g !== 1) ops.push({ op: 'gamma', v: g });
+  if ($('adj-invert').checked) ops.push({ op: 'invert' });
+  adjust[focus].set(ops);
+}
+for (const id of ['adj-brightness', 'adj-contrast', 'adj-gamma', 'adj-invert', 'adj-clahe']) $(id).oninput = applyAdjustUI;
+$('adj-reset').onclick = () => adjust[focus].clear();
+$('adj-bypass').onclick = () => adjust[focus].toggleBypass();
+adjust.forEach(a => a.on('change', () => syncAdjustUI()));
+
+/* ── pares ────────────────────────────────────────────────── */
+function showPairs() {
+  const tb = $('pairs');
+  tb.replaceChildren();
+  for (const p of ce.pairs) {
+    const tr = document.createElement('tr');
+    tr.dataset.n = p.n;
+    if (p.n === ce.selected) tr.className = 'sel';
+    for (const v of [p.n, PAIR_TYPE_LABELS[p.type], p.kind, p.a.index >= 0 ? p.a.index : `(${Math.round(p.a.x)},${Math.round(p.a.y)})`,
+      p.b.index >= 0 ? p.b.index : `(${Math.round(p.b.x)},${Math.round(p.b.y)})`]) {
+      const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+    }
+    tr.onclick = () => ce.select(p.n);
+    tb.appendChild(tr);
+  }
+  const t = ce.rigid();
+  $('rigid').textContent = t ? `rígido: ${t.angle.toFixed(2)}°, t = (${t.tx.toFixed(1)}, ${t.ty.toFixed(1)}), rms ${t.rms.toFixed(2)} px, n = ${t.n}` : '';
+}
+ce.on('change', showPairs);
+ce.on('select', showPairs);
+ce.on('hint', ({ text }) => { $('hint').textContent = text; setTimeout(() => { $('hint').textContent = ''; }, 2500); });
+ce.on('overlay', ({ mode }) => { $('overlay').textContent = `Sobreposição: ${mode}`; });
+ce.on('flicker', ({ on }) => $('flicker').classList.toggle('on', on));
+ce.on('ghost', ({ on }) => $('ghost').classList.toggle('on', on));
+$('overlay').onclick = () => ce.cycleOverlay();
+$('flicker').onclick = () => ce.setFlicker(!$('flicker').classList.contains('on'));
+$('ghost').onclick = () => ce.setGhost(!$('ghost').classList.contains('on'));
+$('lines').onclick = () => { const on = !$('lines').classList.contains('on'); $('lines').classList.toggle('on', on); ce.setLines(on); };
+$('pairs-file').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (f) { const r = ce.loadText(await f.text()); $('hint').textContent = `${r.format}: ${r.added} pares, ${r.dropped} descartados`; }
+};
+$('pairs-example').onclick = async () => {
+  editors[0].accept('all');
+  const r = ce.loadText(await text(PAIRS));
+  $('hint').textContent = `exemplo: ${r.added} pares, ${r.dropped} descartados`;
+};
+
+/* ── medidas, propriedades e status ───────────────────────── */
+const showMeasure = (m, what) => {
+  $('measure').textContent = what === 'ridges'
+    ? `${m.count} cristas em ${m.px.toFixed(1)} px (${m.mm.toFixed(2)} mm)`
+    : `${m.mm.toFixed(2)} mm (${m.px.toFixed(1)} px a ${m.ppi} ppi)`;
+};
+rulers.forEach(r => r.on('measure', (m) => showMeasure(m, 'ruler')));
+ridges.forEach(r => r.on('measure', (m) => showMeasure(m, 'ridges')));
+
+function showProps(i, items) {
+  if (!items || !items.length) { $('props').textContent = ''; return; }
+  const it = items[0];
+  const mm = (v) => (v / PPI * 25.4).toFixed(2);
+  $('props').textContent = `${i ? 'ref' : 'lat'} #${it.id} ${it.kind}${it.type ? ` (${TYPE_PT[it.type]})` : ''} · `
+    + `(${it.x}, ${it.y}) px = (${mm(it.x)}, ${mm(it.y)}) mm · θ ${it.theta ?? '-'}° · GYRO ${it.confidence ?? '-'}`
+    + (it.coord_unc ? ` · r ${it.coord_unc} px` : '') + (it.origin ? ` · origem ${it.origin.id}` : '')
+    + (items.length > 1 ? ` (+${items.length - 1})` : '');
+}
+
+$('st-ppi').textContent = PPI;
+viewers.forEach((v, i) => {
+  v.on('pointer', (p) => {
+    if (p.type !== 'move' || i !== focus) return;
+    $('st-px').textContent = `${p.x.toFixed(1)}, ${p.y.toFixed(1)}`;
+    $('st-mm').textContent = `${(p.x / PPI * 25.4).toFixed(2)}, ${(p.y / PPI * 25.4).toFixed(2)}`;
+  });
+  v.on('view', (s) => { if (i === focus) $('st-zoom').textContent = `${Math.round(s.scale * 100)}% · ${s.rotation.toFixed(0)}°${s.flipX ? ' · espelho' : ''}`; });
+});
+
+/* ── exportação ───────────────────────────────────────────── */
+$('exp-png').onclick = () => reporters[focus].download('png');
+$('exp-svg').onclick = () => reporters[focus].download('svg');
+$('exp-json').onclick = () => reporters[focus].download('json');
+
+showPairs();
+syncAdjustUI();
+window.demo = { viewers, editors, adjust, ce, modes, rulers, ridges, scalebars, reporters, PPI,
+  setFocus, data: { latMin, refMin, IMG, MIN, PAIRS } };
+window.__ready = true;
+</script>
+</body>
+</html>
