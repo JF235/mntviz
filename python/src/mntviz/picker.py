@@ -12,6 +12,9 @@ live in JS. This module's job is just:
 Result: the pure JS lib stays usable without Python; opt-in `picker=` flag in
 plot_mnt / plot_huv / plot_overlay returns a synced widget instead of static
 HTML, with `widget.points` readable from any cell.
+
+O anywidget é opcional (extra ``mntviz[widget]``): este módulo só o importa
+quando um widget é pedido, e ``import mntviz`` funciona num ambiente sem ele.
 """
 
 from __future__ import annotations
@@ -19,9 +22,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-
-import anywidget
-import traitlets
 
 
 _BUNDLE_DIR = Path(__file__).parent / "_bundle"
@@ -104,19 +104,48 @@ def _build_esm() -> str:
     return bundle + "\n\n" + bridge
 
 
-class PointPickerWidget(anywidget.AnyWidget):
-    """Anywidget wrapper around an mntviz plot with the point picker enabled.
+_WIDGET_CLS = None
 
-    Read the captured points from any cell via `widget.points`
-    (list of ``{'x': int, 'y': int, 'label'?: str}`` dicts).
-    """
+_MISSING_WIDGET = (
+    "mntviz: o widget interativo (picker=...) precisa de anywidget e traitlets. "
+    "Instale com: pip install 'mntviz[widget]'"
+)
 
-    _esm = _build_esm()
 
-    func_name: str = traitlets.Unicode().tag(sync=True)
-    config: dict[str, Any] = traitlets.Dict().tag(sync=True)
-    points: list[dict[str, Any]] = traitlets.List(traitlets.Dict()).tag(sync=True)
-    height: int = traitlets.Int(500).tag(sync=True)
+def _widget_class():
+    """Cria (uma vez) a classe do widget; importa anywidget só aqui."""
+    global _WIDGET_CLS
+    if _WIDGET_CLS is not None:
+        return _WIDGET_CLS
+    try:
+        import anywidget
+        import traitlets
+    except ImportError as exc:  # extra [widget] ausente
+        raise ImportError(_MISSING_WIDGET) from exc
+
+    class PointPickerWidget(anywidget.AnyWidget):
+        """Anywidget wrapper around an mntviz plot with the point picker enabled.
+
+        Read the captured points from any cell via `widget.points`
+        (list of ``{'x': int, 'y': int, 'label'?: str}`` dicts).
+        """
+
+        _esm = _build_esm()
+
+        func_name = traitlets.Unicode().tag(sync=True)
+        config = traitlets.Dict().tag(sync=True)
+        points = traitlets.List(traitlets.Dict()).tag(sync=True)
+        height = traitlets.Int(500).tag(sync=True)
+
+    _WIDGET_CLS = PointPickerWidget
+    return _WIDGET_CLS
+
+
+def __getattr__(name: str):
+    # `from mntviz.picker import PointPickerWidget` continua valendo (import preguiçoso).
+    if name == "PointPickerWidget":
+        return _widget_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _normalize_picker(picker: Any) -> dict[str, Any]:
@@ -135,11 +164,11 @@ def build_picker_widget(
     picker: Any,
     height: int,
     initial_points: list[dict[str, Any]] | None = None,
-) -> PointPickerWidget:
+):
     """Construct the widget for a given plot function + config."""
     cfg = dict(config)
     cfg["picker"] = _normalize_picker(picker)
-    return PointPickerWidget(
+    return _widget_class()(
         func_name=func_name,
         config=cfg,
         points=list(initial_points or []),

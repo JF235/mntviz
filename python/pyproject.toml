@@ -20,6 +20,15 @@ dependencies = [
 dev = [
   "pytest>=8.0.0"
 ]
+# Widget interativo do picker (plot_*(picker=...)): pip install 'mntviz[widget]'
+widget = [
+  "anywidget>=0.9",
+  "traitlets>=5"
+]
+# Colormaps no servidor (plot_overlay, plot_huv, colormap= do plot_mnt_match)
+colors = [
+  "matplotlib>=3.7"
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
