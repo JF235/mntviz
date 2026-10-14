@@ -551,8 +551,9 @@ var FieldProbe = class {
   /**
    * @param {import('./viewer.js').Viewer} viewer
    */
-  constructor(viewer) {
+  constructor(viewer, options = {}) {
     this._viewer = viewer;
+    this._showCoords = !!options.showCoords;
     this._active = false;
     this._ac = null;
     this._rafPending = false;
@@ -631,6 +632,7 @@ var FieldProbe = class {
       return;
     }
     const lines = [];
+    if (this._showCoords) lines.push(`<span class="mntviz-probe-label">xy:</span> (${coords.x}, ${coords.y})`);
     for (const { name, overlay, opts } of this._viewer.getVisibleOverlays()) {
       const value = this._readValue(overlay, opts, coords.x, coords.y);
       if (value === null) continue;
@@ -922,7 +924,7 @@ var PointPicker = class {
     const thr = this._options.angleThreshold;
     const meta = {};
     if (distSq >= thr * thr) {
-      const ang = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+      const ang = (Math.atan2(-dy, dx) * 180 / Math.PI + 360) % 360;
       meta.angle = ang;
     }
     this.addPoint(start.x, start.y, meta);
@@ -964,7 +966,7 @@ var PointPicker = class {
       if (p.angle != null && Number.isFinite(p.angle)) {
         const rad = p.angle * Math.PI / 180;
         const x2 = p.x + Math.cos(rad) * segLen;
-        const y2 = p.y + Math.sin(rad) * segLen;
+        const y2 = p.y - Math.sin(rad) * segLen;
         const seg = document.createElementNS(SVG_NS3, "line");
         seg.setAttribute("x1", p.x);
         seg.setAttribute("y1", p.y);
@@ -12228,6 +12230,7 @@ function applyColormap(gray, width, height, cmapName, opts = {}) {
   const invert = !!opts.invert;
   const valueLUT = opts.valueLUT ?? null;
   const hideBg = opts.hideBg ?? true;
+  const bgThreshold = opts.bgThreshold ?? null;
   const n = width * height;
   const rgba = new Uint8ClampedArray(n * 4);
   let alphaLUT = null;
@@ -12241,7 +12244,11 @@ function applyColormap(gray, width, height, cmapName, opts = {}) {
     const stretched = valueLUT ? valueLUT[gray[i]] : gray[i];
     const v = invert ? 255 - stretched : stretched;
     const a = alphaArr ? alphaArr[i] : v;
-    if (hideBg && a === 0 && v === 0) continue;
+    if (bgThreshold !== null) {
+      if (bgThreshold >= 0 && v <= bgThreshold) continue;
+    } else if (hideBg && a === 0 && v === 0) {
+      continue;
+    }
     const li = v * 4;
     rgba[i * 4] = lut[li];
     rgba[i * 4 + 1] = lut[li + 1];
@@ -12274,6 +12281,7 @@ var OverlayLayer = class {
     this._fadeGamma = options.fadeGamma ?? 1;
     this._invert = !!options.invert;
     this._hideBg = options.hideBg ?? true;
+    this._bgThreshold = options.bgThreshold ?? null;
     this._autoStretch = !!options.autoStretch;
     this._stretchLow = options.stretchLow ?? 0.01;
     this._stretchHigh = options.stretchHigh ?? 0.99;
@@ -12396,6 +12404,19 @@ var OverlayLayer = class {
     const next = !!hide;
     if (next === this._hideBg) return;
     this._hideBg = next;
+    if (this._rawData) this._applyAndDraw();
+  }
+  /**
+   * Set the tunable background cutoff (byte units [0, 255]). Pixels with
+   * value <= threshold render transparent. Pass -1 to show everything, or
+   * null to fall back to the legacy byte-0 no-data sentinel (`hideBg`).
+   * Cheap — redraws from cached rawData, no re-fetch.
+   * @param {number|null} threshold
+   */
+  setBgThreshold(threshold) {
+    const next = threshold === null || threshold === void 0 ? null : Number(threshold);
+    if (next === this._bgThreshold) return;
+    this._bgThreshold = next;
     if (this._rawData) this._applyAndDraw();
   }
   /**
@@ -12579,7 +12600,8 @@ var OverlayLayer = class {
         fadeGamma: this._fadeGamma,
         invert: this._invert,
         valueLUT: this._stretchLUT,
-        hideBg: this._hideBg
+        hideBg: this._hideBg,
+        bgThreshold: this._bgThreshold
       }
     );
     const ctx = this._canvas.getContext("2d");
@@ -12762,6 +12784,7 @@ var UVFieldRenderer = class {
 var SVG_NS7 = "http://www.w3.org/2000/svg";
 var PATCH_NEIGHBOR_ALPHA = 0.4;
 var WHEEL_ROTATION_DEG_PER_TICK = 2;
+var MARKER_VISIBILITY = ["all", "paired", "none"];
 var DEFAULTS5 = {
   leftMinutiae: [],
   rightMinutiae: [],
@@ -12777,7 +12800,16 @@ var DEFAULTS5 = {
   segmentOptions: {},
   patchSize: 128,
   patchDisplaySize: 192,
-  showSegmentsOnLoad: false
+  showSegmentsOnLoad: false,
+  // Per-panel marker visibility: 'all' | 'paired' | 'none', or {left, right}.
+  // Connector lines are NOT affected — they are positioned from the minutiae
+  // data, not from the marker DOM, so lines without markers is a valid state.
+  markerVisibility: "all",
+  // Manual annotation hook. When set, called on every minutia-marker click as
+  // onMinutiaClick(side, index, minutia, event). Returning a truthy value
+  // suppresses the default paired-only popup behavior. Pairs can then be
+  // driven dynamically via setPairs() / getMarkerElement().
+  onMinutiaClick: null
 };
 var MatchViewer = class {
   /**
@@ -12799,10 +12831,12 @@ var MatchViewer = class {
     this._xMatchLine = null;
     this._leftGhostCursor = null;
     this._rightGhostCursor = null;
-    this._ghostSourceSide = null;
+    this._ghostSources = { left: false, right: false };
+    this._markerVis = _normalizeMarkerVisibility(this._options.markerVisibility);
     this._coupledActive = false;
     this._coupledAnchorSide = null;
     this._syncingCoupled = false;
+    this._warp = null;
     this._ac = new AbortController();
     this._buildDOM();
   }
@@ -12922,10 +12956,18 @@ var MatchViewer = class {
       this._toggleCoupled(this._contextMenuSide);
       this._hideContextMenu();
     });
+    this._contextMenuPointsBtn = _el2("button", "mntviz-context-menu-btn");
+    this._contextMenuPointsBtn.type = "button";
+    this._contextMenuPointsBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._cycleMarkerVisibility(this._contextMenuSide);
+      this._updateContextMenuButtons(this._contextMenuSide);
+    });
     this._contextMenu.append(
       this._contextMenuAlignBtn,
       this._contextMenuGhostBtn,
-      this._contextMenuCoupledBtn
+      this._contextMenuCoupledBtn,
+      this._contextMenuPointsBtn
     );
   }
   /* ── Public API ───────────────────────────────────────── */
@@ -12985,6 +13027,8 @@ var MatchViewer = class {
     this._rightGhostCursor = this._createGhostCursor(this._rightViewer.svgLayer);
     this._leftMntByPair = _indexMarkersByPair(this._leftViewer.svgLayer);
     this._rightMntByPair = _indexMarkersByPair(this._rightViewer.svgLayer);
+    this._leftMntByIndex = _indexMarkersByIndex(this._leftViewer.svgLayer);
+    this._rightMntByIndex = _indexMarkersByIndex(this._rightViewer.svgLayer);
     this._segTooltip = _el2("div", "mntviz-seg-tooltip");
     this._segTooltip.style.display = "none";
     this._container.appendChild(this._segTooltip);
@@ -12999,26 +13043,14 @@ var MatchViewer = class {
     this._segmentLines = [];
     this._segmentHitLines = [];
     for (let i = 0; i < opts.pairs.length; i++) {
-      const p = opts.pairs[i];
-      const line = document.createElementNS(SVG_NS7, "line");
-      line.classList.add("mntviz-match-segment");
-      line.setAttribute("stroke", p.color || opts.markerColor);
-      line.setAttribute("stroke-opacity", p.alpha != null ? p.alpha : 0.6);
-      line.setAttribute("stroke-width", p.width != null ? p.width : 1);
-      line.style.display = "none";
-      this._overlaySvg.appendChild(line);
-      this._segmentLines.push(line);
-      const hitLine = document.createElementNS(SVG_NS7, "line");
-      hitLine.classList.add("mntviz-match-segment-hitbox");
-      hitLine.dataset.pairIndex = String(i);
-      hitLine.style.display = "none";
-      this._overlaySvg.appendChild(hitLine);
-      this._segmentHitLines.push(hitLine);
+      this._buildPairSegment(opts.pairs[i], i);
     }
     this._bindEvents();
     if (this._allSegmentsVisible) {
       this._showAllSegments();
     }
+    this._applyMarkerVisibility("left");
+    this._applyMarkerVisibility("right");
   }
   /**
    * Serialize the full match view as a standalone SVG string.
@@ -13196,6 +13228,259 @@ var MatchViewer = class {
     if (this._rightViewer) this._rightViewer.destroy();
     this._el.innerHTML = "";
   }
+  /**
+   * Programmatically select a pair — same effect as clicking the matching
+   * minutia: highlights the connecting segment and opens the dual-patch
+   * popup. Unlike a direct click, the popup is centered on the midpoint
+   * of the connecting segment (between left and right minutiae).
+   * @param {number} pairIdx
+   */
+  selectPair(pairIdx) {
+    const pair = this._options.pairs[pairIdx];
+    if (!pair) return;
+    const leftM = this._options.leftMinutiae[pair.leftIdx];
+    const rightM = this._options.rightMinutiae[pair.rightIdx];
+    if (!leftM || !rightM) return;
+    let midX = 0, midY = 0, haveMid = false;
+    if (this._leftViewer && this._rightViewer && this._container) {
+      const lp = this._leftViewer.imageToElementCoords(leftM.x, leftM.y, this._container);
+      const rp = this._rightViewer.imageToElementCoords(rightM.x, rightM.y, this._container);
+      midX = (lp.x + rp.x) / 2;
+      midY = (lp.y + rp.y) / 2;
+      haveMid = true;
+    }
+    const cRect = this._container?.getBoundingClientRect();
+    const anchor = haveMid ? { clientX: cRect.left + midX, clientY: cRect.top + midY } : { clientX: 0, clientY: 0 };
+    this._showDualPatchPopup(leftM, rightM, pairIdx, anchor);
+    if (haveMid) {
+      requestAnimationFrame(() => {
+        const tipW = this._popup.offsetWidth;
+        const tipH = this._popup.offsetHeight;
+        const cR = this._container.getBoundingClientRect();
+        let left = midX - tipW / 2;
+        let top = midY - tipH / 2;
+        if (left < 5) left = 5;
+        if (left + tipW > cR.width - 5) left = cR.width - tipW - 5;
+        if (top < 5) top = 5;
+        if (top + tipH > cR.height - 5) top = cR.height - tipH - 5;
+        this._popup.style.left = `${left}px`;
+        this._popup.style.top = `${top}px`;
+      });
+    }
+  }
+  /* ── Manual annotation API ────────────────────────────── */
+  /**
+   * Return the minutia marker <g> element for a given side + index, or null.
+   * Useful for applying a transient highlight class (e.g. "armed").
+   * @param {'left'|'right'} side
+   * @param {number} index
+   * @returns {SVGGElement|null}
+   */
+  getMarkerElement(side, index) {
+    const map = side === "left" ? this._leftMntByIndex : this._rightMntByIndex;
+    return map && map.get(index) || null;
+  }
+  /**
+   * Update the right→left rigid transform used by ghost-cursor mapping and
+   * coupled panning. Pass {angle, tx, ty} (mntviz convention) or null to
+   * disable. If coupled mode is active, the follower panel is re-synced live
+   * — so callers can stream a freshly estimated transform as the user works.
+   * @param {{angle:number, tx:number, ty:number}|null} t
+   */
+  setMatchTransform(t) {
+    this._options.matchTransform = _isValidMatchTransform(t) ? { angle: t.angle, tx: t.tx, ty: t.ty } : null;
+    if (this._coupledActive && this._coupledAnchorSide) {
+      const follower = this._coupledAnchorSide === "left" ? "right" : "left";
+      this._applyCoupledFollower(follower);
+    }
+  }
+  /**
+   * Set the dominant rotation (degrees) used by the "Align" context action.
+   * @param {number|null} angle
+   */
+  setDominantAngle(angle) {
+    this._options.dominantAngle = Number.isFinite(angle) ? angle : null;
+  }
+  /**
+   * Install an elastic point-warp used by the ghost cursor instead of the
+   * rigid `matchTransform`. This maps a point in one panel's image coords to
+   * the other panel's — and, unlike the rigid transform, can interpolate
+   * marked correspondences exactly (e.g. MLS / TPS).
+   *
+   * Coupled panning and Align still use the rigid `matchTransform` /
+   * `dominantAngle` (they move a whole panel, which must stay rigid).
+   *
+   * @param {{rightToLeft:(x:number,y:number)=>{x:number,y:number},
+   *          leftToRight:(x:number,y:number)=>{x:number,y:number}}|null} warp
+   */
+  setWarp(warp) {
+    this._warp = warp && typeof warp.rightToLeft === "function" && typeof warp.leftToRight === "function" ? warp : null;
+  }
+  /**
+   * Snapshot the pan/zoom/rotation of both panels. Pair with setView() to
+   * preserve the framing across a rebuild (e.g. swapping the background image).
+   * @returns {{left:object|null, right:object|null}}
+   */
+  getView() {
+    const snap = (vw) => vw ? {
+      tx: vw.viewState.translateX,
+      ty: vw.viewState.translateY,
+      scale: vw.viewState.scale,
+      rotation: vw.viewState.rotation
+    } : null;
+    return { left: snap(this._leftViewer), right: snap(this._rightViewer) };
+  }
+  /**
+   * Restore a snapshot from getView() onto both panels. Assumes the images
+   * share dimensions with the snapshot (true for original↔enhanced of the
+   * same capture).
+   * @param {{left:object|null, right:object|null}} view
+   */
+  setView(view) {
+    const apply = (vw, s) => {
+      if (!vw || !s) return;
+      vw.setRotation(s.rotation);
+      vw.setScale(s.scale);
+      vw.setTranslate(s.tx, s.ty);
+    };
+    apply(this._leftViewer, view && view.left);
+    apply(this._rightViewer, view && view.right);
+    this._updateSegments();
+  }
+  /**
+   * Set which minutia markers a panel draws. **Connector lines are unaffected** —
+   * they are positioned from the minutiae data, so `'none'` gives lines over a
+   * clean image.
+   *
+   *   `'all'`     every marker (default)
+   *   `'paired'`  only markers a connector lands on — the decluttered middle state:
+   *               a dense panel drops to the endpoints you are actually reading,
+   *               keeping the ridges legible without losing the correspondences.
+   *   `'none'`    no markers.
+   *
+   * @param {'left'|'right'|'both'} side
+   * @param {'all'|'paired'|'none'} mode
+   */
+  setMarkerVisibility(side, mode) {
+    if (!MARKER_VISIBILITY.includes(mode)) {
+      throw new Error(`mntviz MatchViewer: bad marker visibility ${mode}`);
+    }
+    for (const s of side === "both" ? ["left", "right"] : [side]) {
+      if (s !== "left" && s !== "right") continue;
+      this._markerVis[s] = mode;
+      this._applyMarkerVisibility(s);
+    }
+  }
+  /** @returns {'all'|'paired'|'none'} current marker visibility of `side`. */
+  getMarkerVisibility(side) {
+    return this._markerVis[side === "right" ? "right" : "left"];
+  }
+  /**
+   * Show/hide all connector lines — the same state a double-click toggles, exposed
+   * so it can be driven from code. Orthogonal to `setMarkerVisibility`: markers and
+   * connectors are independent layers.
+   * @param {boolean} visible
+   */
+  setSegmentsVisible(visible) {
+    this._allSegmentsVisible = !!visible;
+    if (this._allSegmentsVisible) this._showAllSegments();
+    else this._hideAllSegments();
+  }
+  /** @returns {boolean} whether all connector lines are currently shown. */
+  getSegmentsVisible() {
+    return !!this._allSegmentsVisible;
+  }
+  /** all → paired → none → all. Skips 'paired' when there is nothing paired. */
+  _cycleMarkerVisibility(side) {
+    if (side !== "left" && side !== "right") return;
+    const order = this._options.pairs.length ? MARKER_VISIBILITY : ["all", "none"];
+    const i = order.indexOf(this._markerVis[side]);
+    this.setMarkerVisibility(side, order[(i + 1) % order.length]);
+  }
+  _applyMarkerVisibility(side) {
+    const viewer = side === "left" ? this._leftViewer : this._rightViewer;
+    if (!viewer) return;
+    const mode = this._markerVis[side];
+    let paired = null;
+    if (mode === "paired") {
+      const key = side === "left" ? "leftIdx" : "rightIdx";
+      paired = new Set(this._options.pairs.map((p) => p[key]));
+    }
+    for (const el of viewer.svgLayer.querySelectorAll(".mntviz-mnt-marker")) {
+      const m = minutiaDataMap.get(el);
+      const show = mode === "all" || mode === "paired" && m && paired.has(m._index);
+      el.style.display = show ? "" : "none";
+    }
+  }
+  /**
+   * Replace the full set of correspondences and rebuild segments + marker
+   * colors from scratch. Robust against arbitrary add/remove (no index-shift
+   * bookkeeping). Cheap for the small pair counts of manual annotation.
+   *
+   * Each pair: { leftIdx, rightIdx, color?, alpha?, width?, similarity? }.
+   * @param {Array<object>} pairs
+   */
+  setPairs(pairs) {
+    if (!this._leftViewer || !this._rightViewer) {
+      this._options.pairs = pairs.slice();
+      return;
+    }
+    for (const line of this._segmentLines) line.remove();
+    for (const hit of this._segmentHitLines) hit.remove();
+    this._segmentLines = [];
+    this._segmentHitLines = [];
+    this._activePopupPairIdx = -1;
+    this._resetAllMarkers();
+    this._options.pairs = pairs.slice();
+    for (let i = 0; i < pairs.length; i++) {
+      const p = pairs[i];
+      const color = p.color || this._options.markerColor;
+      this._applyMarkerPair("left", p.leftIdx, color, i);
+      this._applyMarkerPair("right", p.rightIdx, color, i);
+      this._buildPairSegment(p, i);
+    }
+    this._leftMntByPair = _indexMarkersByPair(this._leftViewer.svgLayer);
+    this._rightMntByPair = _indexMarkersByPair(this._rightViewer.svgLayer);
+    this._showAllSegments();
+    this._applyMarkerVisibility("left");
+    this._applyMarkerVisibility("right");
+  }
+  /** Reset marker color/opacity/_pairIndex to the unpaired neutral state. */
+  _resetAllMarkers() {
+    const reset = (map, viewerOpts) => {
+      if (!map) return;
+      for (const [, el] of map) {
+        const m = minutiaDataMap.get(el);
+        if (!m) continue;
+        const baseColor = m._baseColor || this._options.markerColor;
+        el.setAttribute("stroke", baseColor);
+        m._color = baseColor;
+        m._pairIndex = -1;
+      }
+    };
+    reset(this._leftMntByIndex);
+    reset(this._rightMntByIndex);
+    for (const m of this._options.leftMinutiae) m._pairIndex = -1;
+    for (const m of this._options.rightMinutiae) m._pairIndex = -1;
+  }
+  /** Color + tag a single marker (and its source minutia) for pair `pairIdx`. */
+  _applyMarkerPair(side, idx, color, pairIdx) {
+    const el = this.getMarkerElement(side, idx);
+    const srcArr = side === "left" ? this._options.leftMinutiae : this._options.rightMinutiae;
+    if (el) {
+      const m = minutiaDataMap.get(el);
+      if (m) {
+        if (m._baseColor == null) m._baseColor = m._color || this._options.markerColor;
+        el.setAttribute("stroke", color);
+        m._color = color;
+        m._pairIndex = pairIdx;
+      }
+    }
+    if (srcArr[idx]) {
+      srcArr[idx]._color = color;
+      srcArr[idx]._pairIndex = pairIdx;
+    }
+  }
   /* ── Event binding ────────────────────────────────────── */
   _bindEvents() {
     const sig = { signal: this._ac.signal };
@@ -13215,15 +13500,6 @@ var MatchViewer = class {
     this._container.addEventListener("mouseleave", () => {
       this._hideGhostCursor();
     }, sig);
-    for (const line of this._segmentHitLines) {
-      line.addEventListener("mouseover", (e) => this._onMatchLineHoverIn(e), sig);
-      line.addEventListener("mouseout", (e) => this._onMatchLineHoverOut(e), sig);
-      line.addEventListener("mousemove", (e) => this._onOverlayPointerMove(e), sig);
-      line.addEventListener("wheel", (e) => this._forwardToViewport(e), { passive: false, ...sig });
-      line.addEventListener("mousedown", (e) => this._forwardToViewport(e), sig);
-      line.addEventListener("dblclick", (e) => this._forwardToViewport(e), sig);
-      line.addEventListener("contextmenu", (e) => this._forwardToViewport(e), sig);
-    }
     this._leftViewer.viewport.addEventListener(
       "wheel",
       (e) => this._onWheelRotate(e, "left"),
@@ -13317,7 +13593,7 @@ var MatchViewer = class {
   }
   _onViewportPointerMove(e, side) {
     this._onHoverMove(e);
-    if (side === this._ghostSourceSide) {
+    if (side && this._ghostSources[side]) {
       this._updateGhostCursor(side, e);
     } else {
       this._hideGhostCursor();
@@ -13326,7 +13602,7 @@ var MatchViewer = class {
   _onOverlayPointerMove(e) {
     this._onHoverMove(e);
     const side = this._inferPointerSide(e.clientX, e.clientY);
-    if (side === this._ghostSourceSide) {
+    if (side && this._ghostSources[side]) {
       this._updateGhostCursor(side, e);
     } else {
       this._hideGhostCursor();
@@ -13472,6 +13748,11 @@ var MatchViewer = class {
     this._showGhostCursor(targetSide, mapped.x, mapped.y);
   }
   _mapMatchPoint(side, x, y) {
+    if (this._warp) {
+      const mapped = side === "right" ? this._warp.rightToLeft(x, y) : this._warp.leftToRight(x, y);
+      if (mapped && Number.isFinite(mapped.x) && Number.isFinite(mapped.y)) return mapped;
+      return null;
+    }
     const t = this._options.matchTransform;
     if (!t) return null;
     const angle = Number(t.angle);
@@ -13535,18 +13816,25 @@ var MatchViewer = class {
   }
   _updateContextMenuButtons(side) {
     if (this._contextMenuGhostBtn) {
-      const ghostOn = side != null && this._ghostSourceSide === side;
+      const ghostOn = side != null && this._ghostSources[side];
       this._contextMenuGhostBtn.textContent = `${ghostOn ? "\u2713 " : ""}Ghost`;
     }
     if (this._contextMenuCoupledBtn) {
       this._contextMenuCoupledBtn.textContent = `${this._coupledActive ? "\u2713 " : ""}Coupled`;
       this._contextMenuCoupledBtn.disabled = !_isValidMatchTransform(this._options.matchTransform);
     }
+    if (this._contextMenuPointsBtn) {
+      const mode = side != null ? this._markerVis[side] : "all";
+      const n = this._options.pairs.length;
+      const detail = mode === "paired" ? ` (${n})` : "";
+      this._contextMenuPointsBtn.textContent = `Points: ${mode}${detail}`;
+      this._contextMenuPointsBtn.disabled = side == null;
+    }
   }
   _toggleGhostSource(side) {
     if (side !== "left" && side !== "right") return;
-    this._ghostSourceSide = this._ghostSourceSide === side ? null : side;
-    this._hideGhostCursor();
+    this._ghostSources[side] = !this._ghostSources[side];
+    this._hideGhostCursor(side === "left" ? "right" : "left");
   }
   _toggleCoupled(side) {
     if (side !== "left" && side !== "right") return;
@@ -13677,6 +13965,10 @@ var MatchViewer = class {
       if (viewer._minutiaeInspector) {
         viewer._minutiaeInspector._collapse();
       }
+      if (this._options.onMinutiaClick) {
+        const handled = this._options.onMinutiaClick(side, m._index, m, e);
+        if (handled) return;
+      }
       this._onMarkerClick(side, m, e);
       return;
     }
@@ -13721,6 +14013,36 @@ var MatchViewer = class {
     this._showSegmentMetadataPopup(side, segment, event);
   }
   /* ── Segment management ───────────────────────────────── */
+  /**
+   * Create the (hidden) segment line + hitbox for pair `i` and append them
+   * to the overlay, wiring the hover/forwarding listeners. Pushes both into
+   * the parallel `_segmentLines` / `_segmentHitLines` arrays at index `i`.
+   */
+  _buildPairSegment(p, i) {
+    const sig = { signal: this._ac.signal };
+    const line = document.createElementNS(SVG_NS7, "line");
+    line.classList.add("mntviz-match-segment");
+    line.setAttribute("stroke", p.color || this._options.markerColor);
+    line.setAttribute("stroke-opacity", p.alpha != null ? p.alpha : 0.6);
+    line.setAttribute("stroke-width", p.width != null ? p.width : 1);
+    line.style.display = "none";
+    this._overlaySvg.appendChild(line);
+    this._segmentLines[i] = line;
+    const hitLine = document.createElementNS(SVG_NS7, "line");
+    hitLine.classList.add("mntviz-match-segment-hitbox");
+    hitLine.dataset.pairIndex = String(i);
+    hitLine.style.display = "none";
+    this._overlaySvg.appendChild(hitLine);
+    this._segmentHitLines[i] = hitLine;
+    hitLine.addEventListener("mouseover", (e) => this._onMatchLineHoverIn(e), sig);
+    hitLine.addEventListener("mouseout", (e) => this._onMatchLineHoverOut(e), sig);
+    hitLine.addEventListener("mousemove", (e) => this._onOverlayPointerMove(e), sig);
+    hitLine.addEventListener("wheel", (e) => this._forwardToViewport(e), { passive: false, ...sig });
+    hitLine.addEventListener("mousedown", (e) => this._forwardToViewport(e), sig);
+    hitLine.addEventListener("dblclick", (e) => this._forwardToViewport(e), sig);
+    hitLine.addEventListener("contextmenu", (e) => this._forwardToViewport(e), sig);
+    return line;
+  }
   _showSegment(idx) {
     if (this._segmentLines[idx]) {
       this._segmentLines[idx].style.display = "";
@@ -13969,6 +14291,10 @@ var MatchViewer = class {
     this._popup.style.display = "none";
   }
 };
+function _normalizeMarkerVisibility(v) {
+  const one = (x) => MARKER_VISIBILITY.includes(x) ? x : "all";
+  return typeof v === "string" ? { left: one(v), right: one(v) } : { left: one(v && v.left), right: one(v && v.right) };
+}
 function _el2(tag, className) {
   const el = document.createElement(tag);
   el.className = className;
@@ -14043,6 +14369,16 @@ function _indexMarkersByPair(svgLayer) {
     const m = minutiaDataMap.get(el);
     if (m && m._pairIndex != null && m._pairIndex >= 0) {
       map.set(m._pairIndex, el);
+    }
+  }
+  return map;
+}
+function _indexMarkersByIndex(svgLayer) {
+  const map = /* @__PURE__ */ new Map();
+  for (const el of svgLayer.querySelectorAll(".mntviz-mnt-marker")) {
+    const m = minutiaDataMap.get(el);
+    if (m && m._index != null) {
+      map.set(m._index, el);
     }
   }
   return map;
@@ -14469,6 +14805,9 @@ async function plotHuv(host, config) {
       insertBefore: viewer.svgLayer
     });
     await overlay.load(config.overlaySrc);
+    if (config.pixelated && overlay.setRenderMode) {
+      overlay.setRenderMode("pixelated");
+    }
     overlay.show();
   }
   if (config.arrows && config.arrows.length > 0) {
@@ -14581,7 +14920,8 @@ async function plotMatch(host, config) {
     markerColor: config.markerColor ?? "#00ff00",
     rendererOptions: config.rendererOptions ?? {},
     segmentOptions: config.segmentOptions ?? {},
-    showSegmentsOnLoad: config.showSegments ?? false
+    showSegmentsOnLoad: config.showSegments ?? false,
+    markerVisibility: config.markerVisibility ?? "all"
   });
   await mv.loadImages(config.leftImageSrc, config.rightImageSrc);
   return mv;

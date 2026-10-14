@@ -17,6 +17,8 @@ import { SegmentsRenderer, segmentDataMap } from './segments-renderer.js';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const PATCH_NEIGHBOR_ALPHA = 0.4;
 const WHEEL_ROTATION_DEG_PER_TICK = 2;
+/** Marker visibility states, in cycle order. */
+const MARKER_VISIBILITY = ['all', 'paired', 'none'];
 
 const DEFAULTS = {
     leftMinutiae: [],
@@ -34,6 +36,10 @@ const DEFAULTS = {
     patchSize: 128,
     patchDisplaySize: 192,
     showSegmentsOnLoad: false,
+    // Per-panel marker visibility: 'all' | 'paired' | 'none', or {left, right}.
+    // Connector lines are NOT affected — they are positioned from the minutiae
+    // data, not from the marker DOM, so lines without markers is a valid state.
+    markerVisibility: 'all',
     // Manual annotation hook. When set, called on every minutia-marker click as
     // onMinutiaClick(side, index, minutia, event). Returning a truthy value
     // suppresses the default paired-only popup behavior. Pairs can then be
@@ -65,6 +71,7 @@ export class MatchViewer {
         this._leftGhostCursor = null;
         this._rightGhostCursor = null;
         this._ghostSources = { left: false, right: false };
+        this._markerVis = _normalizeMarkerVisibility(this._options.markerVisibility);
         this._coupledActive = false;
         this._coupledAnchorSide = null;
         this._syncingCoupled = false;
@@ -223,10 +230,24 @@ export class MatchViewer {
             this._hideContextMenu();
         });
 
+        // Marker visibility cycles instead of toggling: the useful middle state is
+        // 'paired' (only markers that a connector actually lands on), which is what
+        // declutters a dense panel without leaving the lines floating. Unlike the
+        // other entries this one keeps the menu OPEN, so the three states can be
+        // cycled and compared in place.
+        this._contextMenuPointsBtn = _el('button', 'mntviz-context-menu-btn');
+        this._contextMenuPointsBtn.type = 'button';
+        this._contextMenuPointsBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._cycleMarkerVisibility(this._contextMenuSide);
+            this._updateContextMenuButtons(this._contextMenuSide);
+        });
+
         this._contextMenu.append(
             this._contextMenuAlignBtn,
             this._contextMenuGhostBtn,
             this._contextMenuCoupledBtn,
+            this._contextMenuPointsBtn,
         );
     }
 
@@ -337,6 +358,9 @@ export class MatchViewer {
         if (this._allSegmentsVisible) {
             this._showAllSegments();
         }
+
+        this._applyMarkerVisibility('left');
+        this._applyMarkerVisibility('right');
     }
 
     /**
@@ -696,6 +720,81 @@ export class MatchViewer {
     }
 
     /**
+     * Set which minutia markers a panel draws. **Connector lines are unaffected** —
+     * they are positioned from the minutiae data, so `'none'` gives lines over a
+     * clean image.
+     *
+     *   `'all'`     every marker (default)
+     *   `'paired'`  only markers a connector lands on — the decluttered middle state:
+     *               a dense panel drops to the endpoints you are actually reading,
+     *               keeping the ridges legible without losing the correspondences.
+     *   `'none'`    no markers.
+     *
+     * @param {'left'|'right'|'both'} side
+     * @param {'all'|'paired'|'none'} mode
+     */
+    setMarkerVisibility(side, mode) {
+        if (!MARKER_VISIBILITY.includes(mode)) {
+            throw new Error(`mntviz MatchViewer: bad marker visibility ${mode}`);
+        }
+        for (const s of side === 'both' ? ['left', 'right'] : [side]) {
+            if (s !== 'left' && s !== 'right') continue;
+            this._markerVis[s] = mode;
+            this._applyMarkerVisibility(s);
+        }
+    }
+
+    /** @returns {'all'|'paired'|'none'} current marker visibility of `side`. */
+    getMarkerVisibility(side) {
+        return this._markerVis[side === 'right' ? 'right' : 'left'];
+    }
+
+    /**
+     * Show/hide all connector lines — the same state a double-click toggles, exposed
+     * so it can be driven from code. Orthogonal to `setMarkerVisibility`: markers and
+     * connectors are independent layers.
+     * @param {boolean} visible
+     */
+    setSegmentsVisible(visible) {
+        this._allSegmentsVisible = !!visible;
+        if (this._allSegmentsVisible) this._showAllSegments();
+        else this._hideAllSegments();
+    }
+
+    /** @returns {boolean} whether all connector lines are currently shown. */
+    getSegmentsVisible() {
+        return !!this._allSegmentsVisible;
+    }
+
+    /** all → paired → none → all. Skips 'paired' when there is nothing paired. */
+    _cycleMarkerVisibility(side) {
+        if (side !== 'left' && side !== 'right') return;
+        const order = this._options.pairs.length ? MARKER_VISIBILITY : ['all', 'none'];
+        const i = order.indexOf(this._markerVis[side]);
+        this.setMarkerVisibility(side, order[(i + 1) % order.length]);
+    }
+
+    _applyMarkerVisibility(side) {
+        const viewer = side === 'left' ? this._leftViewer : this._rightViewer;
+        if (!viewer) return;                      // pre-loadImages: applied on load
+        const mode = this._markerVis[side];
+        // The paired set comes from `options.pairs`, NOT from the markers' `_pairIndex`:
+        // consumers that build pairs directly (without tagging the minutiae) still get
+        // the right answer, and it stays correct after setPairs().
+        let paired = null;
+        if (mode === 'paired') {
+            const key = side === 'left' ? 'leftIdx' : 'rightIdx';
+            paired = new Set(this._options.pairs.map((p) => p[key]));
+        }
+        for (const el of viewer.svgLayer.querySelectorAll('.mntviz-mnt-marker')) {
+            const m = minutiaDataMap.get(el);
+            const show = mode === 'all'
+                || (mode === 'paired' && m && paired.has(m._index));
+            el.style.display = show ? '' : 'none';
+        }
+    }
+
+    /**
      * Replace the full set of correspondences and rebuild segments + marker
      * colors from scratch. Robust against arbitrary add/remove (no index-shift
      * bookkeeping). Cheap for the small pair counts of manual annotation.
@@ -736,6 +835,10 @@ export class MatchViewer {
 
         // 5. Show all segments (manual mode wants them all visible).
         this._showAllSegments();
+
+        // 6. 'paired' is defined by the pair set, so it has to be recomputed here.
+        this._applyMarkerVisibility('left');
+        this._applyMarkerVisibility('right');
     }
 
     /** Reset marker color/opacity/_pairIndex to the unpaired neutral state. */
@@ -1193,6 +1296,13 @@ export class MatchViewer {
             this._contextMenuCoupledBtn.textContent =
                 `${this._coupledActive ? '\u2713 ' : ''}Coupled`;
             this._contextMenuCoupledBtn.disabled = !_isValidMatchTransform(this._options.matchTransform);
+        }
+        if (this._contextMenuPointsBtn) {
+            const mode = side != null ? this._markerVis[side] : 'all';
+            const n = this._options.pairs.length;
+            const detail = mode === 'paired' ? ` (${n})` : '';
+            this._contextMenuPointsBtn.textContent = `Points: ${mode}${detail}`;
+            this._contextMenuPointsBtn.disabled = side == null;
         }
     }
 
@@ -1782,6 +1892,14 @@ export class MatchViewer {
 }
 
 /* ── Helpers ────────────────────────────────────────────── */
+
+/** `'paired'` or `{left: 'none', right: 'all'}` → always a `{left, right}` pair. */
+function _normalizeMarkerVisibility(v) {
+    const one = (x) => (MARKER_VISIBILITY.includes(x) ? x : 'all');
+    return typeof v === 'string'
+        ? { left: one(v), right: one(v) }
+        : { left: one(v && v.left), right: one(v && v.right) };
+}
 
 function _el(tag, className) {
     const el = document.createElement(tag);

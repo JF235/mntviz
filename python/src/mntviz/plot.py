@@ -765,6 +765,11 @@ def plot_mnt_match(
     match_line_alpha: float | Sequence[float] = 0.6,
     match_line_width: float | Sequence[float] = 1.0,
     show_segments: bool = False,
+    # Which markers each panel draws: "all" | "paired" | "none", or a
+    # {"left": ..., "right": ...} dict for a per-panel initial state. Connector lines
+    # are unaffected, so "none" gives lines over a clean image. Also cyclable at
+    # runtime from the right-click menu of each panel.
+    marker_visibility: str | dict[str, str] = "all",
     # Labels
     left_labels: Sequence[str | int] | None = None,
     right_labels: Sequence[str | int] | None = None,
@@ -999,6 +1004,7 @@ def plot_mnt_match(
         "markerColor": fallback_color,
         "rendererOptions": renderer_options,
         "showSegments": show_segments,
+        "markerVisibility": marker_visibility,
         "leftTitle": left_title,
         "rightTitle": right_title,
     }

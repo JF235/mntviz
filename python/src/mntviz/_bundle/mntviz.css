@@ -47,6 +47,20 @@
     pointer-events: none;
 }
 
+/* Public render-mode classes for overlay canvases. The "pixelated" class is
+   the default chosen when ``OverlayLayer.setRenderMode('pixelated')`` is
+   called (e.g. from the Viewer page or from ``plotHuv`` when
+   ``config.pixelated`` is set). ``crisp-edges`` is the fallback for older
+   browsers that don't support ``pixelated``; modern browsers honour
+   ``pixelated``. */
+.mntviz-render-pixelated {
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+}
+.mntviz-render-interp {
+    image-rendering: auto;
+}
+
 /* ── SVG overlay (minutiae, UV arrows) ──────────────────── */
 
 .mntviz-mnt-layer {

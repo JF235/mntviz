@@ -637,6 +637,7 @@ export async function plotMatch(host, config) {
         rendererOptions: config.rendererOptions ?? {},
         segmentOptions: config.segmentOptions ?? {},
         showSegmentsOnLoad: config.showSegments ?? false,
+        markerVisibility: config.markerVisibility ?? 'all',
     });
     await mv.loadImages(config.leftImageSrc, config.rightImageSrc);
     return mv;

@@ -82,10 +82,36 @@ const mv = new MatchViewer('#viewer', {
   leftTitle: 'latent',
   rightTitle: 'reference',
   showSegmentsOnLoad: true,
+  markerVisibility: { left: 'paired', right: 'all' },   // per panel; see below
 });
 
 await mv.loadImages('/latent.png', '/reference.png');
 ```
+
+#### Marker visibility — two independent layers
+
+**Markers and connector lines are independent.** Connectors are positioned from the
+minutiae *data*, not from the marker DOM, so hiding markers leaves the lines intact —
+lines over a clean image is a valid state.
+
+Each panel has its own marker visibility, cyclable at runtime from that panel's
+**right-click menu** (`Points: all → paired → none`), or from code:
+
+```javascript
+mv.setMarkerVisibility('left', 'paired');   // 'left' | 'right' | 'both'
+mv.getMarkerVisibility('left');             // → 'paired'
+mv.setSegmentsVisible(false);               // the connectors (same state as double-click)
+```
+
+| mode | draws |
+|---|---|
+| `all` | every marker (default) |
+| `paired` | only markers a connector lands on — the decluttered middle state: a dense panel drops to the endpoints you are actually reading, while the ridges stay legible |
+| `none` | no markers |
+
+`paired` is derived from the current `pairs` array, so it stays correct after
+`setPairs()`. A panel showing fewer markers than there are pairs is not a bug — two
+pairs may share one endpoint.
 
 ### API Summary
 
