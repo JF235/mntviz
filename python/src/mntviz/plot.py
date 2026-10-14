@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 import base64
 import json
-import math
 import mimetypes
 from urllib.parse import quote
 import warnings
@@ -15,6 +14,8 @@ import io
 
 import numpy as np
 from PIL import Image
+
+from . import encode as _encode
 
 
 # ── Data loading helpers ─────────────────────────────────────
@@ -368,29 +369,20 @@ def _compute_uv_arrows(
     h_threshold: float,
     seg_base: float,
     seg_gain: float,
+    modulation: np.ndarray | None = None,
 ) -> list[list[float]]:
-    """Compute UV arrows as data: [[x, y, dx, dy, confidence], ...]."""
-    H_px, W_px = h.shape
-    h_max = float(h.max()) + 1e-8
-    h_norm = h / h_max
-    arrows: list[list[float]] = []
+    """Compute UV arrows as data: [[x, y, dx, dy, confidence(, mod)], ...].
 
-    for yi in range(0, H_px, stride):
-        for xi in range(0, W_px, stride):
-            conf = float(h_norm[yi, xi])
-            if conf < h_threshold:
-                continue
-            uu = float(u[yi, xi])
-            vv = float(v[yi, xi])
-            mag = math.hypot(uu, vv)
-            if mag < 1e-4:
-                continue
-            nx = uu / mag
-            ny = -(vv / mag)
-            seg_len = seg_base + seg_gain * (conf ** 2)
-            arrows.append([xi, yi, nx * seg_len, ny * seg_len, conf])
-
-    return arrows
+    Vetorizado em ``mntviz.encode.uv_arrows`` com ``compat="wrapper"``: os
+    mesmos números do laço antigo (normalização por ``max + 1e-8``, limiares
+    inclusivos, posições inteiras).
+    """
+    arr = _encode.uv_arrows(
+        h, u, v,
+        stride=stride, h_threshold=h_threshold, seg_base=seg_base, seg_gain=seg_gain,
+        modulation=modulation, compat="wrapper",
+    )
+    return _encode.arrows_to_list(arr, int_xy=True)
 
 
 # ── Bundle loading ───────────────────────────────────────────
@@ -1376,21 +1368,15 @@ def plot_huv(
         h_arr, h_cmap, vmin=0.0, vmax=None, alpha=h_alpha, alpha_modulated=True,
     )
 
+    # Modulation value (mod/max) goes as the 6th element of each arrow.
     arrows = _compute_uv_arrows(
         u_arr, v_arr, h_arr,
         stride=arrow_stride,
         h_threshold=h_threshold,
         seg_base=seg_base,
         seg_gain=seg_gain,
+        modulation=mod_arr,
     )
-
-    # Append modulation value as 6th element
-    if mod_arr is not None and arrows:
-        mod_max = float(mod_arr.max()) + 1e-8
-        stride = arrow_stride
-        for arrow in arrows:
-            xi, yi = int(arrow[0]), int(arrow[1])
-            arrow.append(float(mod_arr[yi, xi]) / mod_max)
 
     bg_src = bg_uri or _build_blank_background_data_uri(int(w), int(h_px))
 
