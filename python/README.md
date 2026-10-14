@@ -18,6 +18,10 @@ For colormap support, also install matplotlib:
 pip install matplotlib
 ```
 
+Extras opcionais: `pip install -e '.[widget]'` (anywidget e traitlets, para `picker=...`) e
+`pip install -e '.[colors]'` (matplotlib). Sem o extra `widget`, `import mntviz` funciona e só
+`PointPickerWidget`/`picker=` avisam com `ImportError`.
+
 ## Usage
 
 ```python
@@ -248,6 +252,40 @@ u = np.cos(np.random.rand(128, 128) * np.pi)
 v = np.sin(np.random.rand(128, 128) * np.pi)
 
 plot_huv(h, u, v, background_img="fingerprint.png", arrow_style="segment", output_format="jupyter")
+```
+
+### Colormap no cliente (`client_lut=True`)
+
+`plot_overlay(..., client_lut=True)` e `plot_huv(..., client_lut=True)` mandam o mapa no
+protocolo de fio (PNG cinza de `mntviz.encode`) e aplicam o colormap no navegador, sem
+matplotlib. O field probe lê o valor de cada pixel e o overlay entra na exportação SVG. O
+`cmap` precisa ser um dos colormaps do cliente (`mntviz.plot.CLIENT_COLORMAPS`).
+
+## `mntviz.encode` (protocolo de fio)
+
+Encoders vetorizados (numpy) do formato que o JS lê:
+
+| Função | Saída |
+| --- | --- |
+| `scalar_u8(v, normalize=False, valid=None, rounding="round")` | uint8: `round(v·254+1)`, 0 = sem dado (`v <= 0`, NaN, fora de `valid`) |
+| `scalar_png(v, ...)`, `png_bytes(u8)` | PNG de 1 canal para o `OverlayLayer` |
+| `decode_scalar(u8)` | float32 `(byte−1)/254`, NaN onde o byte é 0 |
+| `mtype_u8(h_end, h_bif)` | razão `H_end/(H_end+H_bif)` no mesmo formato |
+| `uv_arrows(h, u, v, stride=6, ...)` | setas `[x, y, dx, dy, conf]` do campo de direção |
+| `ori_arrows(ori_u, ori_v, stride=6)` | segmentos unitários da orientação (ângulo duplo) |
+| `sing_arrows(maps, stride=4)` | setas de `core_*`/`delta_*` |
+| `arrows_to_list(arr, int_xy=False)` | lista pronta para JSON |
+
+`rounding="floor"` reproduz a codificação por truncamento de servidores antigos;
+`uv_arrows(..., compat="wrapper")` reproduz bit a bit o laço que o `plot_huv` usava.
+
+```python
+import numpy as np
+from mntviz import encode
+
+d = np.load("mapas.npz")
+png = encode.scalar_png(d["quality"])                       # OverlayLayer(..., {colormap: 'RdYlGn'})
+setas = encode.arrows_to_list(encode.uv_arrows(d["H"], d["U"], d["V"], stride=6))   # UVFieldRenderer
 ```
 
 ## `MntVizFigure`

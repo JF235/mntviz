@@ -7,7 +7,7 @@
  *   await v.loadImage('/path/to/image.png');
  *   v.svgLayer; // SVG element for renderers
  *
- * Camadas, eventos e seleção (G2a):
+ * Camadas, eventos e seleção:
  *   const mnt = v.layers.add('minutiae', { kind: 'svg', z: 20 });   // grupo próprio
  *   new MinutiaeRenderer(mnt.el).draw(minutiae, '#0f0');             // clear() limpa só o grupo
  *   v.on('pointer', (p) => status(p.x, p.y));   // coordenadas da imagem, certas com rotação e espelho

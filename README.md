@@ -6,6 +6,7 @@ Visualization toolkit for fingerprint minutiae and related overlays.
 
 ```
 src/           JS runtime (Viewer, MinutiaeRenderer, Inspector, Overlay, UV, MatchViewer)
+  layer-stack.js  camadas do Viewer (viewer.layers); events.js: eventos e Selection
   plots.js     High-level facade (plotMinutiae, plotOverlay, plotHuv, plotMatch)
 widget/        Web Component (<mntviz-widget>) for drop-in HTML usage
 python/        Thin Python wrapper — data prep + config JSON, all rendering by JS
@@ -63,6 +64,10 @@ The Python package includes a pre-built bundle. To rebuild after editing JS:
 npm install    # first time only
 npm run build  # bundles src/plots.js → python/src/mntviz/_bundle/plots.bundle.js
 ```
+
+O bundle é sempre gerado no mesmo commit que o `src/` (esbuild 0.24.2). Sem node, o binário
+nativo do esbuild faz o mesmo, a partir da raiz do repositório:
+`esbuild src/plots.js --bundle --format=esm --outfile=python/src/mntviz/_bundle/plots.bundle.js && cp src/mntviz.css python/src/mntviz/_bundle/`.
 
 ## Documentation
 

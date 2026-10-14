@@ -20,8 +20,8 @@ viram operações de array. A semântica padrão é a do dashboard (o servidor);
 ``compat="wrapper"`` reproduz a do wrapper (normalização por ``max + 1e-8`` e
 limiares inclusivos), que o ``plot_huv`` usa para não mudar a saída.
 
-Só numpy (e Pillow para o PNG). O worker do muFIS usa o encoder próprio,
-``mufis/maps/encode.py``, que segue o mesmo protocolo.
+Só numpy (e Pillow para o PNG). Um servidor pode ter o próprio encoder, desde
+que siga o mesmo protocolo; este módulo serve de referência.
 """
 
 from __future__ import annotations

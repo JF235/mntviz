@@ -13,6 +13,9 @@ Detailed usage and API reference for the JavaScript runtime and Python wrapper.
 - `UVFieldRenderer` from `src/uv-renderer.js`
 - `OverlayLayer` from `src/overlay.js`
 - `plotHuvThumbnail` from `src/plots.js`
+- `LayerStack`, `Layer` from `src/layer-stack.js` (use `viewer.layers`)
+- `Emitter`, `Selection` from `src/events.js`
+- `singularityDataMap` from `src/singularity-renderer.js`
 
 Import through `src/index.js`:
 
@@ -113,6 +116,76 @@ mv.setSegmentsVisible(false);               // the connectors (same state as dou
 `setPairs()`. A panel showing fewer markers than there are pairs is not a bug — two
 pairs may share one endpoint.
 
+### Camadas, eventos e seleção
+
+Cada viewer tem uma pilha de camadas (`viewer.layers`). Uma camada tem nome, tipo, z,
+visibilidade e opacidade, e um elemento próprio dentro do container que o viewer transforma:
+pan, zoom, rotação e espelho valem para todas sem sincronização manual.
+
+```javascript
+const v = new Viewer('#viewer');
+await v.loadImage('/img/latente.png');
+
+const seg = v.layers.add('segments', { kind: 'svg', z: 10 });       // <g> próprio
+const mnt = v.layers.add('minutiae', { kind: 'svg', z: 20 });
+new SegmentsRenderer(seg).draw(minutiae, segmentos);
+const r = new MinutiaeRenderer(mnt);                                // aceita a camada
+r.draw(minutiae, '#00ff00');
+r.clear();                                                          // limpa só 'minutiae'
+
+v.layers.get('segments').hide();            // oculta: sai também da exportação SVG
+v.layers.get('minutiae').setOpacity(0.5);   // exporta como <g opacity="0.5">
+v.layers.get('minutiae').setZ(5);           // reordena
+
+const estado = v.layers.serialize();        // {version, layers: [{name, kind, z, visible, opacity}]}
+outroViewer.layers.restore(estado);         // cria as que faltam, aplica z/visível/opacidade
+```
+
+Tipos de camada:
+
+| `kind` | elemento | uso |
+| --- | --- | --- |
+| `svg` (padrão) | `<g class="mntviz-layer">` no SVG comum, acima de tudo | renderers |
+| `canvas` | `<canvas>` no tamanho natural da imagem, abaixo do SVG | raster desenhado pelo app (`layer.ctx`) |
+| `html` | `<div>` no tamanho natural da imagem, abaixo do SVG | hospedar um `OverlayLayer` ou DOM livre |
+
+Os renderers recebem uma camada, um elemento SVG ou o próprio `Viewer` (SVG comum, como
+antes). Num alvo próprio, `clear()` esvazia o alvo; no SVG comum, tira só o que aquele
+renderer desenhou. `viewer.clear()` mantém as camadas (vazias).
+
+Eventos do viewer (`on` devolve a função que cancela):
+
+```javascript
+v.on('pointer', (p) => status(`${p.px}, ${p.py}`));  // move|down|up|click|leave; x, y em coordenadas da imagem
+v.on('select', ({ items, added, removed, source }) => ...);
+v.on('change', (c) => ...);   // {source: 'layers'|'picker', type, ...}
+v.on('view', (s) => ...);     // {scale, translateX, translateY, rotation, flipX}
+```
+
+`p.target` traz o marcador sob o cursor (`{layer, kind: 'minutia'|'singularity', id, data}`).
+A seleção (`v.selection`) é uma `Selection`: `set`, `add`, `remove`, `toggle`, `clear`, com
+evento `change`. Para ligar viewers e tabelas, use a mesma instância:
+`v1.setSelection(sel); v2.setSelection(sel)`. Com `v.enableClickSelect()`, clicar num marcador
+seleciona (Shift alterna; clique no vazio limpa) e o marcador ganha a classe `mntviz-selected`.
+
+### Rotação, espelho e coordenadas
+
+```javascript
+v.rotate90();        // +90° (horário na tela); v.rotate90(-1) anti-horário
+v.setFlip(true);     // espelho horizontal, antes da rotação, em torno do centro da imagem
+v.fit();             // ajusta ao viewport mantendo rotação e espelho (resetView zera os dois)
+v.setView({ scale: 2, rotation: 90, flipX: false, translateX: 10, translateY: 0 });
+
+v.screenToImageCoords(e.clientX, e.clientY);   // tela → imagem (rotação e espelho incluídos)
+v.imageToScreenCoords(x, y);                   // imagem → tela
+v.viewMatrix();                                // DOMMatrix imagem → viewport
+```
+
+O `PointPicker`, o `FieldProbe` e o evento `pointer` usam essa mesma transformação, então
+acertam o ponto com a imagem girada ou espelhada. `exportSVGView()` sem rotação nem espelho
+usa um `viewBox` na região visível (coordenadas da imagem, como antes); com rotação ou espelho,
+gera um SVG do tamanho do viewport com a transformação viva num `<g>`.
+
 ### API Summary
 
 #### `Viewer(container, options?)`
@@ -132,6 +205,11 @@ Main members:
 - `destroy()`
 - `enableMinutiaeInspector(options?)`
 - `disableMinutiaeInspector()`
+- `layers` (`LayerStack`: `add`, `ensure`, `get`, `has`, `remove`, `list`, `clear`, `serialize`, `restore`)
+- `on(event, fn)`, `once`, `off` — eventos `pointer`, `select`, `change`, `view`
+- `selection`, `setSelection(sel)`, `enableClickSelect({multiKey})`, `refreshSelection()`, `itemFromElement(el)`
+- `rotate90(dir?)`, `setFlip(flipX)`, `toggleFlip()`, `flipX`, `fit()`, `getView()`, `setView(state)`
+- `screenToImageCoords(x, y)`, `imageToScreenCoords(x, y)`, `viewMatrix()`, `visibleRegion()`
 
 #### `MinutiaeRenderer(svgElement)`
 
