@@ -7,6 +7,9 @@ Visualization toolkit for fingerprint minutiae and related overlays.
 ```
 src/           JS runtime (Viewer, MinutiaeRenderer, Inspector, Overlay, UV, MatchViewer)
   layer-stack.js  camadas do Viewer (viewer.layers); events.js: eventos e Selection
+  feature-editor.js, correspondence-editor.js, image-adjust.js, measure.js,
+  registration.js, report-exporter.js, tools.js   editores e ferramentas de perito
+examples/      sd258/000 (latente, referência, minúcias, pares) e editor.html (demonstração)
   plots.js     High-level facade (plotMinutiae, plotOverlay, plotHuv, plotMatch)
 widget/        Web Component (<mntviz-widget>) for drop-in HTML usage
 python/        Thin Python wrapper — data prep + config JSON, all rendering by JS

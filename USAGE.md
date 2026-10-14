@@ -186,6 +186,103 @@ acertam o ponto com a imagem girada ou espelhada. `exportSVGView()` sem rotaçã
 usa um `viewBox` na região visível (coordenadas da imagem, como antes); com rotação ou espelho,
 gera um SVG do tamanho do viewport com a transformação viva num `<g>`.
 
+### Editores e ferramentas de perito
+
+Demonstração completa em `examples/editor.html` (exemplo SD258 000, latente e referência),
+com módulos ES de `src/` sem build: sirva a raiz do repositório por HTTP
+(`python -m http.server`) e abra `/examples/editor.html` (`?ppi=1000`, `?proc=1`).
+
+```javascript
+import { Viewer, ToolModes, FeatureEditor, ImageAdjust, CorrespondenceEditor,
+         Ruler, RidgeCount, ScaleBar, ReportExporter, GYRO } from './mntviz/index.js';
+
+const modes = new ToolModes();          // modo de tecla única, comum a ferramentas e viewers
+modes.bind();                           // keydown no window (campos de texto ficam de fora)
+modes.on('mode', ({ mode }) => status(mode));
+
+const adj = new ImageAdjust(v, { server: (ops, src) => `${src}?proc=clahe` });
+await adj.ready;
+adj.set([{ op: 'gamma', v: 0.85 }, { op: 'contrast', v: 1.3 }]);
+const estado = adj.serialize();         // {version, decode, ops}; adj.restore(estado)
+
+const ed = new FeatureEditor(v, { ppi: 500, layer: 'analise',
+    color: (f) => GYRO[f.confidence] });                 // regra de cor do host
+ed.setSuggestions(sugestoes, { source: { kind: 'algo', id: 'extrator-x' } });
+ed.on('change', ({ type, diff, features }) => salvar(features));
+modes.add(ed);
+
+const ce = new CorrespondenceEditor(vLat, vRef, { left: ed, right: edRef, host });
+modes.add(ce);
+const ruler = modes.add(new Ruler(v, { ppi: 500 }));
+const rc = modes.add(new RidgeCount(v, { ppi: 500, source: () => adj.basePixels() }));
+new ScaleBar(v, { ppi: 500 });
+
+const rep = new ReportExporter(v, { adjust: adj, tools: [ed, ce, ruler, rc], ppi: 500 });
+const png = await rep.exportPNG();      // tamanho natural da imagem
+const svg = await rep.exportSVG();      // com barra de escala, rótulo PROCESSADO e <metadata>
+const json = await rep.exportJSON();    // features, pares, medidas, realce, sha256 da imagem
+```
+
+**Modos e teclas** (`ToolModes`; o modo vai para a barra de status pelo evento `mode`):
+
+| Tecla | Modo / ação |
+|---|---|
+| `V` | ver: clique seleciona (Shift alterna); arrastar o centro move; a ponta gira θ; Alt+arrasto dá o raio de incerteza |
+| `M` | minúcia: clique cria, arrasto dá θ; `M` de novo alterna terminação ↔ bifurcação |
+| `C` / `D` | núcleo / delta (arrasto dá θ) |
+| `R` | ROI: cliques põem vértices; Enter ou clique no 1º vértice fecha; Backspace tira o último |
+| `L` / `Shift+L` | régua (mm pelo ppi) / contagem de cristas |
+| `P` | par: feature de um lado, depois a do outro; clique no vazio arma um ponto livre |
+| `1` `2` `3` | confiança G/Y/R (no modo `P`: `1`–`5` = tipo do par selecionado) |
+| `T` | alterna o tipo da seleção (no modo `P`: alternância da sobreposição) |
+| `A` / `Shift+A` / `X` | aceita a sugestão em foco / todas / rejeita |
+| `Del`, `Ctrl+Z`, `Ctrl+Shift+Z` | apaga; desfaz; refaz (no viewer em foco) |
+| `O`, `G` | (modo `P`) sobreposição off → rígida → MLS; cursor fantasma |
+| `Esc` | cancela a operação, limpa a seleção e, por fim, volta ao modo `V` |
+
+O botão do meio e a roda fazem pan e zoom em qualquer modo. Tudo é gravado em coordenadas
+da imagem e ângulo ISO (graus, anti-horário, 0° = +x, 90° = topo): rotação e espelho da vista
+não mudam o resultado. Os rótulos (números dos pares, medidas) ficam de pé e com tamanho fixo
+na tela; na exportação, vão na vista nativa.
+
+**FeatureEditor.** `toFeatures()` devolve `{ppi, minutiae: [{x, y, theta_deg_iso, type:
+ending|bifurcation|unknown, quality?, coord_unc?, theta_unc?, confidence: G|Y|R|O, phase}],
+cores, deltas, roi, frgp, absent, conventions: {angle: 'iso', coords: 'image'}}`.
+`serialize()`/`restore()` guardam o estado completo (ids, origem das sugestões aceitas).
+API: `add`, `move`, `rotate`, `remove`, `setType`, `cycleType`, `setConfidence`,
+`setUncertainty`, `setRoi`, `setMeta`, `select`, `accept`, `reject`, `focusNext`,
+`markNewAgainst(A0)` (laranja = sem correspondente na análise travada), `setPhase('comparison')`
+(marcas novas nascem `O`), `setReadOnly`, `undo`, `redo`. Eventos `change` (com `diff`),
+`select`, `focus`, `tool`.
+
+**ImageAdjust.** Pilha `levels {lo, hi}`, `brightness {v}`, `contrast {v}`, `gamma {v}`
+(`v^(1/g)`), `invert`, aplicada por LUT numa camada canvas acima do original (que não muda);
+`clahe {clip, tile}` vem do servidor (opção `server`). Por padrão (`decode: 'raw'`) os pixels
+são os valores do arquivo, sem gestão de cor: o navegador aplica o `gAMA` das PNG (as da SD258
+têm gAMA = 1,0 e aparecem mais claras) e, quando isso acontece (`colorManaged`), a camada
+mostra os valores do arquivo mesmo sem realce. `setBypass` = antes/depois; `label()` = texto
+do rótulo "processado".
+
+**CorrespondenceEditor.** Pares `{n, type, a, b}` com o mesmo número nos dois lados; tipos
+`definite`, `possible`, `does_not_exist`, `out_of_region`, `unclear_area`; pontas minúcia,
+núcleo, delta ou ponto livre. `toCorrespondence()` → `{pairs: [{i_probe, j_ref, type, n, kind,
+probe_xy, ref_xy}], transform: {angle, tx, ty}}` (rígido referência → latente:
+`x_l = cos·x_r + sin·y_r + tx`, `y_l = −sin·x_r + cos·y_r + ty`). Arquivos: `toMatchText()`
+(.match), `toCorrText(meta)` (#CORR v2: `KIND IDX_A IDX_B XA YA XB YB`) e `loadText(texto)`
+(detecta .match, #CORR ou a lista `i j` do exemplo); número e tipo vão em linhas `#PAIR N TYPE`.
+`rigid()`, `warp()` (MLS), `mapPoint`, `setOverlay('rigid'|'mls')`, `setFlicker`, `setGhost`,
+`setLines`.
+
+**registration.js.** `mlsRigid`, `buildWarp`, `estimateTransform` (mesma matemática do
+`matching.js` do dashboard), `estimateRigid` (com rms), `applyRigid`, `invertRigid`,
+`warpImage`.
+
+**Medidas.** `Ruler`: mm = px / ppi · 25,4 (`setPpi`). `RidgeCount`: perfil a cada 1 px
+(bilinear), suavização gaussiana (`sigma`), mínimos com proeminência (`minProminence`) longe
+das pontas (`exclude`); devolve `{count, minima, profile, smoothed}`. `ScaleBar`: barra de
+0,1 a 50 mm na tela. Funções puras: `ridgeProfile`, `smoothProfile`, `findRidges`,
+`mmFromPx`, `scaleBarSVG`.
+
 ### API Summary
 
 #### `Viewer(container, options?)`
