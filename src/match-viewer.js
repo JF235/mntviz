@@ -11,7 +11,7 @@
  */
 
 import { Viewer } from './viewer.js';
-import { MinutiaeRenderer, minutiaDataMap, createMarkerShape } from './minutiae-renderer.js';
+import { MinutiaeRenderer, minutiaDataMap, minutiaTextMap, createMarkerShape } from './minutiae-renderer.js';
 import { SegmentsRenderer, segmentDataMap } from './segments-renderer.js';
 import { escapeHtml as _escapeHtml } from './html-escape.js';
 
@@ -787,11 +787,18 @@ export class MatchViewer {
             const key = side === 'left' ? 'leftIdx' : 'rightIdx';
             paired = new Set(this._options.pairs.map((p) => p[key]));
         }
+        const shown = new Set();
         for (const el of viewer.svgLayer.querySelectorAll('.mntviz-mnt-marker')) {
             const m = minutiaDataMap.get(el);
             const show = mode === 'all'
                 || (mode === 'paired' && m && paired.has(m._index));
             el.style.display = show ? '' : 'none';
+            if (show && m) shown.add(m._index);
+        }
+        // The Q / angle / label texts are separate nodes: they follow their marker.
+        for (const t of viewer.svgLayer.querySelectorAll('text')) {
+            if (!minutiaTextMap.has(t)) continue;
+            t.style.display = mode === 'all' || shown.has(minutiaTextMap.get(t)) ? '' : 'none';
         }
     }
 

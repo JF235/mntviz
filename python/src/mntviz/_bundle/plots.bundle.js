@@ -25,6 +25,7 @@ function clearOwned(target, nodes, selector = null) {
 // src/minutiae-renderer.js
 var SVG_NS = "http://www.w3.org/2000/svg";
 var minutiaDataMap = /* @__PURE__ */ new WeakMap();
+var minutiaTextMap = /* @__PURE__ */ new WeakMap();
 var DEFAULTS = {
   markerSize: 2,
   lineWidth: 1,
@@ -138,6 +139,7 @@ var MinutiaeRenderer = class {
     for (const [index, m] of minutiae.entries()) {
       const { x, y, angle, quality } = m;
       const mntColor = m._color || color;
+      const mntIndex = m._index != null ? m._index : index;
       const mntShape = m._shape || markerShape;
       const mntSize = m._size != null ? m._size : markerSize;
       const sizeRatio = m._size != null ? mntSize / markerSize : 1;
@@ -153,7 +155,7 @@ var MinutiaeRenderer = class {
       mg.style.cursor = "crosshair";
       minutiaDataMap.set(mg, {
         ...m,
-        _index: m._index != null ? m._index : index,
+        _index: mntIndex,
         _color: mntColor,
         _shape: mntShape,
         _label: m._label || opts.label || null
@@ -190,6 +192,7 @@ var MinutiaeRenderer = class {
         qText.setAttribute("fill", mntColor);
         qText.setAttribute("font-size", `${qualityFontSize}px`);
         qText.textContent = `Q:${Math.round(quality)}`;
+        minutiaTextMap.set(qText, mntIndex);
         textGroup.appendChild(qText);
       }
       if (showAngles) {
@@ -200,6 +203,7 @@ var MinutiaeRenderer = class {
         aText.setAttribute("fill", mntColor);
         aText.setAttribute("font-size", `${angleFontSize}px`);
         aText.textContent = `${Math.round(angle)}\xB0`;
+        minutiaTextMap.set(aText, mntIndex);
         textGroup.appendChild(aText);
       }
       if (showLabels) {
@@ -212,6 +216,7 @@ var MinutiaeRenderer = class {
           lText.setAttribute("fill", mntColor);
           lText.setAttribute("font-size", `${labelFontSize}px`);
           lText.textContent = String(labelVal);
+          minutiaTextMap.set(lText, mntIndex);
           textGroup.appendChild(lText);
         }
       }
@@ -14477,10 +14482,16 @@ var MatchViewer = class {
       const key = side === "left" ? "leftIdx" : "rightIdx";
       paired = new Set(this._options.pairs.map((p) => p[key]));
     }
+    const shown = /* @__PURE__ */ new Set();
     for (const el of viewer.svgLayer.querySelectorAll(".mntviz-mnt-marker")) {
       const m = minutiaDataMap.get(el);
       const show = mode === "all" || mode === "paired" && m && paired.has(m._index);
       el.style.display = show ? "" : "none";
+      if (show && m) shown.add(m._index);
+    }
+    for (const t of viewer.svgLayer.querySelectorAll("text")) {
+      if (!minutiaTextMap.has(t)) continue;
+      t.style.display = mode === "all" || shown.has(minutiaTextMap.get(t)) ? "" : "none";
     }
   }
   /**

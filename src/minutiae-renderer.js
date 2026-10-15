@@ -14,6 +14,13 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 /** Maps each minutia SVG <g> element to its data object. */
 export const minutiaDataMap = new WeakMap();
 
+/**
+ * Maps each minutia text label (Q, angle, label) to the `_index` of its minutia, so the
+ * texts follow their marker when markers are hidden (a map, not an attribute: the SVG
+ * export stays the same).
+ */
+export const minutiaTextMap = new WeakMap();
+
 const DEFAULTS = {
     markerSize: 2,
     lineWidth: 1,
@@ -125,6 +132,7 @@ export class MinutiaeRenderer {
         for (const [index, m] of minutiae.entries()) {
             const { x, y, angle, quality } = m;
             const mntColor = m._color || color;
+            const mntIndex = m._index != null ? m._index : index;
             const mntShape = m._shape || markerShape;
             // Per-minutia `_size` scales the marker radius, direction line
             // length, and — by the same ratio — the stroke width, unless an
@@ -151,7 +159,7 @@ export class MinutiaeRenderer {
             mg.style.cursor = 'crosshair';
             minutiaDataMap.set(mg, {
                 ...m,
-                _index: m._index != null ? m._index : index,
+                _index: mntIndex,
                 _color: mntColor,
                 _shape: mntShape,
                 _label: m._label || opts.label || null,
@@ -204,6 +212,7 @@ export class MinutiaeRenderer {
                 qText.setAttribute('fill', mntColor);
                 qText.setAttribute('font-size', `${qualityFontSize}px`);
                 qText.textContent = `Q:${Math.round(quality)}`;
+                minutiaTextMap.set(qText, mntIndex);
                 textGroup.appendChild(qText);
             }
 
@@ -216,6 +225,7 @@ export class MinutiaeRenderer {
                 aText.setAttribute('fill', mntColor);
                 aText.setAttribute('font-size', `${angleFontSize}px`);
                 aText.textContent = `${Math.round(angle)}\u00B0`;
+                minutiaTextMap.set(aText, mntIndex);
                 textGroup.appendChild(aText);
             }
 
@@ -230,6 +240,7 @@ export class MinutiaeRenderer {
                     lText.setAttribute('fill', mntColor);
                     lText.setAttribute('font-size', `${labelFontSize}px`);
                     lText.textContent = String(labelVal);
+                    minutiaTextMap.set(lText, mntIndex);
                     textGroup.appendChild(lText);
                 }
             }
