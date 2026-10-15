@@ -1695,6 +1695,8 @@ var Viewer = class {
     this._pointerDown = null;
     this._clickSelect = null;
     this._imgWaiter = null;
+    this._tools = /* @__PURE__ */ new Set();
+    this._toolsExporting = false;
     this._buildDOM();
     this.layers = new LayerStack(this);
     this._selection = null;
@@ -2203,7 +2205,39 @@ var Viewer = class {
       scale: parseFloat(el.dataset.scale) || 1
     };
   }
+  /**
+   * Registra uma ferramenta que desenha sobre este viewer (editor, régua...) e tem
+   * beginExport()/endExport(): exportSVG() e downloadSVG() (o botão SVG) as põem em modo de
+   * exportação, com os rótulos e as alças na vista nativa. As ferramentas do mntviz se
+   * registram sozinhas; destroy() as tira.
+   */
+  registerTool(tool) {
+    if (tool) this._tools.add(tool);
+    return this;
+  }
+  unregisterTool(tool) {
+    this._tools.delete(tool);
+    return this;
+  }
+  /** @private Roda `fn` com as ferramentas registradas em modo de exportação (reentrante). */
+  _withToolsExporting(fn) {
+    const tools = this._toolsExporting ? [] : [...this._tools].filter((t) => typeof t.beginExport === "function");
+    if (!tools.length) return fn();
+    this._toolsExporting = true;
+    try {
+      for (const t of tools) t.beginExport();
+      return fn();
+    } finally {
+      for (const t of tools) if (typeof t.endExport === "function") t.endExport();
+      this._toolsExporting = false;
+    }
+  }
+  /** Serialize the whole image (native view) as SVG; registered tools draw in export mode. */
   exportSVG() {
+    return this._withToolsExporting(() => this._exportSVGNative());
+  }
+  /** @private */
+  _exportSVGNative() {
     const clone2 = this._svg.cloneNode(true);
     clone2.setAttribute("xmlns", SVG_NS6);
     clone2.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
@@ -15839,6 +15873,7 @@ var FeatureEditor = class extends Emitter {
     this._sg = svgEl("g", { class: "mntviz-fe mntviz-fe-suggestions" });
     this._layer.el.appendChild(this._g);
     this._sugLayer.el.appendChild(this._sg);
+    if (typeof viewer.registerTool === "function") viewer.registerTool(this);
     this._ac = new AbortController();
     const sig = { signal: this._ac.signal };
     const vp = viewer.viewport;
@@ -16330,6 +16365,7 @@ var FeatureEditor = class extends Emitter {
       cancelAnimationFrame(this._raf);
       this._raf = 0;
     }
+    if (typeof this.viewer.unregisterTool === "function") this.viewer.unregisterTool(this);
     this._ac.abort();
     this._offView();
     this._offSel();
@@ -17542,6 +17578,7 @@ var CorrespondenceEditor = class extends Emitter {
     this._layers = this.viewers.map((v) => v.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z }));
     this._g = this._layers.map((l) => svgEl("g", { class: "mntviz-ce" }, l.el));
     this._ovLayer = null;
+    for (const v of this.viewers) if (typeof v.registerTool === "function") v.registerTool(this);
     this._ac = new AbortController();
     const sig = { signal: this._ac.signal };
     this.viewers.forEach((v, side) => {
@@ -17951,6 +17988,7 @@ var CorrespondenceEditor = class extends Emitter {
   }
   destroy() {
     this._destroyed = true;
+    for (const v of this.viewers) if (typeof v.unregisterTool === "function") v.unregisterTool(this);
     this.setFlicker(false);
     this._ac.abort();
     for (const off of this._offs) off();
@@ -18638,6 +18676,7 @@ var Ruler = class extends Emitter {
     this._o = { ...RULER_DEFAULTS, ...opts };
     this._layer = viewer.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z });
     this._g = svgEl("g", { class: "mntviz-measure mntviz-ruler" }, this._layer.el);
+    if (typeof viewer.registerTool === "function") viewer.registerTool(this);
     this._items = [];
     this._drag = null;
     this._active = false;
@@ -18717,6 +18756,7 @@ var Ruler = class extends Emitter {
   }
   destroy() {
     this._destroyed = true;
+    if (typeof this.viewer.unregisterTool === "function") this.viewer.unregisterTool(this);
     this._ac.abort();
     this._offView();
     this._g.remove();
@@ -18798,6 +18838,7 @@ var RidgeCount = class extends Emitter {
     this._o = { ...RIDGE_DEFAULTS, ...opts };
     this._layer = viewer.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z });
     this._g = svgEl("g", { class: "mntviz-measure mntviz-ridgecount" }, this._layer.el);
+    if (typeof viewer.registerTool === "function") viewer.registerTool(this);
     this._items = [];
     this._drag = null;
     this._active = false;
@@ -18879,6 +18920,7 @@ var RidgeCount = class extends Emitter {
   }
   destroy() {
     this._destroyed = true;
+    if (typeof this.viewer.unregisterTool === "function") this.viewer.unregisterTool(this);
     this._ac.abort();
     this._offView();
     this._g.remove();

@@ -133,6 +133,7 @@ export class Ruler extends Emitter {
         this._o = { ...RULER_DEFAULTS, ...opts };
         this._layer = viewer.layers.ensure(this._o.layer, { kind: 'svg', z: this._o.z });
         this._g = svgEl('g', { class: 'mntviz-measure mntviz-ruler' }, this._layer.el);
+        if (typeof viewer.registerTool === 'function') viewer.registerTool(this);
         this._items = [];
         this._drag = null;
         this._active = false;
@@ -181,7 +182,11 @@ export class Ruler extends Emitter {
     beginExport() { this._exportMode = true; this.render(); }
     endExport() { this._exportMode = false; this.render(); }
 
-    destroy() { this._destroyed = true; this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners(); }
+    destroy() {
+        this._destroyed = true;
+        if (typeof this.viewer.unregisterTool === 'function') this.viewer.unregisterTool(this);
+        this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners();
+    }
 
     _measure(m) {
         const px = Math.hypot(m.x2 - m.x1, m.y2 - m.y1);
@@ -255,6 +260,7 @@ export class RidgeCount extends Emitter {
         this._o = { ...RIDGE_DEFAULTS, ...opts };
         this._layer = viewer.layers.ensure(this._o.layer, { kind: 'svg', z: this._o.z });
         this._g = svgEl('g', { class: 'mntviz-measure mntviz-ridgecount' }, this._layer.el);
+        if (typeof viewer.registerTool === 'function') viewer.registerTool(this);
         this._items = [];
         this._drag = null;
         this._active = false;
@@ -309,7 +315,11 @@ export class RidgeCount extends Emitter {
 
     beginExport() { this._exportMode = true; this.render(); }
     endExport() { this._exportMode = false; this.render(); }
-    destroy() { this._destroyed = true; this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners(); }
+    destroy() {
+        this._destroyed = true;
+        if (typeof this.viewer.unregisterTool === 'function') this.viewer.unregisterTool(this);
+        this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners();
+    }
 
     _pixels() {
         if (typeof this._o.source === 'function') {

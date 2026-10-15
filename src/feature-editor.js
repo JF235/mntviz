@@ -104,6 +104,7 @@ export class FeatureEditor extends Emitter {
         this._sg = svgEl('g', { class: 'mntviz-fe mntviz-fe-suggestions' });
         this._layer.el.appendChild(this._g);
         this._sugLayer.el.appendChild(this._sg);
+        if (typeof viewer.registerTool === 'function') viewer.registerTool(this);   // exportSVG usa beginExport/endExport
 
         this._ac = new AbortController();
         const sig = { signal: this._ac.signal };
@@ -495,6 +496,7 @@ export class FeatureEditor extends Emitter {
     destroy() {
         this._destroyed = true;
         if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+        if (typeof this.viewer.unregisterTool === 'function') this.viewer.unregisterTool(this);
         this._ac.abort();
         this._offView();
         this._offSel();

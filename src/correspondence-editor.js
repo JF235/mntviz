@@ -85,6 +85,7 @@ export class CorrespondenceEditor extends Emitter {
         this._layers = this.viewers.map(v => v.layers.ensure(this._o.layer, { kind: 'svg', z: this._o.z }));
         this._g = this._layers.map(l => svgEl('g', { class: 'mntviz-ce' }, l.el));
         this._ovLayer = null;
+        for (const v of this.viewers) if (typeof v.registerTool === 'function') v.registerTool(this);
         this._ac = new AbortController();
         const sig = { signal: this._ac.signal };
         this.viewers.forEach((v, side) => {
@@ -426,6 +427,7 @@ export class CorrespondenceEditor extends Emitter {
 
     destroy() {
         this._destroyed = true;   // um quadro já agendado não pode reanexar o grupo
+        for (const v of this.viewers) if (typeof v.unregisterTool === 'function') v.unregisterTool(this);
         this.setFlicker(false);
         this._ac.abort();
         for (const off of this._offs) off();

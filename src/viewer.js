@@ -63,6 +63,8 @@ export class Viewer {
         this._pointerDown = null;
         this._clickSelect = null;
         this._imgWaiter = null;
+        this._tools = new Set();      // ferramentas com beginExport/endExport (ver registerTool)
+        this._toolsExporting = false;
 
         this._buildDOM();
         /** Pilha de camadas (ver layer-stack.js). */
@@ -602,7 +604,36 @@ export class Viewer {
         };
     }
 
+    /**
+     * Registra uma ferramenta que desenha sobre este viewer (editor, régua...) e tem
+     * beginExport()/endExport(): exportSVG() e downloadSVG() (o botão SVG) as põem em modo de
+     * exportação, com os rótulos e as alças na vista nativa. As ferramentas do mntviz se
+     * registram sozinhas; destroy() as tira.
+     */
+    registerTool(tool) { if (tool) this._tools.add(tool); return this; }
+    unregisterTool(tool) { this._tools.delete(tool); return this; }
+
+    /** @private Roda `fn` com as ferramentas registradas em modo de exportação (reentrante). */
+    _withToolsExporting(fn) {
+        const tools = this._toolsExporting ? [] : [...this._tools].filter(t => typeof t.beginExport === 'function');
+        if (!tools.length) return fn();
+        this._toolsExporting = true;
+        try {
+            for (const t of tools) t.beginExport();
+            return fn();
+        } finally {
+            for (const t of tools) if (typeof t.endExport === 'function') t.endExport();
+            this._toolsExporting = false;
+        }
+    }
+
+    /** Serialize the whole image (native view) as SVG; registered tools draw in export mode. */
     exportSVG() {
+        return this._withToolsExporting(() => this._exportSVGNative());
+    }
+
+    /** @private */
+    _exportSVGNative() {
         const clone = this._svg.cloneNode(true);
         clone.setAttribute('xmlns', SVG_NS);
         clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
