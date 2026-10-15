@@ -537,14 +537,18 @@ class MntvizWidget extends HTMLElement {
             const layer = this._layers[i];
             const chip = document.createElement('div');
             chip.className = 'layer-chip';
+            // O nome vem do arquivo largado pelo usuário: textContent/title, nunca innerHTML.
             chip.innerHTML = `
-                <span class="layer-dot" style="background:${CSS.escape ? layer.color : layer.color}"></span>
-                <span class="layer-name" title="${layer.name}">${layer.name}</span>
-                <span class="layer-count">(${layer.minutiae.length})</span>
+                <span class="layer-dot"></span>
+                <span class="layer-name"></span>
+                <span class="layer-count"></span>
                 <span class="layer-remove" title="Remove layer">&times;</span>
             `;
-            // Sanitize the dot color separately
             chip.querySelector('.layer-dot').style.background = layer.color;
+            const nameEl = chip.querySelector('.layer-name');
+            nameEl.textContent = layer.name;
+            nameEl.title = layer.name;
+            chip.querySelector('.layer-count').textContent = `(${layer.minutiae.length})`;
 
             chip.querySelector('.layer-remove').addEventListener('click', () => {
                 this._layers.splice(i, 1);

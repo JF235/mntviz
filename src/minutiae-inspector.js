@@ -12,6 +12,7 @@
  */
 
 import { minutiaDataMap, createMarkerShape } from './minutiae-renderer.js';
+import { escapeHtml } from './html-escape.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -284,21 +285,22 @@ export class MinutiaeInspector {
 
     _updateFields(m) {
         const lines = [];
+        const color = escapeHtml(m._color || '#fff');
         if (m._pairIndex != null && m._pairIndex >= 0) {
-            lines.push(`<span>pair:</span> <b style="color:${m._color || '#fff'}">#${m._pairIndex}</b>`);
+            lines.push(`<span>pair:</span> <b style="color:${color}">#${escapeHtml(m._pairIndex)}</b>`);
         }
         if (m._index != null) {
-            lines.push(`<span>idx:</span> ${m._index}`);
+            lines.push(`<span>idx:</span> ${escapeHtml(m._index)}`);
         }
         if (m._label) {
-            lines.push(`<span>src:</span> <b style="color:${m._color || '#fff'}">${m._label}</b>`);
+            lines.push(`<span>src:</span> <b style="color:${color}">${escapeHtml(m._label)}</b>`);
         }
         lines.push(
             `<span>x:</span> ${Math.round(m.x)}  <span>y:</span> ${Math.round(m.y)}`,
             `<span>\u03b8:</span> ${Math.round(m.angle)}\u00b0  <span>Q:</span> ${Math.round(m.quality ?? 100)}`,
         );
         if (m.extra && m.extra.length) {
-            lines.push(`<span>extra:</span> ${m.extra.join(' ')}`);
+            lines.push(`<span>extra:</span> ${escapeHtml(m.extra.join(' '))}`);
         }
         this._fields.innerHTML = lines.join('<br>');
     }

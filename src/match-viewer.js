@@ -13,6 +13,7 @@
 import { Viewer } from './viewer.js';
 import { MinutiaeRenderer, minutiaDataMap, createMarkerShape } from './minutiae-renderer.js';
 import { SegmentsRenderer, segmentDataMap } from './segments-renderer.js';
+import { escapeHtml as _escapeHtml } from './html-escape.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const PATCH_NEIGHBOR_ALPHA = 0.4;
@@ -1104,9 +1105,9 @@ export class MatchViewer {
     _showSegTooltip(data, event) {
         const parts = [];
         if (data.pair_id != null) {
-            parts.push(`<span>pair:</span> <b style="color:${data.color || '#fff'}">#${data.pair_id}</b>`);
+            parts.push(`<span>pair:</span> <b style="color:${_escapeHtml(data.color || '#fff')}">#${_escapeHtml(data.pair_id)}</b>`);
         }
-        parts.push(`<span>m1:</span> ${data.m1}  <span>m2:</span> ${data.m2}`);
+        parts.push(`<span>m1:</span> ${_escapeHtml(data.m1)}  <span>m2:</span> ${_escapeHtml(data.m2)}`);
         parts.push(..._formatSegmentMetaLines(data.label, 'seg'));
         parts.push(..._formatSegmentMetaLines(data.info, 'info'));
         this._segTooltip.innerHTML = parts.join('<br>');
@@ -1118,8 +1119,8 @@ export class MatchViewer {
         const pair = this._options.pairs[pairIdx];
         if (!pair) return;
         const parts = [
-            `<span>pair:</span> <b style="color:${pair.color || '#fff'}">#${pairIdx}</b>`,
-            `<span>L idx:</span> ${pair.leftIdx}  <span>R idx:</span> ${pair.rightIdx}`,
+            `<span>pair:</span> <b style="color:${_escapeHtml(pair.color || '#fff')}">#${pairIdx}</b>`,
+            `<span>L idx:</span> ${_escapeHtml(pair.leftIdx)}  <span>R idx:</span> ${_escapeHtml(pair.rightIdx)}`,
         ];
         if (_isFiniteNumber(pair.similarity)) {
             parts.push(`<span>sim:</span> ${_fmtSimilarity(pair.similarity)}`);
@@ -1670,7 +1671,7 @@ export class MatchViewer {
         const pair = this._options.pairs[pairIdx];
         const color = pair.color || this._options.markerColor;
         const lines = [
-            `<span>pair:</span> <b style="color:${color}">#${pairIdx}</b>`,
+            `<span>pair:</span> <b style="color:${_escapeHtml(color)}">#${pairIdx}</b>`,
             `<span>L:</span> (${Math.round(leftM.x)}, ${Math.round(leftM.y)}, ${Math.round(leftM.angle)}\u00b0)`
             + `  <span>R:</span> (${Math.round(rightM.x)}, ${Math.round(rightM.y)}, ${Math.round(rightM.angle)}\u00b0)`,
         ];
@@ -1735,7 +1736,7 @@ export class MatchViewer {
         const lines = [];
 
         if (pairIdx != null && pairIdx >= 0) {
-            lines.push(`<span>pair:</span> <b style="color:${color}">#${pairIdx}</b>`);
+            lines.push(`<span>pair:</span> <b style="color:${_escapeHtml(color)}">#${pairIdx}</b>`);
         }
 
         if (leftSeg && rightSeg) {
@@ -1925,15 +1926,6 @@ function _fmtIndex(value) {
 
 function _fmtSimilarity(value, digits = 3) {
     return _isFiniteNumber(value) ? value.toFixed(digits) : '-';
-}
-
-function _escapeHtml(text) {
-    return String(text)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
 }
 
 function _normalizeSegmentMetaKey(key, fallback) {

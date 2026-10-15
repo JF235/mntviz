@@ -18,6 +18,8 @@
  *   viewer.enableFieldProbe();
  */
 
+import { escapeHtml } from './html-escape.js';
+
 export class FieldProbe {
     /**
      * @param {import('./viewer.js').Viewer} viewer
@@ -121,7 +123,8 @@ export class FieldProbe {
             const formatted = opts.valueMapper
                 ? opts.valueMapper(value)
                 : this._defaultFormat(value);
-            lines.push(`<span class="mntviz-probe-label">${name}:</span> ${formatted}`);
+            // o nome do overlay pode vir da configuração (config.overlayName): vai escapado
+            lines.push(`<span class="mntviz-probe-label">${escapeHtml(name)}:</span> ${formatted}`);
         }
 
         if (lines.length === 0) {

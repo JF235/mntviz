@@ -463,6 +463,19 @@ def _wrap_standalone(html_inline: str, title: str | None = None) -> str:
 """
 
 
+def _json_for_script(obj: Any) -> str:
+    """``json.dumps`` seguro para ir dentro de um ``<script>`` do HTML.
+
+    ``json.dumps`` já escapa U+2028/U+2029 (``ensure_ascii``), mas deixa ``</script>`` e ``<!--``
+    passarem: um título ou rótulo com ``</script><img onerror=...>`` fechava o script e rodava
+    HTML do dado. ``<``, ``>`` e ``&`` viram ``\\uXXXX``, que o JavaScript lê como o mesmo texto.
+    """
+    return (json.dumps(obj)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
+
+
 def _build_runtime_html(
     func_name: str,
     config: dict,
@@ -479,8 +492,8 @@ def _build_runtime_html(
     bundle_js = _load_plots_bundle()
     css = _load_bundle_css()
     root_id = f"mntviz-{uuid4().hex[:12]}"
-    config_json = json.dumps(config)
-    bundle_json = json.dumps(bundle_js)
+    config_json = _json_for_script(config)
+    bundle_json = _json_for_script(bundle_js)
 
     html_inline = f"""
 <style>

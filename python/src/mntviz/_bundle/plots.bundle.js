@@ -249,6 +249,12 @@ function parseMinutiaeText(text) {
   return result;
 }
 
+// src/html-escape.js
+var ENTITIES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function escapeHtml(text) {
+  return text == null ? "" : String(text).replace(/[&<>"']/g, (c) => ENTITIES[c]);
+}
+
 // src/minutiae-inspector.js
 var SVG_NS2 = "http://www.w3.org/2000/svg";
 var PATCH_MODE_NONE = "none";
@@ -473,21 +479,22 @@ var MinutiaeInspector = class {
   /* ── Fields ───────────────────────────────────────────── */
   _updateFields(m) {
     const lines = [];
+    const color = escapeHtml(m._color || "#fff");
     if (m._pairIndex != null && m._pairIndex >= 0) {
-      lines.push(`<span>pair:</span> <b style="color:${m._color || "#fff"}">#${m._pairIndex}</b>`);
+      lines.push(`<span>pair:</span> <b style="color:${color}">#${escapeHtml(m._pairIndex)}</b>`);
     }
     if (m._index != null) {
-      lines.push(`<span>idx:</span> ${m._index}`);
+      lines.push(`<span>idx:</span> ${escapeHtml(m._index)}`);
     }
     if (m._label) {
-      lines.push(`<span>src:</span> <b style="color:${m._color || "#fff"}">${m._label}</b>`);
+      lines.push(`<span>src:</span> <b style="color:${color}">${escapeHtml(m._label)}</b>`);
     }
     lines.push(
       `<span>x:</span> ${Math.round(m.x)}  <span>y:</span> ${Math.round(m.y)}`,
       `<span>\u03B8:</span> ${Math.round(m.angle)}\xB0  <span>Q:</span> ${Math.round(m.quality ?? 100)}`
     );
     if (m.extra && m.extra.length) {
-      lines.push(`<span>extra:</span> ${m.extra.join(" ")}`);
+      lines.push(`<span>extra:</span> ${escapeHtml(m.extra.join(" "))}`);
     }
     this._fields.innerHTML = lines.join("<br>");
   }
@@ -686,7 +693,7 @@ var FieldProbe = class {
       const value = this._readValue(overlay, opts, coords.x, coords.y);
       if (value === null) continue;
       const formatted = opts.valueMapper ? opts.valueMapper(value) : this._defaultFormat(value);
-      lines.push(`<span class="mntviz-probe-label">${name}:</span> ${formatted}`);
+      lines.push(`<span class="mntviz-probe-label">${escapeHtml(name)}:</span> ${formatted}`);
     }
     if (lines.length === 0) {
       this._hideOwn();
@@ -1614,7 +1621,7 @@ var SingularityRenderer = class {
       }
       sg.appendChild(visual);
       const angsStr = angles.map((a) => `${Math.round(a)}\xB0`).join(", ");
-      const html = `<span>${type.toUpperCase()}</span>  <span>x:</span> ${Math.round(x)}  <span>y:</span> ${Math.round(y)}<br><span>angle${angles.length > 1 ? "s" : ""}:</span> ${angsStr}<br><span>conf:</span> ${(conf * 100).toFixed(0)}`;
+      const html = `<span>${escapeHtml(String(type).toUpperCase())}</span>  <span>x:</span> ${Math.round(x)}  <span>y:</span> ${Math.round(y)}<br><span>angle${angles.length > 1 ? "s" : ""}:</span> ${angsStr}<br><span>conf:</span> ${(conf * 100).toFixed(0)}`;
       sg.addEventListener("mouseenter", () => {
         sg.classList.add("mntviz-mnt-highlighted");
         this._showTooltip(html, sg);
@@ -14729,9 +14736,9 @@ var MatchViewer = class {
   _showSegTooltip(data, event) {
     const parts = [];
     if (data.pair_id != null) {
-      parts.push(`<span>pair:</span> <b style="color:${data.color || "#fff"}">#${data.pair_id}</b>`);
+      parts.push(`<span>pair:</span> <b style="color:${escapeHtml(data.color || "#fff")}">#${escapeHtml(data.pair_id)}</b>`);
     }
-    parts.push(`<span>m1:</span> ${data.m1}  <span>m2:</span> ${data.m2}`);
+    parts.push(`<span>m1:</span> ${escapeHtml(data.m1)}  <span>m2:</span> ${escapeHtml(data.m2)}`);
     parts.push(..._formatSegmentMetaLines(data.label, "seg"));
     parts.push(..._formatSegmentMetaLines(data.info, "info"));
     this._segTooltip.innerHTML = parts.join("<br>");
@@ -14742,8 +14749,8 @@ var MatchViewer = class {
     const pair = this._options.pairs[pairIdx];
     if (!pair) return;
     const parts = [
-      `<span>pair:</span> <b style="color:${pair.color || "#fff"}">#${pairIdx}</b>`,
-      `<span>L idx:</span> ${pair.leftIdx}  <span>R idx:</span> ${pair.rightIdx}`
+      `<span>pair:</span> <b style="color:${escapeHtml(pair.color || "#fff")}">#${pairIdx}</b>`,
+      `<span>L idx:</span> ${escapeHtml(pair.leftIdx)}  <span>R idx:</span> ${escapeHtml(pair.rightIdx)}`
     ];
     if (_isFiniteNumber(pair.similarity)) {
       parts.push(`<span>sim:</span> ${_fmtSimilarity(pair.similarity)}`);
@@ -15190,7 +15197,7 @@ var MatchViewer = class {
     const pair = this._options.pairs[pairIdx];
     const color = pair.color || this._options.markerColor;
     const lines = [
-      `<span>pair:</span> <b style="color:${color}">#${pairIdx}</b>`,
+      `<span>pair:</span> <b style="color:${escapeHtml(color)}">#${pairIdx}</b>`,
       `<span>L:</span> (${Math.round(leftM.x)}, ${Math.round(leftM.y)}, ${Math.round(leftM.angle)}\xB0)  <span>R:</span> (${Math.round(rightM.x)}, ${Math.round(rightM.y)}, ${Math.round(rightM.angle)}\xB0)`
     ];
     if (_isFiniteNumber(pair.similarity)) {
@@ -15234,7 +15241,7 @@ var MatchViewer = class {
     const meta = leftSeg || rightSeg || segment;
     const lines = [];
     if (pairIdx != null && pairIdx >= 0) {
-      lines.push(`<span>pair:</span> <b style="color:${color}">#${pairIdx}</b>`);
+      lines.push(`<span>pair:</span> <b style="color:${escapeHtml(color)}">#${pairIdx}</b>`);
     }
     if (leftSeg && rightSeg) {
       lines.push(`<span>L seg:</span> ${_fmtIndex(leftSeg.idx)}  <span>R seg:</span> ${_fmtIndex(rightSeg.idx)}`);
@@ -15379,9 +15386,6 @@ function _fmtIndex(value) {
 function _fmtSimilarity(value, digits = 3) {
   return _isFiniteNumber(value) ? value.toFixed(digits) : "-";
 }
-function _escapeHtml(text) {
-  return String(text).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
 function _normalizeSegmentMetaKey(key, fallback) {
   const normalized = String(key).trim().toLowerCase().replaceAll("\u03B1\u2081", "a1").replaceAll("\u03B1\u2082", "a2").replaceAll("\u03B11", "a1").replaceAll("\u03B12", "a2");
   return normalized || fallback;
@@ -15395,7 +15399,7 @@ function _formatSegmentMetaLines(raw, fallbackKey) {
   for (const chunk of chunks.length ? chunks : [text]) {
     const segMatch = chunk.match(/^seg\s*#\s*(\d+)$/i);
     if (segMatch) {
-      lines.push(`<span>seg:</span> #${_escapeHtml(segMatch[1])}`);
+      lines.push(`<span>seg:</span> #${escapeHtml(segMatch[1])}`);
       continue;
     }
     const kvMatches = Array.from(
@@ -15404,11 +15408,11 @@ function _formatSegmentMetaLines(raw, fallbackKey) {
     if (kvMatches.length) {
       for (const [, rawKey, rawValue] of kvMatches) {
         const key = _normalizeSegmentMetaKey(rawKey, fallbackKey);
-        lines.push(`<span>${_escapeHtml(key)}:</span> ${_escapeHtml(rawValue.trim())}`);
+        lines.push(`<span>${escapeHtml(key)}:</span> ${escapeHtml(rawValue.trim())}`);
       }
       continue;
     }
-    lines.push(`<span>${_escapeHtml(fallbackKey)}:</span> ${_escapeHtml(chunk)}`);
+    lines.push(`<span>${escapeHtml(fallbackKey)}:</span> ${escapeHtml(chunk)}`);
   }
   return lines;
 }

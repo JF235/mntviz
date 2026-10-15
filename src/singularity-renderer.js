@@ -10,6 +10,7 @@
 
 import { createMarkerShape } from './minutiae-renderer.js';
 import { resolveTarget, clearOwned } from './render-target.js';
+import { escapeHtml } from './html-escape.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -160,7 +161,7 @@ export class SingularityRenderer {
             // minutiae use on hover.
             const angsStr = angles.map(a => `${Math.round(a)}°`).join(', ');
             const html =
-                `<span>${type.toUpperCase()}</span>  ` +
+                `<span>${escapeHtml(String(type).toUpperCase())}</span>  ` +
                 `<span>x:</span> ${Math.round(x)}  <span>y:</span> ${Math.round(y)}<br>` +
                 `<span>angle${angles.length > 1 ? 's' : ''}:</span> ${angsStr}<br>` +
                 `<span>conf:</span> ${(conf * 100).toFixed(0)}`;
