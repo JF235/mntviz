@@ -11,8 +11,10 @@ O protocolo é o que o JS do mntviz lê (``OverlayLayer``, ``FieldProbe``,
 * **Setas**: lista ``[x, y, dx, dy, conf(, mod)]`` em coordenadas da imagem
   (y para baixo). Direção de minúcia: ``(u, −v)/|uv|`` com comprimento
   ``seg_base + seg_gain·conf²``.
-* **Orientação**: ângulo duplo, ``θ = atan2(v, u)/2``; seta unitária
-  ``(cos θ, sin θ)`` e ``conf = min(|uv|, 1)``.
+* **Orientação**: ângulo duplo, ``θ = atan2(v, u)/2``; seta unitária e
+  ``conf = min(|uv|, 1)``. O referencial de ``ori_u/ori_v`` é um parâmetro
+  (``convention``): ``"image"`` (padrão, y para baixo, seta ``(cos θ, sin θ)``) ou
+  ``"iso"`` (y para cima, seta ``(cos θ, −sin θ)``, como ``uv_arrows``).
 
 Os laços Python dos dois encoders que existiam (``_compute_uv_arrows`` do
 wrapper e ``render_uv_arrows``/``render_ori_arrows``/... do stitch-dashboard)
@@ -254,12 +256,26 @@ def ori_arrows(
     stride: int = 6,
     mag_threshold: float = 1e-4,
     output_size: Sequence[int] | None = None,
+    convention: str = "image",
 ) -> np.ndarray:
     """Orientação em ângulo duplo (ori_u, ori_v) → segmentos unitários ``(N, 5)``.
 
-    ``θ = atan2(v, u)/2``, seta ``(cos θ, sin θ)``, ``conf = min(|uv|, 1)``;
-    células com ``|uv| < mag_threshold`` saem (como no dashboard).
+    ``θ = atan2(v, u)/2``, ``conf = min(|uv|, 1)``; células com ``|uv| < mag_threshold``
+    saem. As setas vão em coordenadas da imagem (y para baixo); o que muda com
+    ``convention`` é o referencial em que ``ori_u/ori_v`` foram escritos:
+
+    * ``"image"`` (padrão): θ medido na própria imagem, y para baixo. É o dos mapas
+      ``ori_u/ori_v`` do mntstitch (conferido com o gradiente da imagem num exemplo da SD258:
+      correlação média de cos 2Δθ de 0,78 contra 0,16 no outro referencial). Seta
+      ``(cos θ, sin θ)``.
+    * ``"iso"``: θ ISO, anti-horário com y para cima, como a direção das minúcias em
+      ``uv_arrows`` e ``sing_arrows`` (que negam v). Seta ``(cos θ, −sin θ)``: um campo
+      de 30° ISO é desenhado a 30° no sentido anti-horário na tela, não a −30°.
+
+    Dados escritos em y para cima passados como ``"image"`` saem espelhados na vertical.
     """
+    if convention not in ("image", "iso"):
+        raise ValueError("convention must be 'image' or 'iso'")
     u_a, v_a = np.asarray(ori_u), np.asarray(ori_v)
     if u_a.shape != v_a.shape or u_a.ndim != 2:
         raise ValueError(f"ori_u, ori_v must be 2D with the same shape: {u_a.shape}, {v_a.shape}")
@@ -271,11 +287,12 @@ def ori_arrows(
     keep = ~(mag < mag_threshold)
     theta = np.arctan2(vv[keep], uu[keep]) / 2.0
     sx, sy = _scales(u_a.shape, output_size)
+    dy = np.sin(theta) if convention == "image" else -np.sin(theta)
     cols = [
         xs[keep] * sx,
         ys[keep] * sy,
         np.cos(theta),
-        np.sin(theta),
+        dy,
         np.minimum(mag[keep], 1.0),
     ]
     return np.stack(cols, axis=1) if theta.size else np.zeros((0, 5))

@@ -272,7 +272,7 @@ Encoders vetorizados (numpy) do formato que o JS lê:
 | `decode_scalar(u8)` | float32 `(byte−1)/254`, NaN onde o byte é 0 |
 | `mtype_u8(h_end, h_bif)` | razão `H_end/(H_end+H_bif)` no mesmo formato |
 | `uv_arrows(h, u, v, stride=6, ...)` | setas `[x, y, dx, dy, conf]` do campo de direção |
-| `ori_arrows(ori_u, ori_v, stride=6)` | segmentos unitários da orientação (ângulo duplo) |
+| `ori_arrows(ori_u, ori_v, stride=6, convention="image")` | segmentos unitários da orientação (ângulo duplo); `convention="iso"` para `ori_u/ori_v` em y para cima |
 | `sing_arrows(maps, stride=4)` | setas de `core_*`/`delta_*` |
 | `arrows_to_list(arr, int_xy=False)` | lista pronta para JSON |
 
