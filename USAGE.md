@@ -252,8 +252,9 @@ cores, deltas, roi, frgp, absent, conventions: {angle: 'iso', coords: 'image'}}`
 API: `add`, `move`, `rotate`, `remove`, `setType`, `cycleType`, `setConfidence`,
 `setUncertainty`, `setRoi`, `setMeta`, `select`, `accept`, `reject`, `focusNext`,
 `markNewAgainst(A0)` (laranja = sem correspondente na análise travada), `setPhase('comparison')`
-(marcas novas nascem `O`), `setReadOnly`, `undo`, `redo`. Eventos `change` (com `diff`),
-`select`, `focus`, `tool`.
+(marcas novas nascem `O`), `setReadOnly` (trava também `undo`/`redo`), `undo`, `redo`.
+Eventos `change` (com `diff`), `select`, `focus`, `tool`. `destroy()` cancela o quadro
+pendente e tira o editor do `viewer.registerTool` (ver `exportSVG` abaixo).
 
 **ImageAdjust.** Pilha `levels {lo, hi}`, `brightness {v}`, `contrast {v}`, `gamma {v}`
 (`v^(1/g)`), `invert`, aplicada por LUT numa camada canvas acima do original (que não muda);
@@ -261,7 +262,11 @@ API: `add`, `move`, `rotate`, `remove`, `setType`, `cycleType`, `setConfidence`,
 são os valores do arquivo, sem gestão de cor: o navegador aplica o `gAMA` das PNG (as da SD258
 têm gAMA = 1,0 e aparecem mais claras) e, quando isso acontece (`colorManaged`), a camada
 mostra os valores do arquivo mesmo sem realce. `setBypass` = antes/depois; `label()` = texto
-do rótulo "processado".
+do rótulo "processado" da pilha; `effective()` = o que está desenhado agora
+(`{identity, label, ops, bypass, reasons}`: sem as operações de um bypass ou de um servidor que
+falhou), que é o que o `ReportExporter` rotula e grava (`processed`, `label` e
+`adjust_effective` no JSON). `viewer.loadImage` só resolve depois do `load` do `<img>`;
+`await adj.ready` antes de ler `pixels()` / `basePixels()` (null enquanto a imagem trocada não foi lida).
 
 **CorrespondenceEditor.** Pares `{n, type, a, b}` com o mesmo número nos dois lados; tipos
 `definite`, `possible`, `does_not_exist`, `out_of_region`, `unclear_area`; pontas minúcia,
@@ -271,15 +276,21 @@ probe_xy, ref_xy}], transform: {angle, tx, ty}}` (rígido referência → latent
 (.match), `toCorrText(meta)` (#CORR v2: `KIND IDX_A IDX_B XA YA XB YB`) e `loadText(texto)`
 (detecta .match, #CORR ou a lista `i j` do exemplo); número e tipo vão em linhas `#PAIR N TYPE`.
 `rigid()`, `warp()` (MLS), `mapPoint`, `setOverlay('rigid'|'mls')`, `setFlicker`, `setGhost`,
-`setLines`.
+`setLines`. `toJSON()`/`fromJSON(estado, {tol = 2})`: o `ref` salvo é um id interno do
+`FeatureEditor` (renumerado quando as features são recarregadas), então só vale se a feature
+ainda está onde a ponta foi salva; senão volta pelo índice entre as minúcias e pela posição.
+Uma ponta cuja feature foi apagada fica `missing` (`pairs[i].missing`, `missingPairs`): o par
+continua na lista, mas fora do ajuste, da sobreposição e de `toCorrespondence`/`toMatchText`/
+`toCorrText`; `removeMissing()` o apaga num passo desfazível.
 
 **registration.js.** `mlsRigid`, `buildWarp`, `estimateTransform` (ajuste rígido por
 mínimos quadrados, direita → esquerda), `estimateRigid` (com rms), `applyRigid`, `invertRigid`,
 `warpImage`.
 
 **Medidas.** `Ruler`: mm = px / ppi · 25,4 (`setPpi`). `RidgeCount`: perfil a cada 1 px
-(bilinear), suavização gaussiana (`sigma`), mínimos com proeminência (`minProminence`) longe
-das pontas (`exclude`); devolve `{count, minima, profile, smoothed}`. `ScaleBar`: barra de
+(bilinear), suavização gaussiana (`sigma`), mínimos com proeminência no padrão do
+`scipy.signal.peak_prominences` (`minProminence`), longe das pontas (`exclude`); mínimos a menos
+de `minSeparation` amostras (padrão: 0,35 do período) valem uma crista só; devolve `{count, minima, profile, smoothed}`. `ScaleBar`: barra de
 0,1 a 50 mm na tela. Funções puras: `ridgeProfile`, `smoothProfile`, `findRidges`,
 `mmFromPx`, `scaleBarSVG`.
 
@@ -295,7 +306,8 @@ Main members:
 - `svgLayer`
 - `canvasContainer`
 - `imageSize`
-- `loadImage(src)`
+- `loadImage(src)` — resolves after the `<img>` fired its own `load`
+- `registerTool(tool)` / `unregisterTool(tool)` — tools with `beginExport()`/`endExport()` that `exportSVG()` / `downloadSVG()` put in export mode (the mntviz editors and measure tools register themselves)
 - `setViewportSize(width, height)` — set a virtual canvas size without loading an image (useful for minutiae-only views)
 - `clear()`
 - `resetView()`
