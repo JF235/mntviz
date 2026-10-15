@@ -80,7 +80,9 @@ def _to_u8(t: np.ndarray, rounding: str) -> np.ndarray:
         t = np.rint(t)
     elif rounding != "floor":
         raise ValueError("rounding must be 'round' or 'floor'")
-    # Com clip antes, o astype trunca valores não negativos (= floor).
+    # NaN vira 0 antes do astype (o cast de NaN dá RuntimeWarning); quem chama põe o byte
+    # "sem dado" nessas células. Com clip antes, o astype trunca valores não negativos (= floor).
+    t = np.nan_to_num(t, nan=0.0, posinf=255.0, neginf=0.0)
     return np.clip(t, 0, 255).astype(np.uint8)
 
 
