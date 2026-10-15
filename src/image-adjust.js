@@ -114,11 +114,16 @@ export class ImageAdjust extends Emitter {
         this._serverKey = null;
         this._colorManaged = false;
         this._out = null;
+        this._baseSrc = null;        // src a que _base pertence
+        this._gen = 0;               // cada _loadBase invalida os anteriores
         this._reasons = {};
         this._layer = viewer.layers.ensure(layer, { kind: 'canvas', z });
+        this._layer.el.style.imageRendering = 'pixelated';     // como o <img>: sem suavizar no zoom
         this._placeLayer();
         this._layer.hide();
-        this._onLoad = () => { this.ready = this._loadBase(); };
+        // A imagem trocou: os pixels e a camada do realce da anterior saem já, e `ready` passa a
+        // ser o da nova (o Viewer.loadImage só resolve depois do 'load', depois deste ouvinte).
+        this._onLoad = () => { this._invalidate(); this.ready = this._loadBase(); };
         viewer.imageElement.addEventListener('load', this._onLoad);
         /** Promise resolvida quando os pixels do original estão prontos. */
         this.ready = this._loadBase();
@@ -198,8 +203,23 @@ export class ImageAdjust extends Emitter {
         return true;
     }
 
-    /** Texto para o rótulo "processado" da exportação ("" se nada muda). */
+    /** Texto da pilha ("" se nada muda). Para o que está desenhado agora, veja effective(). */
     label() { return this.isIdentity() ? '' : describeAdjust(this._ops); }
+
+    /**
+     * O que está desenhado agora, para o rótulo "processado" e o JSON da exportação:
+     * {identity, label, ops, bypass, reasons}. Com bypass (antes/depois) o que se vê é o
+     * original, e uma operação de servidor que falhou ou ainda não chegou não está na imagem;
+     * essas ficam de fora de `ops` (a pilha continua em ops/serialize()).
+     */
+    effective() {
+        const serverOk = !!this._serverBase;
+        const ops = this._bypass ? [] : this._ops.filter(o => !isServerOp(o) || serverOk);
+        const lut = buildLut(ops);
+        const identity = !ops.some(isServerOp) && lut.every((v, i) => v === i);
+        return { identity, label: identity ? '' : describeAdjust(ops), ops: ops.map(o => ({ ...o })),
+            bypass: this._bypass, reasons: { ...this._reasons } };
+    }
 
     /** Antes/depois: com bypass, mostra o original (valores do arquivo). */
     setBypass(on) { this._bypass = !!on; this._apply(); this._emitChange('bypass'); return this; }
@@ -207,12 +227,12 @@ export class ImageAdjust extends Emitter {
 
     /** Pixels exibidos (ImageData) — o original se nada muda. */
     pixels() {
-        if (!this._base) return null;
+        if (!this._baseCurrent()) return null;
         return this._out && this._layer.visible ? this._out : this._base;
     }
 
-    /** Pixels do original (valores do arquivo no modo 'raw'). */
-    basePixels() { return this._base; }
+    /** Pixels do original (valores do arquivo no modo 'raw'). Null enquanto a imagem trocada não foi lida. */
+    basePixels() { return this._baseCurrent() ? this._base : null; }
 
     destroy() {
         this.viewer.imageElement.removeEventListener('load', this._onLoad);
@@ -222,6 +242,20 @@ export class ImageAdjust extends Emitter {
 
     /* ── interno ────────────────────────────────────────────── */
 
+    /** Os pixels lidos são da imagem que o <img> tem agora? */
+    _baseCurrent() {
+        return !!this._base && this._baseSrc === this.viewer.imageElement.src;
+    }
+
+    _invalidate() {
+        this._base = null;
+        this._baseSrc = null;
+        this._out = null;
+        this._serverBase = null;
+        this._serverKey = null;
+        this._layer.hide();
+    }
+
     _placeLayer() {
         // Logo acima do <img>, abaixo de overlays antigos postos direto no container.
         const img = this.viewer.imageElement;
@@ -229,20 +263,27 @@ export class ImageAdjust extends Emitter {
     }
 
     async _loadBase() {
+        const gen = ++this._gen;
         const img = this.viewer.imageElement;
-        if (!img.src) { this._base = null; return; }
+        if (!img.src) { this._invalidate(); return; }
         try { await img.decode(); } catch { /* imagem sem decode: segue */ }
-        if (!img.naturalWidth) return;
-        this._base = await _pixelsOf(img, this._decode);
-        this._colorManaged = false;
+        if (gen !== this._gen || !img.naturalWidth) return;
+        const src = img.src;
+        const base = await _pixelsOf(img, this._decode);
+        let colorManaged = false;
         if (this._decode === 'raw') {
             const shown = await _pixelsOf(img, 'browser');
-            this._colorManaged = !_sameSample(this._base, shown);
+            colorManaged = !_sameSample(base, shown);
         }
+        if (gen !== this._gen) return;      // outra imagem (ou outro decode) entrou no meio
+        this._base = base;
+        this._baseSrc = src;
+        this._colorManaged = colorManaged;
         this._serverKey = null;
         this._serverBase = null;
         this._placeLayer();
         await this._refreshServer();
+        if (gen !== this._gen) return;
         this._apply();
         this._emitChange('load');
     }
@@ -319,6 +360,7 @@ function _sanitize(ops) {
 function _loadImage(src) {
     return new Promise((resolve, reject) => {
         const im = new Image();
+        im.crossOrigin = 'anonymous';    // sem isso a imagem de outra origem contamina o canvas e getImageData falha
         im.onload = () => resolve(im);
         im.onerror = () => reject(new Error(`falha ao carregar ${src}`));
         im.src = src;

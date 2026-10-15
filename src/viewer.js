@@ -62,6 +62,7 @@ export class Viewer {
         this._overlays = new Map();  // name -> { overlay, opts }
         this._pointerDown = null;
         this._clickSelect = null;
+        this._imgWaiter = null;
 
         this._buildDOM();
         /** Pilha de camadas (ver layer-stack.js). */
@@ -227,7 +228,9 @@ export class Viewer {
     /* ── Image loading ─────────────────────────────────────────── */
 
     /**
-     * Load an image and reset the view.
+     * Load an image and reset the view. Resolves after the `<img>` fired its own 'load'
+     * (listeners attached earlier, such as ImageAdjust's, have already run), so what
+     * depends on the pixels of the new image can be read right after the await.
      * @param {string} src - Image URL.
      * @returns {Promise<void>}
      */
@@ -243,10 +246,32 @@ export class Viewer {
                 if (this._minimapWrap) this._minimapWrap.style.display = 'block';
                 this._syncLayers();
                 this.resetView();
-                resolve();
+                this._imageSettled().then(resolve);
             };
             probe.onerror = () => reject(new Error(`Failed to load image: ${src}`));
             probe.src = src;
+        });
+    }
+
+    /**
+     * @private Resolves when the main `<img>` fires 'load' or 'error', when the image is
+     * replaced or cleared first, or after 3 s without any event.
+     */
+    _imageSettled() {
+        if (this._imgWaiter) this._imgWaiter();
+        return new Promise((resolve) => {
+            const img = this._img;
+            const done = () => {
+                img.removeEventListener('load', done);
+                img.removeEventListener('error', done);
+                clearTimeout(timer);
+                if (this._imgWaiter === done) this._imgWaiter = null;
+                resolve();
+            };
+            const timer = setTimeout(done, 3000);
+            this._imgWaiter = done;
+            img.addEventListener('load', done);
+            img.addEventListener('error', done);
         });
     }
 
@@ -256,6 +281,7 @@ export class Viewer {
      * componentes, como OverlayLayer, e não são esvaziadas).
      */
     clear() {
+        if (this._imgWaiter) this._imgWaiter();
         this._img.removeAttribute('src');
         for (const node of [...this._svg.childNodes]) {
             if (node.nodeType === 1 && node.classList && node.classList.contains('mntviz-layer')) continue;

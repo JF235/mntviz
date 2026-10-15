@@ -62,9 +62,8 @@ export class ReportExporter {
         root.setAttribute('width', W);
         root.setAttribute('height', H);
         root.setAttribute('viewBox', `0 0 ${W} ${H}`);
-        const adj = this._o.adjust;
-        const processed = !!(adj && !adj.isIdentity());
-        if (label && processed) root.appendChild(doc.importNode(_processedLabel(W, `PROCESSADO: ${adj.label()}`), true));
+        const eff = _effective(this._o.adjust);
+        if (label && !eff.identity) root.appendChild(doc.importNode(_processedLabel(W, `PROCESSADO: ${eff.label}`), true));
         if (scaleBar && this._o.ppi > 0) root.appendChild(doc.importNode(scaleBarSVG(W, H, this._o.ppi), true));
         if (metadata) {
             const md = doc.createElementNS('http://www.w3.org/2000/svg', 'metadata');
@@ -93,15 +92,20 @@ export class ReportExporter {
         const adj = this._o.adjust;
         if (adj && adj.ready) await adj.ready;
         const sha = imageHash ? await this.imageSha256() : null;
+        const eff = _effective(adj);
         const out = {
             schema: 'mntviz.report/1',
             created_utc: new Date().toISOString(),
             provenance: this._provenance(sha),
-            processed: !!(adj && !adj.isIdentity()),
-            label: adj ? adj.label() : '',
+            // processed/label descrevem o que está desenhado (com bypass ou sem a versão do servidor,
+            // não é a pilha inteira); a pilha completa fica em `adjust`
+            processed: !eff.identity,
+            label: eff.label,
             view: this.viewer.getView(),
             layers: this.viewer.layers.serialize(),
             adjust: adj ? adj.serialize() : null,
+            adjust_effective: adj ? { bypass: eff.bypass, identity: eff.identity, label: eff.label, ops: eff.ops,
+                reasons: eff.reasons } : null,
             editors: [],
             correspondence: null,
             measurements: [],
@@ -187,6 +191,14 @@ export class ReportExporter {
             },
         };
     }
+}
+
+/** Estado efetivo do realce (o que está na tela); sem realce, identidade. */
+function _effective(adj) {
+    if (!adj) return { identity: true, label: '', ops: [], bypass: false, reasons: {} };
+    if (typeof adj.effective === 'function') return adj.effective();
+    const identity = adj.isIdentity();
+    return { identity, label: identity ? '' : adj.label(), ops: adj.ops, bypass: !!adj.bypass, reasons: adj.reasons || {} };
 }
 
 function _processedLabel(W, text) {

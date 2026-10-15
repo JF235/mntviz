@@ -1694,6 +1694,7 @@ var Viewer = class {
     this._overlays = /* @__PURE__ */ new Map();
     this._pointerDown = null;
     this._clickSelect = null;
+    this._imgWaiter = null;
     this._buildDOM();
     this.layers = new LayerStack(this);
     this._selection = null;
@@ -1855,7 +1856,9 @@ var Viewer = class {
   }
   /* ── Image loading ─────────────────────────────────────────── */
   /**
-   * Load an image and reset the view.
+   * Load an image and reset the view. Resolves after the `<img>` fired its own 'load'
+   * (listeners attached earlier, such as ImageAdjust's, have already run), so what
+   * depends on the pixels of the new image can be read right after the await.
    * @param {string} src - Image URL.
    * @returns {Promise<void>}
    */
@@ -1871,10 +1874,31 @@ var Viewer = class {
         if (this._minimapWrap) this._minimapWrap.style.display = "block";
         this._syncLayers();
         this.resetView();
-        resolve();
+        this._imageSettled().then(resolve);
       };
       probe.onerror = () => reject(new Error(`Failed to load image: ${src}`));
       probe.src = src;
+    });
+  }
+  /**
+   * @private Resolves when the main `<img>` fires 'load' or 'error', when the image is
+   * replaced or cleared first, or after 3 s without any event.
+   */
+  _imageSettled() {
+    if (this._imgWaiter) this._imgWaiter();
+    return new Promise((resolve) => {
+      const img = this._img;
+      const done = () => {
+        img.removeEventListener("load", done);
+        img.removeEventListener("error", done);
+        clearTimeout(timer);
+        if (this._imgWaiter === done) this._imgWaiter = null;
+        resolve();
+      };
+      const timer = setTimeout(done, 3e3);
+      this._imgWaiter = done;
+      img.addEventListener("load", done);
+      img.addEventListener("error", done);
     });
   }
   /**
@@ -1883,6 +1907,7 @@ var Viewer = class {
    * componentes, como OverlayLayer, e não são esvaziadas).
    */
   clear() {
+    if (this._imgWaiter) this._imgWaiter();
     this._img.removeAttribute("src");
     for (const node of [...this._svg.childNodes]) {
       if (node.nodeType === 1 && node.classList && node.classList.contains("mntviz-layer")) continue;
@@ -16982,11 +17007,15 @@ var ImageAdjust = class extends Emitter {
     this._serverKey = null;
     this._colorManaged = false;
     this._out = null;
+    this._baseSrc = null;
+    this._gen = 0;
     this._reasons = {};
     this._layer = viewer.layers.ensure(layer, { kind: "canvas", z });
+    this._layer.el.style.imageRendering = "pixelated";
     this._placeLayer();
     this._layer.hide();
     this._onLoad = () => {
+      this._invalidate();
       this.ready = this._loadBase();
     };
     viewer.imageElement.addEventListener("load", this._onLoad);
@@ -17088,9 +17117,28 @@ var ImageAdjust = class extends Emitter {
     for (let i = 0; i < 256; i++) if (lut[i] !== i) return false;
     return true;
   }
-  /** Texto para o rótulo "processado" da exportação ("" se nada muda). */
+  /** Texto da pilha ("" se nada muda). Para o que está desenhado agora, veja effective(). */
   label() {
     return this.isIdentity() ? "" : describeAdjust(this._ops);
+  }
+  /**
+   * O que está desenhado agora, para o rótulo "processado" e o JSON da exportação:
+   * {identity, label, ops, bypass, reasons}. Com bypass (antes/depois) o que se vê é o
+   * original, e uma operação de servidor que falhou ou ainda não chegou não está na imagem;
+   * essas ficam de fora de `ops` (a pilha continua em ops/serialize()).
+   */
+  effective() {
+    const serverOk = !!this._serverBase;
+    const ops = this._bypass ? [] : this._ops.filter((o) => !isServerOp(o) || serverOk);
+    const lut = buildLut(ops);
+    const identity = !ops.some(isServerOp) && lut.every((v, i) => v === i);
+    return {
+      identity,
+      label: identity ? "" : describeAdjust(ops),
+      ops: ops.map((o) => ({ ...o })),
+      bypass: this._bypass,
+      reasons: { ...this._reasons }
+    };
   }
   /** Antes/depois: com bypass, mostra o original (valores do arquivo). */
   setBypass(on) {
@@ -17104,12 +17152,12 @@ var ImageAdjust = class extends Emitter {
   }
   /** Pixels exibidos (ImageData) — o original se nada muda. */
   pixels() {
-    if (!this._base) return null;
+    if (!this._baseCurrent()) return null;
     return this._out && this._layer.visible ? this._out : this._base;
   }
-  /** Pixels do original (valores do arquivo no modo 'raw'). */
+  /** Pixels do original (valores do arquivo no modo 'raw'). Null enquanto a imagem trocada não foi lida. */
   basePixels() {
-    return this._base;
+    return this._baseCurrent() ? this._base : null;
   }
   destroy() {
     this.viewer.imageElement.removeEventListener("load", this._onLoad);
@@ -17117,31 +17165,50 @@ var ImageAdjust = class extends Emitter {
     this.removeAllListeners();
   }
   /* ── interno ────────────────────────────────────────────── */
+  /** Os pixels lidos são da imagem que o <img> tem agora? */
+  _baseCurrent() {
+    return !!this._base && this._baseSrc === this.viewer.imageElement.src;
+  }
+  _invalidate() {
+    this._base = null;
+    this._baseSrc = null;
+    this._out = null;
+    this._serverBase = null;
+    this._serverKey = null;
+    this._layer.hide();
+  }
   _placeLayer() {
     const img = this.viewer.imageElement;
     if (img.nextSibling !== this._layer.el) img.after(this._layer.el);
   }
   async _loadBase() {
+    const gen = ++this._gen;
     const img = this.viewer.imageElement;
     if (!img.src) {
-      this._base = null;
+      this._invalidate();
       return;
     }
     try {
       await img.decode();
     } catch {
     }
-    if (!img.naturalWidth) return;
-    this._base = await _pixelsOf(img, this._decode);
-    this._colorManaged = false;
+    if (gen !== this._gen || !img.naturalWidth) return;
+    const src = img.src;
+    const base = await _pixelsOf(img, this._decode);
+    let colorManaged = false;
     if (this._decode === "raw") {
       const shown = await _pixelsOf(img, "browser");
-      this._colorManaged = !_sameSample(this._base, shown);
+      colorManaged = !_sameSample(base, shown);
     }
+    if (gen !== this._gen) return;
+    this._base = base;
+    this._baseSrc = src;
+    this._colorManaged = colorManaged;
     this._serverKey = null;
     this._serverBase = null;
     this._placeLayer();
     await this._refreshServer();
+    if (gen !== this._gen) return;
     this._apply();
     this._emitChange("load");
   }
@@ -17239,6 +17306,7 @@ function _sanitize(ops) {
 function _loadImage(src) {
   return new Promise((resolve, reject) => {
     const im = new Image();
+    im.crossOrigin = "anonymous";
     im.onload = () => resolve(im);
     im.onerror = () => reject(new Error(`falha ao carregar ${src}`));
     im.src = src;
@@ -19079,9 +19147,8 @@ var ReportExporter = class {
     root.setAttribute("width", W);
     root.setAttribute("height", H);
     root.setAttribute("viewBox", `0 0 ${W} ${H}`);
-    const adj = this._o.adjust;
-    const processed = !!(adj && !adj.isIdentity());
-    if (label && processed) root.appendChild(doc.importNode(_processedLabel(W, `PROCESSADO: ${adj.label()}`), true));
+    const eff = _effective(this._o.adjust);
+    if (label && !eff.identity) root.appendChild(doc.importNode(_processedLabel(W, `PROCESSADO: ${eff.label}`), true));
     if (scaleBar && this._o.ppi > 0) root.appendChild(doc.importNode(scaleBarSVG(W, H, this._o.ppi), true));
     if (metadata) {
       const md = doc.createElementNS("http://www.w3.org/2000/svg", "metadata");
@@ -19109,15 +19176,25 @@ var ReportExporter = class {
     const adj = this._o.adjust;
     if (adj && adj.ready) await adj.ready;
     const sha = imageHash ? await this.imageSha256() : null;
+    const eff = _effective(adj);
     const out = {
       schema: "mntviz.report/1",
       created_utc: (/* @__PURE__ */ new Date()).toISOString(),
       provenance: this._provenance(sha),
-      processed: !!(adj && !adj.isIdentity()),
-      label: adj ? adj.label() : "",
+      // processed/label descrevem o que está desenhado (com bypass ou sem a versão do servidor,
+      // não é a pilha inteira); a pilha completa fica em `adjust`
+      processed: !eff.identity,
+      label: eff.label,
       view: this.viewer.getView(),
       layers: this.viewer.layers.serialize(),
       adjust: adj ? adj.serialize() : null,
+      adjust_effective: adj ? {
+        bypass: eff.bypass,
+        identity: eff.identity,
+        label: eff.label,
+        ops: eff.ops,
+        reasons: eff.reasons
+      } : null,
       editors: [],
       correspondence: null,
       measurements: []
@@ -19203,6 +19280,12 @@ var ReportExporter = class {
     };
   }
 };
+function _effective(adj) {
+  if (!adj) return { identity: true, label: "", ops: [], bypass: false, reasons: {} };
+  if (typeof adj.effective === "function") return adj.effective();
+  const identity = adj.isIdentity();
+  return { identity, label: identity ? "" : adj.label(), ops: adj.ops, bypass: !!adj.bypass, reasons: adj.reasons || {} };
+}
 function _processedLabel(W, text) {
   const fs = Math.max(10, Math.round(W * 0.02));
   const g = svgEl("g", { class: "mntviz-processed-label" });
