@@ -137,6 +137,7 @@ export class Ruler extends Emitter {
         this._drag = null;
         this._active = false;
         this._exportMode = false;
+        this._destroyed = false;
         this._ac = new AbortController();
         const sig = { signal: this._ac.signal };
         viewer.viewport.addEventListener('mousedown', (e) => this._down(e), { capture: true, ...sig });
@@ -180,7 +181,7 @@ export class Ruler extends Emitter {
     beginExport() { this._exportMode = true; this.render(); }
     endExport() { this._exportMode = false; this.render(); }
 
-    destroy() { this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners(); }
+    destroy() { this._destroyed = true; this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners(); }
 
     _measure(m) {
         const px = Math.hypot(m.x2 - m.x1, m.y2 - m.y1);
@@ -216,6 +217,8 @@ export class Ruler extends Emitter {
     }
 
     render() {
+        if (this._destroyed) return;
+        if (!this._g.isConnected) this._layer.el.appendChild(this._g);   // viewer.clear() solta o grupo
         this._g.replaceChildren();
         const all = this._drag ? [...this._items, this._measure(this._drag)] : this._items;
         for (const m of all) _drawSegment(this._g, this.viewer, m, this._o.color, _rulerLabel(m), this._exportMode);
@@ -256,6 +259,7 @@ export class RidgeCount extends Emitter {
         this._drag = null;
         this._active = false;
         this._exportMode = false;
+        this._destroyed = false;
         this._fallback = null;
         this._ac = new AbortController();
         const sig = { signal: this._ac.signal };
@@ -305,7 +309,7 @@ export class RidgeCount extends Emitter {
 
     beginExport() { this._exportMode = true; this.render(); }
     endExport() { this._exportMode = false; this.render(); }
-    destroy() { this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners(); }
+    destroy() { this._destroyed = true; this._ac.abort(); this._offView(); this._g.remove(); this.removeAllListeners(); }
 
     _pixels() {
         if (typeof this._o.source === 'function') {
@@ -350,6 +354,8 @@ export class RidgeCount extends Emitter {
     }
 
     render() {
+        if (this._destroyed) return;
+        if (!this._g.isConnected) this._layer.el.appendChild(this._g);   // viewer.clear() solta o grupo
         this._g.replaceChildren();
         for (const m of this._items) {
             _drawSegment(this._g, this.viewer, m, this._o.color, `${m.count} cristas · ${m.px.toFixed(0)} px`, this._exportMode);

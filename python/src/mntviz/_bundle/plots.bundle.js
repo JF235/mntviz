@@ -18574,6 +18574,7 @@ var Ruler = class extends Emitter {
     this._drag = null;
     this._active = false;
     this._exportMode = false;
+    this._destroyed = false;
     this._ac = new AbortController();
     const sig = { signal: this._ac.signal };
     viewer.viewport.addEventListener("mousedown", (e) => this._down(e), { capture: true, ...sig });
@@ -18647,6 +18648,7 @@ var Ruler = class extends Emitter {
     this.render();
   }
   destroy() {
+    this._destroyed = true;
     this._ac.abort();
     this._offView();
     this._g.remove();
@@ -18687,6 +18689,8 @@ var Ruler = class extends Emitter {
     this.measure({ x: d.x1, y: d.y1 }, { x: d.x2, y: d.y2 }, { keep: d.keep });
   }
   render() {
+    if (this._destroyed) return;
+    if (!this._g.isConnected) this._layer.el.appendChild(this._g);
     this._g.replaceChildren();
     const all = this._drag ? [...this._items, this._measure(this._drag)] : this._items;
     for (const m of all) _drawSegment(this._g, this.viewer, m, this._o.color, _rulerLabel(m), this._exportMode);
@@ -18730,6 +18734,7 @@ var RidgeCount = class extends Emitter {
     this._drag = null;
     this._active = false;
     this._exportMode = false;
+    this._destroyed = false;
     this._fallback = null;
     this._ac = new AbortController();
     const sig = { signal: this._ac.signal };
@@ -18805,6 +18810,7 @@ var RidgeCount = class extends Emitter {
     this.render();
   }
   destroy() {
+    this._destroyed = true;
     this._ac.abort();
     this._offView();
     this._g.remove();
@@ -18854,6 +18860,8 @@ var RidgeCount = class extends Emitter {
     this.count({ x: d.x1, y: d.y1 }, { x: p.x, y: p.y }, { keep: d.keep });
   }
   render() {
+    if (this._destroyed) return;
+    if (!this._g.isConnected) this._layer.el.appendChild(this._g);
     this._g.replaceChildren();
     for (const m of this._items) {
       _drawSegment(this._g, this.viewer, m, this._o.color, `${m.count} cristas \xB7 ${m.px.toFixed(0)} px`, this._exportMode);
