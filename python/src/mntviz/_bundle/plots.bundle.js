@@ -17042,8 +17042,9 @@ var ImageAdjust = class extends Emitter {
    * @param {object} [opts]
    * @param {Array<object>} [opts.ops] - Pilha inicial.
    * @param {'raw'|'browser'} [opts.decode='raw'] - Valores do arquivo ou os do navegador.
-   * @param {(serverOps: object[], src: string) => string} [opts.server] - URL da versão
-   *        processada no servidor (CLAHE). Sem ela, as operações de servidor ficam inativas.
+   * @param {(serverOps: object[], src: string) => (string|null)} [opts.server] - URL da versão
+   *        processada no servidor (CLAHE) da imagem `src`, ou null se não houver. Sem a opção, as
+   *        operações de servidor ficam inativas.
    * @param {string} [opts.layer='adjust'] - Nome da camada canvas.
    */
   constructor(viewer, { ops = [], decode = "raw", server = null, layer = "adjust", z = -1e3 } = {}) {
@@ -17276,11 +17277,34 @@ var ImageAdjust = class extends Emitter {
       this._serverBase = null;
       return;
     }
-    const url = this._server(sops.map((o) => ({ ...o })), this.viewer.imageElement.src);
+    if (!this._baseCurrent()) {
+      this._serverBase = null;
+      this._serverKey = null;
+      return;
+    }
+    const img = this.viewer.imageElement;
+    const src = img.src;
+    let url = null;
+    try {
+      url = this._server(sops.map((o) => ({ ...o })), src);
+    } catch (err) {
+      for (const o of sops) this._reasons[o.op] = `servidor: ${err.message}`;
+      this._serverBase = null;
+      this._serverKey = null;
+      return;
+    }
+    if (typeof url !== "string" || !url) {
+      for (const o of sops) this._reasons[o.op] = `${o.op} vem do servidor: sem vers\xE3o processada para esta imagem`;
+      this._serverBase = null;
+      this._serverKey = null;
+      return;
+    }
     if (url === this._serverKey && this._serverBase) return;
     try {
       const im = await _loadImage(url);
-      this._serverBase = await _pixelsOf(im, this._decode);
+      const pixels = await _pixelsOf(im, this._decode);
+      if (img.src !== src) return;
+      this._serverBase = pixels;
       this._serverKey = url;
     } catch (err) {
       for (const o of sops) this._reasons[o.op] = `servidor: ${err.message}`;

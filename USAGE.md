@@ -258,7 +258,8 @@ pendente e tira o editor do `viewer.registerTool` (ver `exportSVG` abaixo).
 
 **ImageAdjust.** Pilha `levels {lo, hi}`, `brightness {v}`, `contrast {v}`, `gamma {v}`
 (`v^(1/g)`), `invert`, aplicada por LUT numa camada canvas acima do original (que não muda);
-`clahe {clip, tile}` vem do servidor (opção `server`). Por padrão (`decode: 'raw'`) os pixels
+`clahe {clip, tile}` vem do servidor (opção `server(ops, src)`: a URL da versão processada de `src`, a imagem
+na tela, ou null se o host não tem uma; sem a imagem lida, ou com null, nada é pedido e a pilha espera). Por padrão (`decode: 'raw'`) os pixels
 são os valores do arquivo, sem gestão de cor: o navegador aplica o `gAMA` das PNG (as da SD258
 têm gAMA = 1,0 e aparecem mais claras) e, quando isso acontece (`colorManaged`), a camada
 mostra os valores do arquivo mesmo sem realce. `setBypass` = antes/depois; `label()` = texto

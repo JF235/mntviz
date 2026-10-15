@@ -27,6 +27,12 @@
  *   const estado = adj.serialize();     // {version, decode, ops}
  *   outro.restore(estado);              // mesma LUT, mesmos pixels
  *   adj.setBypass(true);                // antes/depois (tecla B)
+ *
+ * Opção `server(ops, src)`: devolve a URL da versão processada de `src` (o <img> que está na tela) ou
+ * null/'' quando não há versão para essa imagem (ex.: o host não reconhece o id). Só é chamada com a
+ * imagem do original já lida: sem imagem (pilha montada antes dela) ou com a imagem trocada ainda não
+ * lida, nada é pedido, a pilha fica guardada e o realce vem quando a imagem chega. Um retorno sem URL
+ * também não pede nada: a operação fica inativa, com a razão em `reasons`.
  */
 
 import { Emitter } from './events.js';
@@ -98,8 +104,9 @@ export class ImageAdjust extends Emitter {
      * @param {object} [opts]
      * @param {Array<object>} [opts.ops] - Pilha inicial.
      * @param {'raw'|'browser'} [opts.decode='raw'] - Valores do arquivo ou os do navegador.
-     * @param {(serverOps: object[], src: string) => string} [opts.server] - URL da versão
-     *        processada no servidor (CLAHE). Sem ela, as operações de servidor ficam inativas.
+     * @param {(serverOps: object[], src: string) => (string|null)} [opts.server] - URL da versão
+     *        processada no servidor (CLAHE) da imagem `src`, ou null se não houver. Sem a opção, as
+     *        operações de servidor ficam inativas.
      * @param {string} [opts.layer='adjust'] - Nome da camada canvas.
      */
     constructor(viewer, { ops = [], decode = 'raw', server = null, layer = 'adjust', z = -1000 } = {}) {
@@ -297,11 +304,34 @@ export class ImageAdjust extends Emitter {
             this._serverBase = null;
             return;
         }
-        const url = this._server(sops.map(o => ({ ...o })), this.viewer.imageElement.src);
+        // Sem o original lido (pilha montada antes da imagem, ou imagem trocada que ainda não carregou) não há
+        // o que processar: não chama `server` (ele veria um src vazio ou o da imagem que saiu) e não pede nada.
+        // A pilha fica como está; o _loadBase repete esta etapa quando a imagem chegar.
+        if (!this._baseCurrent()) { this._serverBase = null; this._serverKey = null; return; }
+        const img = this.viewer.imageElement;
+        const src = img.src;
+        let url = null;
+        try {
+            url = this._server(sops.map(o => ({ ...o })), src);
+        } catch (err) {
+            for (const o of sops) this._reasons[o.op] = `servidor: ${err.message}`;
+            this._serverBase = null;
+            this._serverKey = null;
+            return;
+        }
+        if (typeof url !== 'string' || !url) {
+            // o host não tem versão processada desta imagem (ex.: não sabe o id dela): nada a pedir
+            for (const o of sops) this._reasons[o.op] = `${o.op} vem do servidor: sem versão processada para esta imagem`;
+            this._serverBase = null;
+            this._serverKey = null;
+            return;
+        }
         if (url === this._serverKey && this._serverBase) return;
         try {
             const im = await _loadImage(url);
-            this._serverBase = await _pixelsOf(im, this._decode);
+            const pixels = await _pixelsOf(im, this._decode);
+            if (img.src !== src) return;        // a imagem trocou durante o pedido: o resultado é de outra imagem
+            this._serverBase = pixels;
             this._serverKey = url;
         } catch (err) {
             for (const o of sops) this._reasons[o.op] = `servidor: ${err.message}`;
