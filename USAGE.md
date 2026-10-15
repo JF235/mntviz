@@ -273,8 +273,8 @@ probe_xy, ref_xy}], transform: {angle, tx, ty}}` (rígido referência → latent
 `rigid()`, `warp()` (MLS), `mapPoint`, `setOverlay('rigid'|'mls')`, `setFlicker`, `setGhost`,
 `setLines`.
 
-**registration.js.** `mlsRigid`, `buildWarp`, `estimateTransform` (mesma matemática do
-`matching.js` do dashboard), `estimateRigid` (com rms), `applyRigid`, `invertRigid`,
+**registration.js.** `mlsRigid`, `buildWarp`, `estimateTransform` (ajuste rígido por
+mínimos quadrados, direita → esquerda), `estimateRigid` (com rms), `applyRigid`, `invertRigid`,
 `warpImage`.
 
 **Medidas.** `Ruler`: mm = px / ppi · 25,4 (`setPpi`). `RidgeCount`: perfil a cada 1 px

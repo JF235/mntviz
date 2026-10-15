@@ -26,7 +26,7 @@ export { applyColormap, COLORMAP_NAMES } from './colormaps.js';
 export { MultiViewer } from './multi-viewer.js';
 export { LayerStack, Layer } from './layer-stack.js';
 export { Emitter, Selection } from './events.js';
-// Editores e ferramentas de perito (G2b)
+// Editores e ferramentas de perito
 export { ToolModes, History, GYRO, GYRO_KEYS, MODES, MODE_LABELS, DEFAULT_MODE_KEYS, isoAngle, uprightTransform } from './tools.js';
 export { FeatureEditor, MINUTIA_TYPES } from './feature-editor.js';
 export { ImageAdjust, buildLut, describeAdjust, ADJUST_OPS } from './image-adjust.js';

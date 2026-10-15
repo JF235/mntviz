@@ -1,8 +1,7 @@
 /**
  * mntviz/registration.js — Alinhamento entre duas impressões a partir de pares.
  *
- * Portado sem mudar a matemática do matching.js do stitch-dashboard (layout-v2,
- * 364d6b7, linhas 747-815):
+ * Duas contas, as duas sobre os mesmos pares:
  *   - mlsRigid: Moving Least Squares rígido (Schaefer et al., 2006), pesos 1/|p - v|²;
  *     interpola os pontos de controle exatamente; com 1 controle vira translação.
  *   - estimateTransform: ajuste rígido global por mínimos quadrados, da direita para a
@@ -63,7 +62,7 @@ export function buildWarp(pairs) {
 }
 
 /**
- * Ajuste rígido global (direita → esquerda), com a assinatura do dashboard:
+ * Ajuste rígido global (direita → esquerda) por índices de pares:
  * cs = [{leftIdx, rightIdx}], left/right = listas de {x, y}. Devolve
  * {angle, tx, ty} ou null sem pares.
  */

@@ -196,7 +196,7 @@ $('rotr').onclick = () => viewers[focus].rotate90(1);
 $('flip').onclick = () => viewers[focus].toggleFlip();
 $('fit').onclick = () => viewers[focus].fit();
 
-// Teclas da página (no GUI, keys.js): girar, espelhar, ajustar, inverter, antes/depois.
+// Teclas da página: girar, espelhar, ajustar, inverter, antes/depois.
 window.addEventListener('keydown', (e) => {
   if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;

@@ -17910,7 +17910,7 @@ var CorrespondenceEditor = class extends Emitter {
       transform: t ? { angle: t.angle, tx: t.tx, ty: t.ty } : null
     };
   }
-  /** Texto .match (dashboard), com linhas #PAIR N TYPE. */
+  /** Texto .match, com linhas #PAIR N TYPE. */
   toMatchText({ q = "probe", g = "reference", label = "manual" } = {}) {
     const live = this._livePairs();
     const rows = live.map(({ a, b }) => ({

@@ -7,7 +7,7 @@ O protocolo é o que o JS do mntviz lê (``OverlayLayer``, ``FieldProbe``,
   [0, 1]; o byte 0 é "sem dado" (``v <= 0``, NaN ou fora de ``valid``). O
   cliente aplica a LUT e o probe inverte com ``(byte − 1)/254``.
   ``round`` é o de numpy/Python (metade para o par). ``rounding="floor"``
-  reproduz o ``astype(uint8)`` do dashboard (``npz_renderer.render_npz_scalar``).
+  reproduz o truncamento ``astype(uint8)`` de encoders mais antigos.
 * **Setas**: lista ``[x, y, dx, dy, conf(, mod)]`` em coordenadas da imagem
   (y para baixo). Direção de minúcia: ``(u, −v)/|uv|`` com comprimento
   ``seg_base + seg_gain·conf²``.
@@ -16,11 +16,11 @@ O protocolo é o que o JS do mntviz lê (``OverlayLayer``, ``FieldProbe``,
   (``convention``): ``"image"`` (padrão, y para baixo, seta ``(cos θ, sin θ)``) ou
   ``"iso"`` (y para cima, seta ``(cos θ, −sin θ)``, como ``uv_arrows``).
 
-Os laços Python dos dois encoders que existiam (``_compute_uv_arrows`` do
-wrapper e ``render_uv_arrows``/``render_ori_arrows``/... do stitch-dashboard)
-viram operações de array. A semântica padrão é a do dashboard (o servidor);
-``compat="wrapper"`` reproduz a do wrapper (normalização por ``max + 1e-8`` e
-limiares inclusivos), que o ``plot_huv`` usa para não mudar a saída.
+Os laços Python de dois encoders anteriores (o ``_compute_uv_arrows`` do
+``plot_huv`` e um renderizador de mapas no servidor, célula por célula) viram
+operações de array. A semântica padrão é a do servidor (normalização por ``max(H)``
+e limiares exclusivos); ``compat="wrapper"`` reproduz a do ``plot_huv``
+(normalização por ``max + 1e-8`` e limiares inclusivos) para não mudar a saída.
 
 Só numpy (e Pillow para o PNG). Um servidor pode ter o próprio encoder, desde
 que siga o mesmo protocolo; este módulo serve de referência.
@@ -100,7 +100,7 @@ def scalar_u8(
         normalize: divide pelo máximo da imagem antes de codificar (só para
             exibição: o valor lido pelo probe deixa de ser o absoluto).
         valid: máscara booleana opcional; fora dela o byte é 0.
-        rounding: ``"round"`` (contrato) ou ``"floor"`` (igual ao dashboard).
+        rounding: ``"round"`` (contrato) ou ``"floor"`` (truncamento de encoders antigos).
     """
     v = decode_unit(values)
     if normalize:
@@ -144,7 +144,7 @@ def mtype_u8(h_end: Any, h_bif: Any, *, rounding: str = "round") -> np.ndarray:
     """Razão de tipo ``H_end/(H_end + H_bif)`` no protocolo escalar.
 
     0,5 onde a soma é ~0; byte 0 onde ``max(H_end, H_bif) < 0,01``. Com
-    ``rounding="floor"`` é igual ao ``render_npz_mtype_scalar`` do dashboard.
+    ``rounding="floor"`` reproduz o truncamento de encoders mais antigos.
     """
     e = decode_unit(h_end)
     b = decode_unit(h_bif)
@@ -311,8 +311,7 @@ def sing_arrows(
 ) -> np.ndarray | None:
     """Setas unitárias de singularidades (``<prefixo>H/U/V``) → ``(N, 6)``.
 
-    ``stride`` em pixels da saída (não em células da grade), como o
-    ``render_singularities_arrows`` do dashboard; a 6ª coluna repete a
+    ``stride`` em pixels da saída (não em células da grade); a 6ª coluna repete a
     confiança (gancho de modulação). ``None`` se nenhum trio existir.
     """
     blocks = []

@@ -14,11 +14,10 @@
  * selecionado, Del desfaz o par, Esc desarma, Ctrl+Z / Ctrl+Shift+Z, G cursor
  * fantasma, O sobreposição (desligada → rígida → MLS), T alternância (flicker).
  *
- * Registro (registration.js, portado do matching.js do dashboard): ajuste rígido por
- * mínimos quadrados (referência → latente) e MLS rígido para o cursor fantasma e a
+ * Registro (registration.js): ajuste rígido por mínimos quadrados (referência → latente) e MLS rígido para o cursor fantasma e a
  * sobreposição da referência sobre a latente.
  *
- * Arquivos: .match (dashboard; colunas SCORE X1 Y1 THETA1 Q1 X2 Y2 THETA2 Q2), #CORR
+ * Arquivos: .match (colunas SCORE X1 Y1 THETA1 Q1 X2 Y2 THETA2 Q2), #CORR
  * v2 (GT do SD302: KIND IDX_A IDX_B XA YA XB YB) e a lista de índices do exemplo
  * (latent_index reference_index). Número e tipo do par vão em linhas "#PAIR N TYPE",
  * que os leitores antigos ignoram.
@@ -360,7 +359,7 @@ export class CorrespondenceEditor extends Emitter {
         };
     }
 
-    /** Texto .match (dashboard), com linhas #PAIR N TYPE. */
+    /** Texto .match, com linhas #PAIR N TYPE. */
     toMatchText({ q = 'probe', g = 'reference', label = 'manual' } = {}) {
         const live = this._livePairs();
         const rows = live.map(({ a, b }) => ({ score: 1, x1: a.x, y1: a.y, t1: a.theta ?? 0, q1: a.quality ?? 0,
