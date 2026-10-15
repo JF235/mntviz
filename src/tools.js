@@ -282,14 +282,22 @@ export function clone(obj) {
     return obj == null ? obj : JSON.parse(JSON.stringify(obj));
 }
 
-/** Liga um 'view' do viewer a um redesenho por quadro (rótulos de pé, alças). */
+/**
+ * Liga um 'view' do viewer a um redesenho por quadro (rótulos de pé, alças). Devolve a
+ * função que desliga e também cancela o quadro já agendado (uma ferramenta destruída não
+ * redesenha depois).
+ */
 export function onViewFrame(viewer, fn) {
-    let pending = false;
-    return viewer.on('view', () => {
-        if (pending) return;
-        pending = true;
-        requestAnimationFrame(() => { pending = false; fn(); });
+    let pending = 0, dead = false;
+    const off = viewer.on('view', () => {
+        if (pending || dead) return;
+        pending = requestAnimationFrame(() => { pending = 0; if (!dead) fn(); });
     });
+    return () => {
+        dead = true;
+        if (pending) { cancelAnimationFrame(pending); pending = 0; }
+        off();
+    };
 }
 
 /** Pára o evento (o pan do Viewer não o vê). */

@@ -15700,15 +15700,22 @@ function clone(obj) {
   return obj == null ? obj : JSON.parse(JSON.stringify(obj));
 }
 function onViewFrame(viewer, fn) {
-  let pending = false;
-  return viewer.on("view", () => {
-    if (pending) return;
-    pending = true;
-    requestAnimationFrame(() => {
-      pending = false;
-      fn();
+  let pending = 0, dead = false;
+  const off = viewer.on("view", () => {
+    if (pending || dead) return;
+    pending = requestAnimationFrame(() => {
+      pending = 0;
+      if (!dead) fn();
     });
   });
+  return () => {
+    dead = true;
+    if (pending) {
+      cancelAnimationFrame(pending);
+      pending = 0;
+    }
+    off();
+  };
 }
 function stopEvent(e) {
   e.preventDefault();
@@ -17445,6 +17452,7 @@ var CorrespondenceEditor = class extends Emitter {
     this._history = new History();
     this._active = false;
     this._exportMode = false;
+    this._destroyed = false;
     this._overlay = "off";
     this._flicker = null;
     this._ghost = !!this._o.ghost;
@@ -17466,13 +17474,8 @@ var CorrespondenceEditor = class extends Emitter {
       })),
       ...this.viewers.map((v, side) => v.on("pointer", (p) => this._pointer(side, p)))
     ];
-    for (const s of this._src) {
-      if (s.editor) this._offs.push(s.editor.on("change", () => {
-        this.render();
-        this._drawLines();
-        this._refreshOverlay();
-      }));
-    }
+    this._srcOff = [null, null];
+    this._src.forEach((_, side) => this._watchSource(side));
     this._linesSvg = null;
     if (this._o.host) {
       this._linesSvg = svgEl("svg", { class: "mntviz-ce-lines" });
@@ -17543,6 +17546,23 @@ var CorrespondenceEditor = class extends Emitter {
     p.type = type;
     this._commit("type", before, [n]);
     return true;
+  }
+  /**
+   * Pares com uma ponta cuja feature foi apagada no editor de features: continuam na
+   * lista (desfazer lá os cura), mas ficam fora do ajuste, da sobreposição e da exportação.
+   */
+  get missingPairs() {
+    return this._pairs.filter((p) => this._isMissing(p)).map((p) => p.n);
+  }
+  /** Apaga os pares sem feature num passo só (desfazer os traz de volta). Devolve os números. */
+  removeMissing() {
+    const ns = this.missingPairs;
+    if (!ns.length) return [];
+    const before = this._snap();
+    this._pairs = this._pairs.filter((p) => !ns.includes(p.n));
+    if (this._selected != null && ns.includes(this._selected)) this._selected = null;
+    this._commit("delete", before, ns);
+    return ns;
   }
   /** Renumera 1..N na ordem atual (um passo de desfazer). */
   renumber() {
@@ -17647,12 +17667,16 @@ var CorrespondenceEditor = class extends Emitter {
     return false;
   }
   /* ── registro, fantasma e sobreposição ──────────────────── */
-  /** Pontos de controle {l: [x, y], r: [x, y], n} dos pares (opcional: só um tipo). */
+  /**
+   * Pontos de controle {l: [x, y], r: [x, y], n} dos pares (opcional: só um tipo). Pares
+   * com uma ponta cuja feature foi apagada (`missing`) ficam de fora, como da exportação.
+   */
   controls({ types = null } = {}) {
     const out = [];
     for (const p of this._pairs) {
       if (types && !types.includes(p.type)) continue;
       const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      if (a.missing || b.missing) continue;
       out.push({ n: p.n, l: [a.x, a.y], r: [b.x, b.y] });
     }
     return out;
@@ -17683,6 +17707,7 @@ var CorrespondenceEditor = class extends Emitter {
   setOverlay(mode, { opacity = null } = {}) {
     this._overlay = OVERLAY_MODES.includes(mode) ? mode : "off";
     if (opacity != null) this._o.overlayOpacity = Number(opacity);
+    if (this._overlay === "off" && this._flicker) this.setFlicker(false);
     this._refreshOverlay();
     this.emit("overlay", { mode: this._overlay, opacity: this._o.overlayOpacity });
     return this;
@@ -17701,7 +17726,7 @@ var CorrespondenceEditor = class extends Emitter {
       if (this._overlay === "off") this.setOverlay("rigid");
       const period = ms || this._o.flickerMs;
       this._flicker = setInterval(() => {
-        if (this._ovLayer) this._ovLayer.toggle();
+        if (this._ovLayer && this._overlay !== "off") this._ovLayer.toggle();
       }, period);
     }
     this.emit("flicker", { on: !!this._flicker });
@@ -17712,11 +17737,19 @@ var CorrespondenceEditor = class extends Emitter {
   toJSON() {
     return { version: 1, pairs: this.pairs, rigid: this.rigid(), overlay: this._overlay };
   }
-  fromJSON(state) {
+  /**
+   * Restaura um estado de toJSON(). O ref salvo é um id interno do editor de features,
+   * que muda quando as features são recarregadas (setFeatures renumera), então cada ponta
+   * só mantém o ref se a feature que ele aponta ainda está onde a ponta foi salva (até
+   * `tol` px); senão volta pelo índice entre as minúcias e, por último, pela posição.
+   * Ponta sem feature vira ponto livre (allowPoints); a que estava sem feature já ao
+   * salvar (`missing`) descarta o par.
+   */
+  fromJSON(state, { tol = 2 } = {}) {
     const before = this._snap();
     this._pairs = [];
     for (const p of state && state.pairs || []) {
-      const a = this._endpoint(0, p.a), b = this._endpoint(1, p.b);
+      const a = this._restore(0, p.a, tol), b = this._restore(1, p.b, tol);
       if (a && b) this._pairs.push({ n: Number(p.n), type: p.type || "definite", a, b });
     }
     this._pairs.sort((p, q) => p.n - q.n);
@@ -17732,43 +17765,38 @@ var CorrespondenceEditor = class extends Emitter {
   toCorrespondence() {
     const t = this.rigid();
     return {
-      pairs: this._pairs.map((p) => {
-        const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
-        return {
-          i_probe: this._minutiaIndex(0, a),
-          j_ref: this._minutiaIndex(1, b),
-          type: p.type,
-          n: p.n,
-          kind: _pairKind(a, b),
-          probe_xy: [a.x, a.y],
-          ref_xy: [b.x, b.y]
-        };
-      }),
+      pairs: this._livePairs().map(({ p, a, b }) => ({
+        i_probe: this._minutiaIndex(0, a),
+        j_ref: this._minutiaIndex(1, b),
+        type: p.type,
+        n: p.n,
+        kind: _pairKind(a, b),
+        probe_xy: [a.x, a.y],
+        ref_xy: [b.x, b.y]
+      })),
       transform: t ? { angle: t.angle, tx: t.tx, ty: t.ty } : null
     };
   }
   /** Texto .match (dashboard), com linhas #PAIR N TYPE. */
   toMatchText({ q = "probe", g = "reference", label = "manual" } = {}) {
-    const rows = this._pairs.map((p) => {
-      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
-      return {
-        score: 1,
-        x1: a.x,
-        y1: a.y,
-        t1: a.theta ?? 0,
-        q1: a.quality ?? 0,
-        x2: b.x,
-        y2: b.y,
-        t2: b.theta ?? 0,
-        q2: b.quality ?? 0
-      };
-    });
-    return formatMatchText({ q, g, label }, rows, this._pairs.map((p) => ({ n: p.n, type: p.type })));
+    const live = this._livePairs();
+    const rows = live.map(({ a, b }) => ({
+      score: 1,
+      x1: a.x,
+      y1: a.y,
+      t1: a.theta ?? 0,
+      q1: a.quality ?? 0,
+      x2: b.x,
+      y2: b.y,
+      t2: b.theta ?? 0,
+      q2: b.quality ?? 0
+    }));
+    return formatMatchText({ q, g, label }, rows, live.map(({ p }) => ({ n: p.n, type: p.type })));
   }
   /** Texto #CORR v2 (GT do SD302), com linhas #PAIR N TYPE. */
   toCorrText(meta = {}) {
-    const rows = this._pairs.map((p) => {
-      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+    const live = this._livePairs();
+    const rows = live.map(({ a, b }) => {
       const kind = _pairKind(a, b);
       return {
         kind,
@@ -17780,7 +17808,7 @@ var CorrespondenceEditor = class extends Emitter {
         yb: b.y
       };
     });
-    return formatCorrText(meta, rows, this._pairs.map((p) => ({ n: p.n, type: p.type })));
+    return formatCorrText(meta, rows, live.map(({ p }) => ({ n: p.n, type: p.type })));
   }
   /**
    * Carrega pares de um texto (.match, #CORR ou lista de índices; 'auto' detecta).
@@ -17841,9 +17869,11 @@ var CorrespondenceEditor = class extends Emitter {
     this.render();
   }
   destroy() {
+    this._destroyed = true;
     this.setFlicker(false);
     this._ac.abort();
     for (const off of this._offs) off();
+    for (const off of this._srcOff) if (off) off();
     if (this._ro) this._ro.disconnect();
     if (this._linesSvg) this._linesSvg.remove();
     this._g.forEach((g) => g.remove());
@@ -17852,6 +17882,7 @@ var CorrespondenceEditor = class extends Emitter {
   }
   /* ── desenho ────────────────────────────────────────────── */
   render() {
+    if (this._destroyed) return;
     [0, 1].forEach((side) => {
       const g = this._g[side];
       if (!g.isConnected) this._layers[side].el.appendChild(g);
@@ -17861,12 +17892,14 @@ var CorrespondenceEditor = class extends Emitter {
       const R = this._ring();
       for (const p of this._pairs) {
         const ep = this._resolve(side, side === 0 ? p.a : p.b);
-        const color = PAIR_COLORS[p.type] || PAIR_COLORS.definite;
+        const gone = this._isMissing(p);
+        const color = gone ? "#64748b" : PAIR_COLORS[p.type] || PAIR_COLORS.definite;
         const sel = !this._exportMode && p.n === this._selected;
         const pg = svgEl("g", {
-          class: `mntviz-ce-pair${sel ? " mntviz-ce-selected" : ""}`,
+          class: `mntviz-ce-pair${sel ? " mntviz-ce-selected" : ""}${gone ? " mntviz-ce-missing" : ""}`,
           "data-n": p.n,
-          "data-type": p.type
+          "data-type": p.type,
+          opacity: gone ? 0.6 : null
         }, g);
         if (sel) {
           svgEl("circle", {
@@ -17888,7 +17921,7 @@ var CorrespondenceEditor = class extends Emitter {
           stroke: color,
           "stroke-width": 2,
           "vector-effect": "non-scaling-stroke",
-          "stroke-dasharray": p.type === "definite" ? null : "4 2"
+          "stroke-dasharray": p.type === "definite" && !gone ? null : "4 2"
         }, pg);
         const lg = svgEl("g", {
           class: "mntviz-ce-label",
@@ -17907,7 +17940,7 @@ var CorrespondenceEditor = class extends Emitter {
           "stroke-opacity": 0.8,
           "paint-order": "stroke"
         }, lg);
-        t.textContent = String(p.n);
+        t.textContent = gone ? `${p.n}?` : String(p.n);
       }
       if (this._armed && this._armed.side === side && !this._exportMode) {
         const a = this._resolve(side, this._armed.ep);
@@ -17943,7 +17976,7 @@ var CorrespondenceEditor = class extends Emitter {
   }
   _drawLines() {
     const svg = this._linesSvg;
-    if (!svg) return;
+    if (!svg || this._destroyed) return;
     svg.replaceChildren();
     if (!this._o.lines) return;
     const host = this._o.host.getBoundingClientRect();
@@ -17952,6 +17985,7 @@ var CorrespondenceEditor = class extends Emitter {
     const inside = (p, r) => p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
     for (const p of this._pairs) {
       const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      if (a.missing || b.missing) continue;
       const pa = ml(a.x, a.y), pb = mr(b.x, b.y);
       if (!inside(pa, rl) || !inside(pb, rr)) continue;
       svgEl("line", {
@@ -17973,6 +18007,7 @@ var CorrespondenceEditor = class extends Emitter {
     return this;
   }
   _refreshOverlay() {
+    if (this._destroyed) return;
     if (this._overlay === "off") {
       if (this._ovLayer) this._ovLayer.hide();
       return;
@@ -18126,10 +18161,7 @@ var CorrespondenceEditor = class extends Emitter {
   }
   _pairUsing(side, ep) {
     if (ep.ref == null) return null;
-    return this._pairs.find((p) => {
-      const q = side === 0 ? p.a : p.b;
-      return q.ref === ep.ref && q.kind === ep.kind;
-    }) || null;
+    return this._pairs.find((p) => (side === 0 ? p.a : p.b).ref === ep.ref) || null;
   }
   /* ── fontes de features ─────────────────────────────────── */
   _makeSource(spec) {
@@ -18168,14 +18200,23 @@ var CorrespondenceEditor = class extends Emitter {
   /** Troca as features de um lado (0 latente, 1 referência). */
   setSource(side, spec) {
     this._src[side] = this._makeSource(spec);
-    if (this._src[side].editor) {
-      this._offs.push(this._src[side].editor.on("change", () => {
-        this.render();
-        this._drawLines();
-      }));
-    }
+    this._watchSource(side);
     this.render();
     this._drawLines();
+    this._refreshOverlay();
+  }
+  /** (Re)assina o 'change' do FeatureEditor do lado (um só por lado). */
+  _watchSource(side) {
+    if (this._srcOff[side]) {
+      this._srcOff[side]();
+      this._srcOff[side] = null;
+    }
+    const ed = this._src[side].editor;
+    if (ed) this._srcOff[side] = ed.on("change", () => {
+      this.render();
+      this._drawLines();
+      this._refreshOverlay();
+    });
   }
   /** Normaliza uma ponta dada pelo usuário. */
   _endpoint(side, spec) {
@@ -18195,38 +18236,70 @@ var CorrespondenceEditor = class extends Emitter {
     if (spec.x == null || spec.y == null) return null;
     return { kind: kind === "minutia" ? "point" : kind, ref: null, x: Number(spec.x), y: Number(spec.y) };
   }
+  /** Ponta de um estado salvo (toJSON): ver fromJSON. */
+  _restore(side, spec, tol) {
+    if (!spec) return null;
+    const kind = LETTER_KIND[spec.kind] || spec.kind || "minutia";
+    const hasXY = _finite(spec.x) && _finite(spec.y);
+    const x = hasXY ? Number(spec.x) : null, y = hasXY ? Number(spec.y) : null;
+    if (spec.ref != null) {
+      const it = this._src[side].get(spec.ref);
+      if (it && (!hasXY || Math.hypot(it.x - x, it.y - y) <= tol)) return { kind: it.kind, ref: spec.ref, x: it.x, y: it.y };
+    } else if (kind === "point") {
+      return hasXY ? { kind: "point", ref: null, x, y } : null;
+    }
+    const index = spec.index != null && spec.index >= 0 ? spec.index : null;
+    return this._match(side, { kind, index, x, y, theta: spec.theta }, tol, { points: !spec.missing });
+  }
   /** Casa uma ponta lida de arquivo com as features do lado. */
-  _match(side, spec, tol) {
+  _match(side, spec, tol, { points = true } = {}) {
     const src = this._src[side];
     const kind = spec.kind || "minutia";
+    const hasXY = _finite(spec.x) && _finite(spec.y);
     if (kind === "minutia" && spec.index != null && spec.index >= 0) {
       const m = src.minutiae()[spec.index];
-      if (m && (spec.x == null || Math.hypot(m.x - spec.x, m.y - spec.y) <= tol)) {
+      if (m && (!hasXY || Math.hypot(m.x - spec.x, m.y - spec.y) <= tol)) {
         return { kind: "minutia", ref: m.id, x: m.x, y: m.y };
       }
     }
-    if (spec.x == null || spec.y == null) return null;
+    if (!hasXY) return null;
     let best = null;
     for (const it of src.items()) {
       if (kind !== "point" && it.kind !== kind) continue;
       const d = Math.hypot(it.x - spec.x, it.y - spec.y);
-      if (d > tol) continue;
+      if (!(d <= tol)) continue;
       const dt = spec.theta != null && it.theta != null ? Math.abs(((it.theta - spec.theta) % 360 + 540) % 360 - 180) : 0;
       const score = d + dt / 360;
       if (!best || score < best.score) best = { score, it };
     }
     if (best) return { kind: best.it.kind, ref: best.it.id, x: best.it.x, y: best.it.y };
-    if (!this._o.allowPoints) return null;
+    if (!points || !this._o.allowPoints) return null;
     return { kind: kind === "minutia" ? "point" : kind, ref: null, x: Number(spec.x), y: Number(spec.y) };
   }
-  /** Ponta com as coordenadas atuais (a feature pode ter sido movida no editor). */
+  /**
+   * Ponta com os dados atuais da feature (movida, ou com outro tipo, no editor). Sem a
+   * feature (apagada), devolve a última posição conhecida com `missing: true`.
+   */
   _resolve(side, ep) {
     if (ep.ref == null) return { ...ep };
     const it = this._src[side].get(ep.ref);
     if (!it) return { ...ep, missing: true };
     ep.x = it.x;
     ep.y = it.y;
-    return { ...ep, x: it.x, y: it.y, theta: it.theta, quality: it.quality, type: it.type };
+    ep.kind = it.kind;
+    return { ...ep, x: it.x, y: it.y, kind: it.kind, theta: it.theta, quality: it.quality, type: it.type };
+  }
+  _isMissing(p) {
+    return !!(this._resolve(0, p.a).missing || this._resolve(1, p.b).missing);
+  }
+  /** Pares com as duas pontas resolvidas: [{p, a, b}] (o que entra no ajuste e na exportação). */
+  _livePairs() {
+    const out = [];
+    for (const p of this._pairs) {
+      const a = this._resolve(0, p.a), b = this._resolve(1, p.b);
+      if (!a.missing && !b.missing) out.push({ p, a, b });
+    }
+    return out;
   }
   _minutiaIndex(side, ep) {
     if (ep.ref == null || ep.kind !== "minutia") return -1;
@@ -18238,6 +18311,7 @@ var CorrespondenceEditor = class extends Emitter {
       n: p.n,
       type: p.type,
       kind: _pairKind(a, b),
+      missing: !!(a.missing || b.missing),
       a: { ...a, index: this._minutiaIndex(0, a) },
       b: { ...b, index: this._minutiaIndex(1, b) }
     };
@@ -18277,6 +18351,9 @@ function _ridgeTint(ctx, W, H, color) {
     d[i + 3] = Math.round((255 - v) * d[i + 3] / 255);
   }
   ctx.putImageData(img, 0, 0);
+}
+function _finite(v) {
+  return v != null && v !== "" && Number.isFinite(Number(v));
 }
 function _pairKind(a, b) {
   if (a.kind === b.kind && (a.kind === "minutia" || a.kind === "core" || a.kind === "delta")) return KIND_LETTER[a.kind];
