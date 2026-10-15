@@ -267,9 +267,9 @@ def ori_arrows(
     ``convention`` é o referencial em que ``ori_u/ori_v`` foram escritos:
 
     * ``"image"`` (padrão): θ medido na própria imagem, y para baixo. É o dos mapas
-      ``ori_u/ori_v`` do mntstitch (conferido com o gradiente da imagem num exemplo da SD258:
-      correlação média de cos 2Δθ de 0,78 contra 0,16 no outro referencial). Seta
-      ``(cos θ, sin θ)``.
+      ``ori_u/ori_v`` do extrator de referência (conferido com o gradiente da imagem num
+      exemplo da SD258: correlação média de cos 2Δθ de 0,78 contra 0,16 no outro
+      referencial). Seta ``(cos θ, sin θ)``.
     * ``"iso"``: θ ISO, anti-horário com y para cima, como a direção das minúcias em
       ``uv_arrows`` e ``sing_arrows`` (que negam v). Seta ``(cos θ, −sin θ)``: um campo
       de 30° ISO é desenhado a 30° no sentido anti-horário na tela, não a −30°.
