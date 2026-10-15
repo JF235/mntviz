@@ -245,14 +245,15 @@ function _rulerLabel(m) {
 
 const RIDGE_DEFAULTS = {
     ppi: 500, layer: 'measure', z: 45, color: '#22d3ee', mode: 'ridges',
-    sigma: 1.0, minProminence: 8, exclude: 3, polarity: 'dark', channel: 0, source: null,
+    sigma: 1.0, minProminence: 8, exclude: 3, polarity: 'dark', channel: 0, source: null, minSeparation: null,
 };
 
 export class RidgeCount extends Emitter {
     /**
      * @param {import('./viewer.js').Viewer} viewer
      * @param {object} [opts] - ppi; source: () => ImageData (padrão: pixels do <img>);
-     *        sigma, minProminence, exclude, polarity ('dark' = cristas escuras).
+     *        sigma, minProminence, exclude, polarity ('dark' = cristas escuras),
+     *        minSeparation (amostras; null = 0,35 do período, ver findRidges).
      */
     constructor(viewer, opts = {}) {
         super();
@@ -286,13 +287,15 @@ export class RidgeCount extends Emitter {
         const o = this._o;
         const prof = ridgeProfile(img, p1, p2, { channel: o.channel });
         const sm = smoothProfile(prof.values, o.sigma);
-        const ridges = findRidges(sm, { minProminence: o.minProminence, exclude: o.exclude, polarity: o.polarity });
+        const ridges = findRidges(sm, { minProminence: o.minProminence, exclude: o.exclude, polarity: o.polarity,
+            minSeparation: o.minSeparation });
         const m = {
             x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, px: prof.length, mm: mmFromPx(prof.length, o.ppi), ppi: o.ppi,
             count: ridges.length,
             minima: ridges.map(r => ({ i: r.i, x: prof.xs[r.i], y: prof.ys[r.i], v: sm[r.i], prominence: r.prominence })),
             profile: Array.from(prof.values), smoothed: Array.from(sm),
-            params: { sigma: o.sigma, minProminence: o.minProminence, exclude: o.exclude, polarity: o.polarity },
+            params: { sigma: o.sigma, minProminence: o.minProminence, exclude: o.exclude, polarity: o.polarity,
+                minSeparation: o.minSeparation },
         };
         if (!keep) this._items = [];
         this._items.push(m);
