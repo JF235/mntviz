@@ -15806,6 +15806,8 @@ var FeatureEditor = class extends Emitter {
     this._readOnly = !!this._o.readOnly;
     this._raf = 0;
     this._syncing = false;
+    this._destroyed = false;
+    this._sugGen = 0;
     this._layer = viewer.layers.ensure(this._o.layer, { kind: "svg", z: this._o.z });
     this._sugLayer = viewer.layers.ensure(this._o.suggestionLayer, { kind: "svg", z: this._o.suggestionZ });
     this._g = svgEl("g", { class: "mntviz-fe" });
@@ -15840,10 +15842,10 @@ var FeatureEditor = class extends Emitter {
     return this._readOnly;
   }
   get canUndo() {
-    return this._history.canUndo;
+    return !this._readOnly && this._history.canUndo;
   }
   get canRedo() {
-    return this._history.canRedo;
+    return !this._readOnly && this._history.canRedo;
   }
   get newType() {
     return this._newType;
@@ -15928,7 +15930,7 @@ var FeatureEditor = class extends Emitter {
     if (this._mode !== "roi" && this._roiDraft) {
       this._roiDraft = null;
     }
-    if (!EDIT_MODES.has(this._mode)) this._drag = null;
+    if (!EDIT_MODES.has(this._mode) && this._drag) this._up();
     this.render();
   }
   /** Trata uma tecla; devolve true se consumiu. */
@@ -16130,6 +16132,7 @@ var FeatureEditor = class extends Emitter {
     for (const d of s.deltas || []) push("delta", d);
     this._sugSource = source ? clone(source) : null;
     this._focusSid = null;
+    this._sugGen++;
     this.render();
     this.emit("suggestions", { n: this._sug.length, source: this._sugSource });
     return this;
@@ -16196,7 +16199,9 @@ var FeatureEditor = class extends Emitter {
     return ids;
   }
   /* ── desfazer ───────────────────────────────────────────── */
+  /** Desfaz o último passo (nada com o editor travado: readOnly vale também para o histórico). */
   undo() {
+    if (this._readOnly) return false;
     const cur = this._snap();
     const prev = this._history.undo(cur);
     if (!prev) return false;
@@ -16206,6 +16211,7 @@ var FeatureEditor = class extends Emitter {
     return true;
   }
   redo() {
+    if (this._readOnly) return false;
     const cur = this._snap();
     const next = this._history.redo(cur);
     if (!next) return false;
@@ -16294,6 +16300,11 @@ var FeatureEditor = class extends Emitter {
     this.render();
   }
   destroy() {
+    this._destroyed = true;
+    if (this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = 0;
+    }
     this._ac.abort();
     this._offView();
     this._offSel();
@@ -16307,6 +16318,7 @@ var FeatureEditor = class extends Emitter {
       cancelAnimationFrame(this._raf);
       this._raf = 0;
     }
+    if (this._destroyed) return;
     if (!this._g.isConnected) this._layer.el.appendChild(this._g);
     if (!this._sg.isConnected) this._sugLayer.el.appendChild(this._sg);
     this._g.replaceChildren();
@@ -16322,7 +16334,7 @@ var FeatureEditor = class extends Emitter {
     }
   }
   _scheduleRender() {
-    if (this._raf) return;
+    if (this._raf || this._destroyed) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = 0;
       this.render();
@@ -16758,6 +16770,7 @@ var FeatureEditor = class extends Emitter {
       roi: this._roi ? clone(this._roi) : null,
       meta: clone(this._meta),
       sug: this._sug.map((s) => s.status),
+      sugGen: this._sugGen,
       nextId: this._nextId
     };
   }
@@ -16765,7 +16778,7 @@ var FeatureEditor = class extends Emitter {
     this._items = clone(s.items);
     this._roi = s.roi ? clone(s.roi) : null;
     this._meta = clone(s.meta);
-    s.sug.forEach((st, i) => {
+    if (s.sugGen === this._sugGen) s.sug.forEach((st, i) => {
       if (this._sug[i]) this._sug[i].status = st;
     });
     for (const id of [...this._selected]) if (!this._items.some((i) => i.id === id)) this._selected.delete(id);

@@ -95,6 +95,8 @@ export class FeatureEditor extends Emitter {
         this._readOnly = !!this._o.readOnly;
         this._raf = 0;
         this._syncing = false;
+        this._destroyed = false;
+        this._sugGen = 0;          // troca a cada setSuggestions: o desfazer não aplica estados de outra lista
 
         this._layer = viewer.layers.ensure(this._o.layer, { kind: 'svg', z: this._o.z });
         this._sugLayer = viewer.layers.ensure(this._o.suggestionLayer, { kind: 'svg', z: this._o.suggestionZ });
@@ -125,8 +127,8 @@ export class FeatureEditor extends Emitter {
     get layerName() { return this._o.layer; }
     get ppi() { return this._o.ppi; }
     get readOnly() { return this._readOnly; }
-    get canUndo() { return this._history.canUndo; }
-    get canRedo() { return this._history.canRedo; }
+    get canUndo() { return !this._readOnly && this._history.canUndo; }
+    get canRedo() { return !this._readOnly && this._history.canRedo; }
     get newType() { return this._newType; }
     get defaultConfidence() { return this._defaultConfidence; }
     get phase() { return this._phase; }
@@ -178,7 +180,7 @@ export class FeatureEditor extends Emitter {
             this._emitTool();
         }
         if (this._mode !== 'roi' && this._roiDraft) { this._roiDraft = null; }
-        if (!EDIT_MODES.has(this._mode)) this._drag = null;
+        if (!EDIT_MODES.has(this._mode) && this._drag) this._up();   // confirma o que o arrasto já mudou (passo de desfazer + 'change')
         this.render();
     }
 
@@ -350,6 +352,7 @@ export class FeatureEditor extends Emitter {
         for (const d of s.deltas || []) push('delta', d);
         this._sugSource = source ? clone(source) : null;
         this._focusSid = null;
+        this._sugGen++;
         this.render();
         this.emit('suggestions', { n: this._sug.length, source: this._sugSource });
         return this;
@@ -415,7 +418,9 @@ export class FeatureEditor extends Emitter {
 
     /* ── desfazer ───────────────────────────────────────────── */
 
+    /** Desfaz o último passo (nada com o editor travado: readOnly vale também para o histórico). */
     undo() {
+        if (this._readOnly) return false;
         const cur = this._snap();
         const prev = this._history.undo(cur);
         if (!prev) return false;
@@ -426,6 +431,7 @@ export class FeatureEditor extends Emitter {
     }
 
     redo() {
+        if (this._readOnly) return false;
         const cur = this._snap();
         const next = this._history.redo(cur);
         if (!next) return false;
@@ -487,6 +493,8 @@ export class FeatureEditor extends Emitter {
     endExport() { this._exportMode = false; this.render(); }
 
     destroy() {
+        this._destroyed = true;
+        if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
         this._ac.abort();
         this._offView();
         this._offSel();
@@ -499,6 +507,7 @@ export class FeatureEditor extends Emitter {
 
     render() {
         if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+        if (this._destroyed) return;
         if (!this._g.isConnected) this._layer.el.appendChild(this._g);
         if (!this._sg.isConnected) this._sugLayer.el.appendChild(this._sg);
         this._g.replaceChildren();
@@ -515,7 +524,7 @@ export class FeatureEditor extends Emitter {
     }
 
     _scheduleRender() {
-        if (this._raf) return;
+        if (this._raf || this._destroyed) return;
         this._raf = requestAnimationFrame(() => { this._raf = 0; this.render(); });
     }
 
@@ -861,14 +870,15 @@ export class FeatureEditor extends Emitter {
 
     _snap() {
         return { items: clone(this._items), roi: this._roi ? clone(this._roi) : null, meta: clone(this._meta),
-            sug: this._sug.map(s => s.status), nextId: this._nextId };
+            sug: this._sug.map(s => s.status), sugGen: this._sugGen, nextId: this._nextId };
     }
 
     _load(s) {
         this._items = clone(s.items);
         this._roi = s.roi ? clone(s.roi) : null;
         this._meta = clone(s.meta);
-        s.sug.forEach((st, i) => { if (this._sug[i]) this._sug[i].status = st; });
+        // os estados das sugestões só valem para a lista em que foram tirados
+        if (s.sugGen === this._sugGen) s.sug.forEach((st, i) => { if (this._sug[i]) this._sug[i].status = st; });
         for (const id of [...this._selected]) if (!this._items.some(i => i.id === id)) this._selected.delete(id);
         this._pushSelection();
     }
