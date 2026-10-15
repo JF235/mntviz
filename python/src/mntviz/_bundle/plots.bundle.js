@@ -18508,20 +18508,40 @@ function smoothProfile(values, sigma = 1) {
   }
   return out;
 }
-function findRidges(smoothed, { minProminence = 8, exclude = 3, polarity = "dark" } = {}) {
+function findRidges(smoothed, { minProminence = 8, exclude = 3, polarity = "dark", minSeparation = null } = {}) {
   const n = smoothed.length;
   const s = polarity === "light" ? Array.from(smoothed, (v) => -v) : smoothed;
-  const cand = [];
-  for (let i = 1; i < n - 1; i++) if (s[i] < s[i - 1] && s[i] <= s[i + 1]) cand.push(i);
   const out = [];
-  for (let k = 0; k < cand.length; k++) {
-    const i = cand[k];
-    const lo = k > 0 ? cand[k - 1] : 0, hi = k < cand.length - 1 ? cand[k + 1] : n - 1;
-    let lm = -Infinity, rm = -Infinity;
-    for (let j = lo; j <= i; j++) if (s[j] > lm) lm = s[j];
-    for (let j = i; j <= hi; j++) if (s[j] > rm) rm = s[j];
+  for (let i = Math.max(1, exclude); i <= Math.min(n - 2, n - 1 - exclude); i++) {
+    if (!(s[i] < s[i - 1] && s[i] <= s[i + 1])) continue;
+    let lm = s[i], rm = s[i];
+    for (let j = i - 1; j >= 0 && !(s[j] < s[i]); j--) if (s[j] > lm) lm = s[j];
+    for (let j = i + 1; j < n && !(s[j] < s[i]); j++) if (s[j] > rm) rm = s[j];
     const prom = Math.min(lm, rm) - s[i];
-    if (prom >= minProminence && i >= exclude && i <= n - 1 - exclude) out.push({ i, prominence: prom });
+    if (prom >= minProminence) out.push({ i, prominence: prom });
+  }
+  let sep = minSeparation;
+  if (sep == null) {
+    sep = 0;
+    if (out.length >= 3) {
+      const gaps = [];
+      for (let k = 1; k < out.length; k++) gaps.push(out[k].i - out[k - 1].i);
+      gaps.sort((a, b) => a - b);
+      const mid = gaps.length >> 1;
+      sep = 0.35 * (gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2);
+    }
+  }
+  if (sep > 0) {
+    for (let k = 1; k < out.length; ) {
+      const a = out[k - 1], b = out[k];
+      if (b.i - a.i >= sep) {
+        k++;
+        continue;
+      }
+      const keepB = b.prominence > a.prominence || b.prominence === a.prominence && s[b.i] < s[a.i];
+      out.splice(keepB ? k - 1 : k, 1);
+      if (keepB && k > 1) k--;
+    }
   }
   return out;
 }
