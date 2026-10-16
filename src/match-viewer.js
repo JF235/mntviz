@@ -82,6 +82,12 @@ export class MatchViewer {
         this._buildDOM();
     }
 
+    /** The left-hand `Viewer` (null until `loadImages()` has built it). Read-only access for hosts that need to drive it. */
+    get leftViewer() { return this._leftViewer; }
+
+    /** The right-hand `Viewer` (null until `loadImages()` has built it). */
+    get rightViewer() { return this._rightViewer; }
+
     /* ── DOM construction ─────────────────────────────────── */
 
     _buildDOM() {
