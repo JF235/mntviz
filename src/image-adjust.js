@@ -124,6 +124,8 @@ export class ImageAdjust extends Emitter {
         this._baseSrc = null;        // src a que _base pertence
         this._gen = 0;               // cada _loadBase invalida os anteriores
         this._reasons = {};
+        this._alphaMod = null;       // {width, height, data} (setAlphaModulation): the output alpha is scaled by it
+        this._alphaModFit = null;    // the same map resampled to the output size
         this._layer = viewer.layers.ensure(layer, { kind: 'canvas', z });
         this._layer.el.style.imageRendering = 'pixelated';     // como o <img>: sem suavizar no zoom
         this._placeLayer();
@@ -340,6 +342,32 @@ export class ImageAdjust extends Emitter {
         }
     }
 
+    /**
+     * Scale the adjusted image's alpha by a field (0-255 per pixel, any size: resampled to the
+     * image), so the original shows through where it is low: e.g. CLAHE only inside a mask, or
+     * blended softly by a quality map. `null` removes it.
+     * @param {{width: number, height: number, data: Uint8ClampedArray}|null} map
+     */
+    setAlphaModulation(map) {
+        this._alphaMod = map && map.data && map.width && map.height ? map : null;
+        this._alphaModFit = null;
+        this._apply();
+    }
+
+    _modFor(w, h) {
+        const m = this._alphaMod;
+        if (!m) return null;
+        if (this._alphaModFit && this._alphaModFit.w === w && this._alphaModFit.h === h) return this._alphaModFit.data;
+        const out = new Uint8ClampedArray(w * h);
+        const sx = m.width / w, sy = m.height / h;
+        for (let y = 0; y < h; y++) {
+            const my = Math.min(m.height - 1, Math.floor(y * sy)) * m.width;
+            for (let x = 0; x < w; x++) out[y * w + x] = m.data[my + Math.min(m.width - 1, Math.floor(x * sx))];
+        }
+        this._alphaModFit = { w, h, data: out };
+        return out;
+    }
+
     _apply() {
         const base = this._base;
         if (!base) return;
@@ -352,8 +380,10 @@ export class ImageAdjust extends Emitter {
         const { width: w, height: h } = src;
         if (!this._out || this._out.width !== w || this._out.height !== h) this._out = new ImageData(w, h);
         const s = src.data, d = this._out.data;
+        const mod = this._bypass ? null : this._modFor(w, h);
         for (let i = 0; i < s.length; i += 4) {
-            d[i] = lut[s[i]]; d[i + 1] = lut[s[i + 1]]; d[i + 2] = lut[s[i + 2]]; d[i + 3] = s[i + 3];
+            d[i] = lut[s[i]]; d[i + 1] = lut[s[i + 1]]; d[i + 2] = lut[s[i + 2]];
+            d[i + 3] = mod ? (s[i + 3] * mod[i >> 2] + 127) / 255 : s[i + 3];
         }
         const c = this._layer.el;
         if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
