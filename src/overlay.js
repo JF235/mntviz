@@ -52,6 +52,7 @@ export class OverlayLayer {
         // Raw grayscale data (set after load when colormap is active)
         this._rawData = null;    // Uint8ClampedArray (w * h)
         this._alphaData = null;  // Optional separate alpha (for computed overlays)
+        this._alphaMod = null;   // Optional multiplicative alpha modulation (setAlphaModulation)
         this._rawWidth = 0;
         this._rawHeight = 0;
         this._contourLevels = null;  // array of thresholds (0-100 scale)
@@ -391,6 +392,16 @@ export class OverlayLayer {
     }
 
     /** @private Apply colormap LUT to rawData and draw on canvas. */
+    /**
+     * Scale this overlay's alpha by another field (grayscale mode): e.g. a soft quality map
+     * or a binary mask, already resampled to `rawWidth x rawHeight` (0-255). `null` removes it.
+     * @param {Uint8ClampedArray|null} data
+     */
+    setAlphaModulation(data) {
+        this._alphaMod = data || null;
+        if (this._rawData) this._applyAndDraw();
+    }
+
     _applyAndDraw() {
         if (!this._rawData || !this._colormap) return;
         const imageData = applyColormap(
@@ -398,6 +409,7 @@ export class OverlayLayer {
             {
                 alpha: this._alphaMode,
                 alphaData: this._alphaData || null,
+                alphaMod: this._alphaMod && this._alphaMod.length === this._rawWidth * this._rawHeight ? this._alphaMod : null,
                 fadeGamma: this._fadeGamma,
                 invert: this._invert,
                 valueLUT: this._stretchLUT,

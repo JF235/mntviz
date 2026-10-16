@@ -49,6 +49,7 @@ export class UVFieldRenderer {
      *   - (x, y): origin in image coordinates
      *   - (dx, dy): direction vector (already scaled to segment length)
      *   - confidence: 0-1 value controlling opacity and size
+     *   - optional 6th: modulation (see `modulationTarget`); optional 7th: CSS color for this arrow
      * @param {object} [options] - Override defaults.
      */
     draw(arrows, options = {}) {
@@ -78,8 +79,9 @@ export class UVFieldRenderer {
 
             const g = document.createElementNS(SVG_NS, 'g');
             g.setAttribute('opacity', alpha);
-            g.setAttribute('stroke', color);
-            g.setAttribute('fill', color);
+            const c = arrow.length > 6 && arrow[6] ? arrow[6] : color;   // optional per-arrow color (7th element)
+            g.setAttribute('stroke', c);
+            g.setAttribute('fill', c);
             g.setAttribute('stroke-linecap', 'round');
 
             const line = document.createElementNS(SVG_NS, 'line');
