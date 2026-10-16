@@ -73,6 +73,10 @@ export class MinutiaeInspector {
      * @returns {() => void}
      */
     attach(el) {
+        // Already covered by the svgLayer listeners (events bubble): listening twice would
+        // run every handler twice (and leave a stray hide timer).
+        const svg = this._viewer.svgLayer;
+        if (!el || el === svg || svg.contains(el) || el.contains(svg)) return () => {};
         const ac = new AbortController();
         const sig = { signal: ac.signal };
         el.addEventListener('mouseover', (e) => this._onMouseOver(e), sig);
@@ -184,6 +188,9 @@ export class MinutiaeInspector {
         if (!marker) return;
         if (this._isExpanded) return;
         clearTimeout(this._hideTimer);
+        // Same marker already shown (moving between its circle/line/hit area, or the
+        // bring-to-front re-insert below): nothing to redo.
+        if (marker === this._activeMarkerEl && this.isVisible) return;
 
         const m = minutiaDataMap.get(marker);
         if (!m) return;
@@ -203,8 +210,11 @@ export class MinutiaeInspector {
         const marker = e.target.closest('.mntviz-mnt-marker');
         if (!marker) return;
         if (this._isExpanded) return;
+        // Still inside the same marker (circle -> line -> hit circle): not leaving it.
+        if (e.relatedTarget && marker.contains(e.relatedTarget)) return;
         this._unhighlight();
-        this._hideTimer = setTimeout(() => this._hide(), 60);
+        clearTimeout(this._hideTimer);   // never leave an orphan timer behind
+        this._hideTimer = setTimeout(() => { this._hide(); this._activeMarkerEl = null; }, 60);
     }
 
     _onSvgMouseDown(e) {
