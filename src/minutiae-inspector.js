@@ -65,6 +65,24 @@ export class MinutiaeInspector {
         this._viewer.viewport.addEventListener('mousedown', (e) => this._onViewportMouseDown(e), sig);
     }
 
+    /**
+     * Also listen on another SVG element (e.g. a LayerStack layer): markers drawn outside
+     * `viewer.svgLayer` get the same hover info and click-to-patch. Returns a detach function;
+     * `disable()` detaches everything.
+     * @param {Element} el
+     * @returns {() => void}
+     */
+    attach(el) {
+        const ac = new AbortController();
+        const sig = { signal: ac.signal };
+        el.addEventListener('mouseover', (e) => this._onMouseOver(e), sig);
+        el.addEventListener('mouseout', (e) => this._onMouseOut(e), sig);
+        el.addEventListener('mousedown', (e) => this._onSvgMouseDown(e), sig);
+        el.addEventListener('mouseup', (e) => this._onSvgMouseUp(e), sig);
+        if (this._ac) this._ac.signal.addEventListener('abort', () => ac.abort(), { once: true });
+        return () => ac.abort();
+    }
+
     disable() {
         if (this._ac) { this._ac.abort(); this._ac = null; }
         this._unhighlight();
