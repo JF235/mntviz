@@ -208,6 +208,12 @@ const estado = adj.serialize();         // {version, decode, ops}; adj.restore(e
 const ed = new FeatureEditor(v, { ppi: 500, layer: 'analise',
     color: (f) => GYRO[f.confidence] });                 // regra de cor do host
 ed.setSuggestions(sugestoes, { source: { kind: 'algo', id: 'extrator-x' } });
+// ou vários sugestores de uma vez, cada um com a sua cor (a origem do aceito é a `source` dele):
+//   new FeatureEditor(v, { suggestions: [{ source: { kind: 'algo', id: 'a' }, color: '#9a6bff', features: fa },
+//                                        { source: { kind: 'algo', id: 'b' }, color: '#16b497', features: fb }] });
+//   ed.suggestionSets                  // [{index, source, color, label, visible, open, accepted, rejected, n}]
+//   ed.setSuggestionSetVisible(0, false)
+//   ed.markAt(clientX, clientY)        // a marca sob o ponto: {kind: 'item'|'suggestion', ...} ou null (para o hover do host)
 ed.on('change', ({ type, diff, features }) => salvar(features));
 modes.add(ed);
 

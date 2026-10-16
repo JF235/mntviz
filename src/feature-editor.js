@@ -30,6 +30,12 @@
  * changed}, features} (também no viewer.on('change')); 'select' {ids, items};
  * 'focus' {sid, suggestion}; 'tool' {newType, defaultConfidence}.
  *
+ * Sugestões de vários sugestores (aditivo): `suggestions: [{source, color, label?, features}]` (ou `setSuggestions` com a mesma lista).
+ * Cada entrada é um sugestor: `source` = {kind: 'algo', id, version, params_hash} vai na origem do que for aceito, `color` pinta as
+ * marcas tracejadas dele e `features` (ou `minutiae`/`cores`/`deltas` direto) são as marcas. `suggestionSets` lista os sugestores com
+ * as contagens, `setSuggestionSetVisible(i, on)` os liga e desliga e `markAt(x, y)` diz que marca (aceita ou sugerida) está sob um
+ * ponto da tela, para o host escrever a fonte no hover. A forma antiga (Features-like ou lista de minúcias) continua valendo.
+ *
  * Uso:
  *   const ed = new FeatureEditor(viewer, { ppi: 500, layer: 'analise',
  *       color: (f) => GYRO[f.confidence] });             // a regra de cor é do host
@@ -81,6 +87,7 @@ export class FeatureEditor extends Emitter {
         this._meta = { frgp: 0, absent: [] };
         this._sug = [];
         this._sugSource = null;
+        this._sugSets = null;      // vários sugestores: [{index, source, color, label, visible}]; null = a forma antiga (uma fonte só)
         this._focusSid = null;
         this._selected = new Set();
         this._nextId = 1;
@@ -149,6 +156,36 @@ export class FeatureEditor extends Emitter {
 
     /** Sugestões com o estado de cada uma ('open' | 'accepted' | 'rejected'). */
     get suggestions() { return this._sug.map(s => ({ ...s })); }
+
+    /** Os sugestores (forma `suggestions: [{source, color, ...}]`) com as contagens: [{index, source, color, label, visible, open, accepted, rejected, n}]. */
+    get suggestionSets() {
+        return (this._sugSets || []).map(set => {
+            const mine = this._sug.filter(s => s.src === set.index);
+            const c = (st) => mine.filter(s => s.status === st).length;
+            return { ...clone(set), open: c('open'), accepted: c('accepted'), rejected: c('rejected'), n: mine.length };
+        });
+    }
+
+    /** Liga ou desliga (some da tela e do A/X) as sugestões de um sugestor. */
+    setSuggestionSetVisible(index, on) {
+        const set = (this._sugSets || [])[index];
+        if (!set) return this;
+        set.visible = !!on;
+        if (this._focusSid != null && !this._sugVisible(this._sugById(this._focusSid))) this._focusSid = null;
+        this.render();
+        this.emit('suggestions', { n: this._sug.length, source: this._sugSource, sets: this.suggestionSets });
+        return this;
+    }
+
+    /** A marca sob um ponto da tela: {kind: 'item', item} (aceita), {kind: 'suggestion', suggestion} ou null. */
+    markAt(clientX, clientY) {
+        const e = { clientX, clientY };
+        const hit = this._hit(e);
+        if (hit) { const it = this.get(hit.id); if (it) return { kind: 'item', item: it }; }
+        const sh = this._hitSug(e);
+        if (sh) { const s = this._sugById(sh.sid); if (s) return { kind: 'suggestion', suggestion: { ...s } }; }
+        return null;
+    }
 
     setPpi(ppi) { this._o.ppi = Number(ppi); this.render(); return this; }
     setReadOnly(on) { this._readOnly = !!on; this._drag = null; this._roiDraft = null; this.render(); return this; }
@@ -338,25 +375,68 @@ export class FeatureEditor extends Emitter {
      * Sugestões do algoritmo (camada tracejada, separada das respostas):
      * Features-like {minutiae, cores, deltas} ou uma lista de minúcias.
      * `source` = {kind: 'algo', id, version, params_hash} vai na origem do aceito.
+     * Vários sugestores: uma lista de {source, color, label?, features} (a `source` de cada um vale no lugar da do 2.º argumento).
      */
     setSuggestions(sug, { source = null } = {}) {
         this._sug = [];
         let sid = 0;
-        const s = sug || {};
-        const push = (kind, m) => {
+        const sets = _isSuggestionSets(sug) ? sug : null;
+        const push = (kind, m, set = null) => {
             const it = this._importItem(kind, m, { keepFloat: true });
-            this._sug.push({ sid: sid++, kind, x: it.x, y: it.y, theta: it.theta, type: it.type,
-                quality: it.quality, status: 'open' });
+            const rec = { sid: sid++, kind, x: it.x, y: it.y, theta: it.theta, type: it.type,
+                quality: it.quality, status: 'open' };
+            if (set) { rec.src = set.index; rec.color = set.color; }
+            this._sug.push(rec);
         };
-        for (const m of s.minutiae || (Array.isArray(sug) ? sug : [])) push('minutia', m);
-        for (const c of s.cores || []) push('core', c);
-        for (const d of s.deltas || []) push('delta', d);
-        this._sugSource = source ? clone(source) : null;
+        if (sets) {
+            this._sugSets = sets.map((e, i) => ({ index: i, source: e.source ? clone(e.source) : null,
+                color: e.color || this._o.suggestionColor,
+                label: e.label || (e.source && e.source.id) || `#${i + 1}`, visible: e.visible !== false }));
+            sets.forEach((e, i) => {
+                const f = e.features || e;
+                for (const m of f.minutiae || []) push('minutia', m, this._sugSets[i]);
+                for (const c of f.cores || []) push('core', c, this._sugSets[i]);
+                for (const d of f.deltas || []) push('delta', d, this._sugSets[i]);
+            });
+            this._sugSource = null;
+        } else {
+            this._sugSets = null;
+            const s = sug || {};
+            for (const m of s.minutiae || (Array.isArray(sug) ? sug : [])) push('minutia', m);
+            for (const c of s.cores || []) push('core', c);
+            for (const d of s.deltas || []) push('delta', d);
+            this._sugSource = source ? clone(source) : null;
+        }
         this._focusSid = null;
         this._sugGen++;
         this.render();
-        this.emit('suggestions', { n: this._sug.length, source: this._sugSource });
+        this.emit('suggestions', { n: this._sug.length, source: this._sugSource, sets: this.suggestionSets });
         return this;
+    }
+
+    /**
+     * Soma um sugestor às sugestões que já estão na tela, sem mexer no estado das outras (aceitas e rejeitadas continuam como estão).
+     * `{source, color, label?, features}`. Devolve o índice do sugestor.
+     */
+    addSuggestionSet({ source = null, color = null, label = null, features = null, visible = true } = {}) {
+        if (!this._sugSets) this._sugSets = [];
+        const set = { index: this._sugSets.length, source: source ? clone(source) : null, color: color || this._o.suggestionColor,
+            label: label || (source && source.id) || `#${this._sugSets.length + 1}`, visible: visible !== false };
+        this._sugSets.push(set);
+        let sid = this._sug.reduce((n, s) => Math.max(n, s.sid + 1), 0);
+        const f = features || {};
+        const push = (kind, m) => {
+            const it = this._importItem(kind, m, { keepFloat: true });
+            this._sug.push({ sid: sid++, kind, x: it.x, y: it.y, theta: it.theta, type: it.type, quality: it.quality,
+                status: 'open', src: set.index, color: set.color });
+        };
+        for (const m of f.minutiae || []) push('minutia', m);
+        for (const c of f.cores || []) push('core', c);
+        for (const d of f.deltas || []) push('delta', d);
+        this._sugGen++;
+        this.render();
+        this.emit('suggestions', { n: this._sug.length, source: this._sugSource, sets: this.suggestionSets });
+        return set.index;
     }
 
     /** Aceita sugestões ('focused', 'all' ou lista de sid). Devolve os ids criados. */
@@ -368,7 +448,8 @@ export class FeatureEditor extends Emitter {
         for (const s of list) {
             s.status = 'accepted';
             const it = this._newItem(s.kind, s.x, s.y, { theta: s.theta, type: s.type, quality: s.quality });
-            it.origin = { ...(this._sugSource || { kind: 'algo' }), sid: s.sid };
+            const set = this._sugSets && s.src != null ? this._sugSets[s.src] : null;
+            it.origin = { ...((set && set.source) || this._sugSource || { kind: 'algo' }), sid: s.sid };
             this._items.push(it);
             ids.push(it.id);
         }
@@ -390,7 +471,7 @@ export class FeatureEditor extends Emitter {
 
     /** Foco na próxima (ou anterior) sugestão aberta. */
     focusNext(dir = 1) {
-        const open = this._sug.filter(s => s.status === 'open');
+        const open = this._sug.filter(s => s.status === 'open' && this._sugVisible(s));
         if (!open.length) { this._setFocus(null); return null; }
         const i = open.findIndex(s => s.sid === this._focusSid);
         const next = open[(i < 0 ? (dir > 0 ? 0 : open.length - 1) : (i + dir + open.length) % open.length)];
@@ -469,7 +550,7 @@ export class FeatureEditor extends Emitter {
         return {
             version: 1, layer: this._o.layer, ppi: this._o.ppi, phase: this._phase, nextId: this._nextId,
             items: clone(this._items), roi: this.roi, meta: clone(this._meta),
-            suggestions: { source: clone(this._sugSource), items: clone(this._sug) },
+            suggestions: { source: clone(this._sugSource), items: clone(this._sug), sets: clone(this._sugSets) },
         };
     }
 
@@ -481,6 +562,7 @@ export class FeatureEditor extends Emitter {
         this._meta = clone(state.meta || { frgp: 0, absent: [] });
         this._sug = clone((state.suggestions && state.suggestions.items) || []);
         this._sugSource = clone((state.suggestions && state.suggestions.source) || null);
+        this._sugSets = state.suggestions && state.suggestions.sets ? clone(state.suggestions.sets) : null;
         this._nextId = Math.max(state.nextId || 1, ...this._items.map(i => i.id + 1), 1);
         if (state.ppi) this._o.ppi = state.ppi;
         if (state.phase) this._phase = state.phase;
@@ -517,8 +599,8 @@ export class FeatureEditor extends Emitter {
         const ex = this._exportMode;
         this._drawRoi();
         for (const s of this._sug) {
-            if (s.status !== 'open') continue;
-            this._glyph(this._sg, s, this._o.suggestionColor, { dashed: true, focused: !ex && s.sid === this._focusSid });
+            if (s.status !== 'open' || !this._sugVisible(s)) continue;
+            this._glyph(this._sg, s, s.color || this._o.suggestionColor, { dashed: true, focused: !ex && s.sid === this._focusSid });
         }
         for (const it of this._items) {
             this._glyph(this._g, it, this._colorOf(it), { selected: !ex && this._selected.has(it.id) });
@@ -809,7 +891,7 @@ export class FeatureEditor extends Emitter {
         const map = screenMapper(this.viewer);
         let best = null;
         for (const s of this._sug) {
-            if (s.status !== 'open') continue;
+            if (s.status !== 'open' || !this._sugVisible(s)) continue;
             const c = map(s.x, s.y);
             const d = Math.hypot(c.x - e.clientX, c.y - e.clientY);
             if (d <= this._o.hitRadius && (!best || d < best.d)) best = { sid: s.sid, d };
@@ -947,6 +1029,9 @@ export class FeatureEditor extends Emitter {
 
     _sugById(sid) { return sid == null ? null : this._sug.find(s => s.sid === sid) || null; }
 
+    /** A sugestão aparece? (o sugestor dela não foi desligado) */
+    _sugVisible(s) { return !s || !this._sugSets || s.src == null || !this._sugSets[s.src] || this._sugSets[s.src].visible; }
+
     _setFocus(sid) {
         this._focusSid = sid;
         const s = this._sugById(sid);
@@ -955,13 +1040,13 @@ export class FeatureEditor extends Emitter {
     }
 
     _focusNextOpen(afterSid) {
-        const open = this._sug.filter(s => s.status === 'open');
+        const open = this._sug.filter(s => s.status === 'open' && this._sugVisible(s));
         const next = open.find(s => s.sid > afterSid) || open[0] || null;
         this._focusSid = next ? next.sid : null;
     }
 
     _resolveSug(which) {
-        if (which === 'all') return this._sug.filter(s => s.status === 'open');
+        if (which === 'all') return this._sug.filter(s => s.status === 'open' && this._sugVisible(s));
         if (which === 'focused') { const s = this._sugById(this._focusSid); return s && s.status === 'open' ? [s] : []; }
         const set = new Set(_asArray(which));
         return this._sug.filter(s => set.has(s.sid) && s.status === 'open');
@@ -969,6 +1054,12 @@ export class FeatureEditor extends Emitter {
 }
 
 function _asArray(v) { return v == null ? [] : (Array.isArray(v) ? v : [v]); }
+
+/** `suggestions` na forma de vários sugestores: lista não vazia de {source, features|minutiae|cores|deltas} (uma minúcia solta não tem `source`). */
+function _isSuggestionSets(v) {
+    return Array.isArray(v) && v.length > 0 && v.every(e => e && typeof e === 'object' && !Array.isArray(e) && 'source' in e
+        && ('features' in e || 'minutiae' in e || 'cores' in e || 'deltas' in e));
+}
 
 function _strip(o) {
     const out = {};
