@@ -186,6 +186,40 @@ acertam o ponto com a imagem girada ou espelhada. `exportSVGView()` sem rotaçã
 usa um `viewBox` na região visível (coordenadas da imagem, como antes); com rotação ou espelho,
 gera um SVG do tamanho do viewport com a transformação viva num `<g>`.
 
+### Rasterizar a vista (`rasterize`)
+
+`viewer.rasterize()` devolve um `<canvas>` NOVO com o que o viewer mostra, nos pixels da imagem: tamanho
+NATIVO (largura × altura da imagem, sem pan, zoom, rotação nem espelho). Serve para entregar a imagem "como
+está na tela" a um extrator, a um relatório ou a um teste, sem passar pelo SVG.
+
+```javascript
+const adj = new ImageAdjust(v, { server: (ops, src) => urlDoClahe(src) });
+v.setImageAdjust(adj);                       // o ImageAdjust não se registra sozinho: quem o cria o passa
+
+const cv = await v.rasterize();              // base + camada canvas 'foco', tamanho nativo
+const cv2 = await v.rasterize({ sobreposicoes: true });                         // + as camadas canvas/html visíveis
+const cv3 = await v.rasterize({ filtro: (camada) => camada.name === 'mascara' });  // só as que o filtro aceita
+const cv4 = await v.rasterize({ escala: 0.5 });                                  // metade do tamanho nativo
+cv.toBlob((png) => enviar(png), 'image/png');
+```
+
+| opção | padrão | efeito |
+| --- | --- | --- |
+| `filtro(camada) => boolean` | — | com ele, entram as camadas `canvas`/`html` visíveis que ele aceitar (recebe a `Layer`); a camada do `ImageAdjust` nunca é candidata (ela é a base) |
+| `sobreposicoes` | `false` | `true`: entram todas as camadas `canvas`/`html` visíveis (o mesmo que um `filtro` que aceita tudo) |
+| `escala` | `1` | fator sobre o tamanho nativo (`1` é a imagem pixel a pixel) |
+| `adjust` | o registrado | outro `ImageAdjust` do viewer, ou `null` para a imagem crua |
+
+- A base é o `ImageAdjust` (`pixels()`, o `ImageData` cru com CLAHE, brilho, contraste e gama aplicados, os mesmos que a tela
+  mostra) quando há um registrado (`viewer.setImageAdjust(adj)`, `viewer.imageAdjust`); sem ele, a imagem decodificada crua
+  (os valores do arquivo, sem gestão de cor). Se o realce tem alpha modulado (`setAlphaModulation`), ele entra sobre a original,
+  como na tela. `rasterize` espera o `ImageAdjust` assentar (`adj.ready`) antes de ler os pixels.
+- Por padrão entram só a base e a camada canvas de nome `foco` (o desfoque ou escurecimento da região de interesse, quando existe).
+- Com `sobreposicoes: true` ou com um `filtro`, as camadas entram na ordem de desenho (z), cada uma com a sua opacidade e o seu
+  `mix-blend-mode`; uma camada `html` entra pelos `<canvas>` que ela hospeda (o `OverlayLayer`, que respeita a opacidade de cada um).
+- As camadas SVG (minúcias, orientação, singularidades, medidas) nunca entram.
+- Rejeita (`Error`) se o viewer não tem imagem.
+
 ### Editores e ferramentas de perito
 
 Demonstração completa em `examples/editor.html` (exemplo SD258 000, latente e referência),
@@ -314,6 +348,8 @@ Main members:
 - `canvasContainer`
 - `imageSize`
 - `loadImage(src)` — resolves after the `<img>` fired its own `load`
+- `rasterize({ filtro?, sobreposicoes?, escala?, adjust? })` — `Promise<HTMLCanvasElement>` no tamanho nativo da imagem: a base (o `ImageAdjust` registrado ou a imagem crua) e a camada `foco`; com `sobreposicoes` ou `filtro`, as camadas canvas/html visíveis aceitas, em ordem de z e com a sua opacidade; as SVG nunca entram
+- `setImageAdjust(adj)` / `imageAdjust` — o `ImageAdjust` que dá a base do `rasterize()`
 - `registerTool(tool)` / `unregisterTool(tool)` — tools with `beginExport()`/`endExport()` that `exportSVG()` / `downloadSVG()` put in export mode (the mntviz editors and measure tools register themselves)
 - `setViewportSize(width, height)` — set a virtual canvas size without loading an image (useful for minutiae-only views)
 - `clear()`
