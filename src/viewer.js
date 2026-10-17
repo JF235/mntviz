@@ -65,6 +65,7 @@ export class Viewer {
         this._imgWaiter = null;
         this._tools = new Set();      // ferramentas com beginExport/endExport (ver registerTool)
         this._toolsExporting = false;
+        this._imageAdjust = null;     // o ImageAdjust que dá a base do rasterize() (ver setImageAdjust)
 
         this._buildDOM();
         /** Pilha de camadas (ver layer-stack.js). */
@@ -897,8 +898,116 @@ export class Viewer {
         URL.revokeObjectURL(url);
     }
 
+    /* ── Rasterização (o que o viewer mostra, em pixels da imagem) ───────────── */
+
+    /** O `ImageAdjust` deste viewer (ver `setImageAdjust`), ou null. */
+    get imageAdjust() { return this._imageAdjust; }
+
+    /**
+     * Registra o `ImageAdjust` que dá a base do `rasterize()` (o `ImageAdjust` não se registra sozinho:
+     * quem o cria o passa aqui). `null` tira. Só vale enquanto o `ImageAdjust` for deste viewer.
+     * @param {import('./image-adjust.js').ImageAdjust|null} adjust
+     */
+    setImageAdjust(adjust) {
+        this._imageAdjust = adjust && adjust.viewer === this ? adjust : null;
+        return this;
+    }
+
+    /**
+     * Rasteriza o que o viewer mostra num `<canvas>` NOVO no tamanho NATIVO da imagem (× `escala`), sem pan, zoom,
+     * rotação nem espelho, e sem as camadas SVG (minúcias, orientação, medidas: nunca entram).
+     *
+     *  - base: os `pixels()` do `ImageAdjust` registrado (`setImageAdjust` ou a opção `adjust`; o `ImageData` cru, com
+     *    CLAHE, brilho, contraste e gama já aplicados, na ordem em que a tela os aplica); sem `ImageAdjust`, a
+     *    imagem decodificada crua (os valores do arquivo, sem gestão de cor). Se o realce tem alpha modulado
+     *    (`setAlphaModulation`), ele entra sobre a original (`basePixels()`) como na tela.
+     *  - por padrão só a base e a camada canvas `foco` (o desfoque/escurecimento da região de interesse, se existir).
+     *  - com `sobreposicoes: true`, ou com um `filtro`, entram as camadas `canvas` e `html` VISÍVEIS (menos a do próprio
+     *    `ImageAdjust`) que o `filtro` aceitar (sem `filtro`, todas), na ordem de desenho (z), cada uma com a sua
+     *    opacidade e o seu `mix-blend-mode`. Uma camada `html` entra pelos canvases dela (o `OverlayLayer`).
+     *
+     * Espera o `ImageAdjust` assentar (`ready`) antes de ler os pixels. Rejeita se não há imagem.
+     * @param {{filtro?: (camada: import('./layer-stack.js').Layer) => boolean, sobreposicoes?: boolean, escala?: number,
+     *   adjust?: import('./image-adjust.js').ImageAdjust|null}} [opcoes]
+     *   `adjust`: usa este `ImageAdjust` (ou `null`: a imagem crua) em vez do registrado.
+     * @returns {Promise<HTMLCanvasElement>}
+     */
+    async rasterize({ filtro = null, sobreposicoes = false, escala = 1, adjust } = {}) {
+        const img = this._img;
+        const adj = adjust === undefined ? this._imageAdjust : adjust;
+        if (adj && adj.viewer !== this) throw new Error('mntviz: rasterize: o ImageAdjust é de outro viewer');
+        if (adj) {
+            // o realce assenta em cadeia (cada mudança emenda um passo em `ready`): espera a cadeia parar
+            for (let i = 0; i < 8; i++) { const r = adj.ready; await r; if (adj.ready === r) break; }
+        }
+        const nw = img.naturalWidth || 0, nh = img.naturalHeight || 0;
+        if (!nw || !nh) throw new Error('mntviz: rasterize: sem imagem');
+        const esc = Number(escala) > 0 ? Number(escala) : 1;
+        const W = Math.max(1, Math.round(nw * esc)), H = Math.max(1, Math.round(nh * esc));
+
+        // a base: os pixels do realce (sobre a original, se há alpha modulado) ou a imagem crua
+        const topo = adj ? adj.pixels() : null;
+        let original = adj ? adj.basePixels() : null;
+        if (!topo && !original) original = await this._decodeRaw();
+        const base = topo ? _blendOver(topo, original) : original;
+        const out = document.createElement('canvas');
+        out.width = W; out.height = H;
+        const g = out.getContext('2d', { willReadFrequently: true });
+        if (W === base.width && H === base.height) g.putImageData(base, 0, 0);
+        else {
+            const tmp = document.createElement('canvas');
+            tmp.width = base.width; tmp.height = base.height;
+            tmp.getContext('2d').putImageData(base, 0, 0);
+            g.imageSmoothingEnabled = true;
+            g.imageSmoothingQuality = 'high';
+            g.drawImage(tmp, 0, 0, W, H);
+        }
+
+        // as camadas que entram por cima, na ordem de desenho
+        const proprio = adj ? adj.layer : null;
+        const candidatas = this.layers.list().filter(l => l.kind !== 'svg' && l.visible && l !== proprio && l.name !== 'adjust');
+        const aceitas = typeof filtro === 'function' ? candidatas.filter(l => filtro(l))
+            : (sobreposicoes ? candidatas : candidatas.filter(l => l.name === 'foco'));
+        for (const layer of aceitas) {
+            const mode = _blendMode(layer.el.style.mixBlendMode);
+            const canvases = layer.kind === 'canvas' ? [layer.el] : [...layer.el.querySelectorAll('canvas')];
+            for (const cvs of canvases) {
+                if (!cvs.width || !cvs.height || cvs.style.display === 'none') continue;
+                const own = cvs === layer.el ? 1 : (cvs.style.opacity === '' ? 1 : Number(cvs.style.opacity));
+                const alpha = own * layer.opacity;
+                if (!(alpha > 0)) continue;
+                g.save();
+                g.globalAlpha = Math.min(1, alpha);
+                g.globalCompositeOperation = mode;
+                g.imageSmoothingEnabled = cvs.width !== W || cvs.height !== H;
+                g.imageSmoothingQuality = 'high';
+                g.drawImage(cvs, 0, 0, W, H);
+                g.restore();
+            }
+        }
+        return out;
+    }
+
+    /** @private A imagem do <img> decodificada crua (os valores do arquivo, sem gAMA/ICC), como o `ImageAdjust` 'raw'. */
+    async _decodeRaw() {
+        const img = this._img;
+        try { await img.decode(); } catch { /* sem decode: segue */ }
+        const w = img.naturalWidth, h = img.naturalHeight;
+        let src = img;
+        if (typeof createImageBitmap === 'function') {
+            src = await createImageBitmap(img, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(src, 0, 0);
+        if (src !== img && typeof src.close === 'function') src.close();
+        return ctx.getImageData(0, 0, w, h);
+    }
+
     /** Remove all event listeners and DOM created by this viewer. */
     destroy() {
+        this._imageAdjust = null;
         this.disableMinutiaeInspector();
         this.disableFieldProbe();
         if (this._pointPicker) { this._pointPicker.destroy(); this._pointPicker = null; }
@@ -1429,3 +1538,28 @@ function _formatSignedAngle(angle) {
     const n = Number(angle) || 0;
     return `${n >= 0 ? '+' : ''}${n.toFixed(1)}`;
 }
+
+/** `top` sobre `bottom` pelo alpha de `top` (ImageData; `bottom` pode ser null). Sem alpha parcial, devolve `top` como está (o mesmo ImageData). */
+function _blendOver(top, bottom) {
+    if (!top) return bottom;
+    if (!bottom || bottom.data.length !== top.data.length) return top;
+    const t = top.data;
+    let parcial = false;
+    for (let i = 3; i < t.length; i += 4) if (t[i] !== 255) { parcial = true; break; }
+    if (!parcial) return top;
+    const out = new ImageData(top.width, top.height);
+    const b = bottom.data, d = out.data;
+    for (let i = 0; i < t.length; i += 4) {
+        const a = t[i + 3];
+        d[i] = (t[i] * a + b[i] * (255 - a) + 127) / 255;
+        d[i + 1] = (t[i + 1] * a + b[i + 1] * (255 - a) + 127) / 255;
+        d[i + 2] = (t[i + 2] * a + b[i + 2] * (255 - a) + 127) / 255;
+        d[i + 3] = 255;
+    }
+    return out;
+}
+
+const _BLEND = new Set(['multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light',
+    'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity']);
+/** O `mix-blend-mode` do CSS como `globalCompositeOperation` do canvas (`normal` e o desconhecido: source-over). */
+function _blendMode(css) { return _BLEND.has(css) ? css : 'source-over'; }
