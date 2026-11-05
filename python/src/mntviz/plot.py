@@ -297,7 +297,7 @@ def _resolve_colormap(
     values: Sequence[float] | np.ndarray,
     expected_len: int,
 ) -> list[str]:
-    import matplotlib.cm as cm
+    import matplotlib
     import matplotlib.colors as mcolors
 
     vals = np.asarray(values, dtype=float)
@@ -305,7 +305,7 @@ def _resolve_colormap(
         raise ValueError(
             f"colormap_values length ({len(vals)}) must match minutiae count ({expected_len})"
         )
-    cmap = cm.get_cmap(cmap_name)
+    cmap = matplotlib.colormaps[cmap_name]
     vmin, vmax = float(vals.min()), float(vals.max())
     if vmin == vmax:
         norm_vals = np.full_like(vals, 0.5)
@@ -332,7 +332,7 @@ def _array_to_rgba_uri(
     alpha_modulated: bool,
 ) -> str:
     """Convert a 2D array to an RGBA PNG data URI using a matplotlib colormap."""
-    import matplotlib.cm as cm
+    import matplotlib
     import matplotlib.colors as mcolors
 
     arr = np.asarray(data, dtype=float)
@@ -343,7 +343,7 @@ def _array_to_rgba_uri(
     hi = float(arr.max()) if vmax is None else vmax
 
     norm = mcolors.Normalize(vmin=lo, vmax=hi)
-    cmap = cm.get_cmap(cmap_name)
+    cmap = matplotlib.colormaps[cmap_name]
     rgba = cmap(norm(arr))  # (H, W, 4) float [0, 1]
 
     if alpha_modulated:
